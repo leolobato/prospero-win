@@ -25,6 +25,7 @@ static int clone_fails;
 static int connect_calls;
 static int option_calls;
 static int close_calls;
+static int option_fails;
 
 int ps5log_ps5_socket(int domain, int type, int protocol)
 {
@@ -56,6 +57,7 @@ int ps5log_ps5_setsockopt(int socket, int level, int option,
     assert(size == sizeof(uint32_t));
     assert(option == 0x1105 || option == 0x1106 || option == 0x1109);
     option_calls++;
+    if (option_fails) { errno = EACCES; return -1; }
     return 0;
 }
 
@@ -118,6 +120,7 @@ static void reset_case(void)
 {
     sent_size = received_size = received_at = 0;
     clone_calls = clone_fails = connect_calls = option_calls = close_calls = 0;
+    option_fails = 0;
     memset(sent, 0, sizeof(sent));
     memset(received, 0, sizeof(received));
 }
@@ -148,7 +151,11 @@ int main(void)
     reset_case();
     queue_message(LAPY_ELEVATION_PREPARE, LAPY_ELEVATION_OK);
     queue_message(LAPY_ELEVATION_RESPONSE, LAPY_ELEVATION_OK);
-    assert(pw_lapy_elevation_request(TEST_PID) == 0);
+    struct pw_lapy_elevation_diagnostics diagnostics = {"stale", 999, 1, 999};
+    assert(pw_lapy_elevation_request_at_detailed(TEST_PID, PW_LAPY_HELPER_PATH, &diagnostics) == 0);
+    assert(strcmp(diagnostics.stage, "complete") == 0);
+    assert(diagnostics.helper_status_valid && diagnostics.helper_status == LAPY_ELEVATION_OK);
+    assert(diagnostics.error == 0);
     assert(clone_calls == 1 && connect_calls == 1 && option_calls == 3);
     assert(close_calls == 1);
     assert_request_frame();
@@ -180,11 +187,68 @@ int main(void)
     errno = 0;
     assert(pw_lapy_elevation_request(TEST_PID) == -1);
     assert(errno == EPERM && clone_calls == 1 && close_calls == 1);
+
     memcpy(&prepared, sent + 7 + sizeof(prepared), sizeof(prepared));
     assert(prepared.kind == LAPY_ELEVATION_PREPARED);
     assert(prepared.status == LAPY_ELEVATION_PREPARE_FAILED);
 
-    unlink(PW_LAPY_HELPER_PATH);
+    reset_case();
+    option_fails = 1;
+    assert(pw_lapy_elevation_request_at_detailed(TEST_PID, PW_LAPY_HELPER_PATH, &diagnostics) == -1);
+    assert(errno == EACCES && diagnostics.error == EACCES);
+    assert(strcmp(diagnostics.stage, "socket-options") == 0);
+    assert(!diagnostics.helper_status_valid && connect_calls == 0 && clone_calls == 0);
+
+    /* The same errno from the helper preserves a distinct, validated status. */
+    reset_case();
+    queue_message(LAPY_ELEVATION_RESPONSE, LAPY_ELEVATION_APPLY_FAILED);
+    assert(pw_lapy_elevation_request_at_detailed(TEST_PID, PW_LAPY_HELPER_PATH, &diagnostics) == -1);
+    assert(errno == EACCES && diagnostics.error == EACCES);
+    assert(strcmp(diagnostics.stage, "helper-result") == 0);
+    assert(diagnostics.helper_status_valid && diagnostics.helper_status == LAPY_ELEVATION_APPLY_FAILED);
+    assert(clone_calls == 0);
+
+    reset_case();
+    queue_message(LAPY_ELEVATION_PREPARE, LAPY_ELEVATION_OK);
+    struct lapy_elevation_message wrong_pid;
+    memcpy(&wrong_pid, received, sizeof(wrong_pid));
+    wrong_pid.pid++;
+    memcpy(received, &wrong_pid, sizeof(wrong_pid));
+    assert(pw_lapy_elevation_request_at_detailed(TEST_PID, PW_LAPY_HELPER_PATH, &diagnostics) == -1);
+    assert(errno == EPROTO && !diagnostics.helper_status_valid && clone_calls == 0);
+    assert(strcmp(diagnostics.stage, "validate-prepare") == 0);
+
+    reset_case();
+    assert(pw_lapy_elevation_request_at_detailed(TEST_PID, PW_LAPY_HELPER_PATH, &diagnostics) == -1);
+    assert(errno == ECONNRESET && diagnostics.error == ECONNRESET);
+    assert(strcmp(diagnostics.stage, "receive-prepare") == 0 && !diagnostics.helper_status_valid);
+
+    /* A terminal OK cannot overrule the title's own failed credential clone. */
+    reset_case();
+    clone_fails = 1;
+    queue_message(LAPY_ELEVATION_PREPARE, LAPY_ELEVATION_OK);
+    queue_message(LAPY_ELEVATION_RESPONSE, LAPY_ELEVATION_OK);
+    errno = 0;
+    assert(pw_lapy_elevation_request_at_detailed(TEST_PID, PW_LAPY_HELPER_PATH, &diagnostics) == -1);
+    assert(errno == EPERM && clone_calls == 1 && close_calls == 1);
+    assert(strcmp(diagnostics.stage, "credential-clone") == 0 && diagnostics.error == EPERM);
+    assert(diagnostics.helper_status_valid && diagnostics.helper_status == LAPY_ELEVATION_OK);
+
+    /* A grant may invalidate app0; a retry can use the verified stable source. */
+    const char *stable_helper = "/tmp/pw_lapy_test_stable_helper";
+    assert(rename(PW_LAPY_HELPER_PATH, stable_helper) == 0);
+    reset_case();
+    queue_message(LAPY_ELEVATION_PREPARE, LAPY_ELEVATION_OK);
+    queue_message(LAPY_ELEVATION_RESPONSE, LAPY_ELEVATION_OK);
+    assert(pw_lapy_elevation_request_at(TEST_PID, stable_helper) == 0);
+    assert(clone_calls == 1 && close_calls == 1);
+    assert_request_frame();
+    reset_case();
+    assert(pw_lapy_elevation_request_at(TEST_PID, NULL) == -1);
+    assert(errno == EINVAL && connect_calls == 0);
+    assert(pw_lapy_elevation_request_at(TEST_PID, "relative.elf") == -1);
+    assert(errno == EINVAL && connect_calls == 0);
+    unlink(stable_helper);
     puts("lapy elevation: fragmented I/O, cooperative handshake, and fail-closed replies passed");
     return 0;
 }

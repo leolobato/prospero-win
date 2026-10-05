@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #define _POSIX_C_SOURCE 200809L
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE
+#endif
 #include "pw_lapy_elevation.h"
 #include "lapy_elevation_protocol.h"
 #include "ps5log/ps5log_ps5_net.h"
@@ -93,15 +96,35 @@ static int status_errno(uint32_t status)
     }
 }
 
-static int exchange(int socket, struct lapy_elevation_message *request)
+static void set_stage(struct pw_lapy_elevation_diagnostics *diagnostics, const char *stage)
+{
+    if (diagnostics) diagnostics->stage = stage;
+}
+
+static void observe_status(struct pw_lapy_elevation_diagnostics *diagnostics,
+                           const struct lapy_elevation_message *message)
+{
+    if (diagnostics) {
+        diagnostics->helper_status = message->status;
+        diagnostics->helper_status_valid = 1;
+    }
+}
+
+static int exchange(int socket, struct lapy_elevation_message *request,
+                    struct pw_lapy_elevation_diagnostics *diagnostics)
 {
     struct lapy_elevation_message message;
-    if (send_all(socket, request, sizeof(*request)) ||
-        receive_all(socket, &message, sizeof(message))) {
+    set_stage(diagnostics, "send-request");
+    if (send_all(socket, request, sizeof(*request))) return -1;
+    set_stage(diagnostics, "receive-prepare");
+    if (receive_all(socket, &message, sizeof(message))) {
         errno = errno ? errno : EIO;
         return -1;
     }
+    set_stage(diagnostics, "validate-prepare");
     if (message_matches(&message, request, LAPY_ELEVATION_RESPONSE)) {
+        observe_status(diagnostics, &message);
+        set_stage(diagnostics, "helper-result");
         /* A successful response is only valid after PREPARE/PREPARED. Without
          * that handshake the target credential was never cloned natively. */
         if (message.status == LAPY_ELEVATION_OK) {
@@ -115,7 +138,9 @@ static int exchange(int socket, struct lapy_elevation_message *request)
         errno = EPROTO;
         return -1;
     }
+    observe_status(diagnostics, &message);
     if (message.status != LAPY_ELEVATION_OK) {
+        set_stage(diagnostics, "helper-prepare");
         errno = status_errno(message.status);
         return -1;
     }
@@ -124,21 +149,33 @@ static int exchange(int socket, struct lapy_elevation_message *request)
      * after the helper has validated the requested PID and title. */
     struct lapy_elevation_message prepared = *request;
     prepared.kind = LAPY_ELEVATION_PREPARED;
+    set_stage(diagnostics, "credential-clone");
     if (seteuid(geteuid()) != 0) prepared.status = LAPY_ELEVATION_PREPARE_FAILED;
-    if (send_all(socket, &prepared, sizeof(prepared)) ||
-        receive_all(socket, &message, sizeof(message))) {
+    set_stage(diagnostics, "send-prepared");
+    if (send_all(socket, &prepared, sizeof(prepared))) return -1;
+    set_stage(diagnostics, "receive-result");
+    if (receive_all(socket, &message, sizeof(message))) {
         errno = errno ? errno : EIO;
         return -1;
     }
+    set_stage(diagnostics, "validate-result");
     if (!message_matches(&message, request, LAPY_ELEVATION_RESPONSE)) {
         errno = EPROTO;
         return -1;
     }
+    observe_status(diagnostics, &message);
+    if (prepared.status != LAPY_ELEVATION_OK) {
+        set_stage(diagnostics, "credential-clone");
+        errno = EPERM;
+        return -1;
+    }
+    set_stage(diagnostics, "helper-result");
     errno = status_errno(message.status);
     return message.status == LAPY_ELEVATION_OK ? 0 : -1;
 }
 
-int pw_lapy_elevation_request(int32_t pid)
+int pw_lapy_elevation_request_at_detailed(int32_t pid, const char *helper_path,
+                                        struct pw_lapy_elevation_diagnostics *diagnostics)
 {
     struct stat st;
     struct pw_lapy_sockaddr_in address;
@@ -151,9 +188,16 @@ int pw_lapy_elevation_request(int32_t pid)
     uint8_t buffer[4096];
     int helper = -1, socket = -1, result = -1, saved_errno = EIO;
 
-    if (pid <= 1) { errno = EINVAL; return -1; }
-    helper = open(PW_LAPY_HELPER_PATH, O_RDONLY);
-    if (helper < 0) return -1;
+    if (diagnostics) {
+        memset(diagnostics, 0, sizeof(*diagnostics));
+        diagnostics->stage = "validate-helper";
+    }
+    if (pid <= 1 || !helper_path || helper_path[0] != '/' ||
+        strlen(helper_path) > 4096) { saved_errno = EINVAL; goto done; }
+    set_stage(diagnostics, "open-helper");
+    helper = open(helper_path, O_RDONLY | O_NOFOLLOW);
+    if (helper < 0) { saved_errno = errno ? errno : EIO; goto done; }
+    set_stage(diagnostics, "stat-helper");
     if (fstat(helper, &st)) {
         saved_errno = errno ? errno : EIO;
         goto done;
@@ -166,8 +210,10 @@ int pw_lapy_elevation_request(int32_t pid)
         saved_errno = EFBIG;
         goto done;
     }
+    set_stage(diagnostics, "socket");
     socket = ps5log_ps5_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (socket < 0) { saved_errno = errno ? errno : EIO; goto done; }
+    set_stage(diagnostics, "socket-options");
     const int options[] = {0x1105, 0x1106, 0x1109};
     for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); ++i) {
         if (ps5log_ps5_setsockopt(socket, 0xffff, options[i], &timeout,
@@ -181,12 +227,14 @@ int pw_lapy_elevation_request(int32_t pid)
     address.family = AF_INET;
     address.port = (uint16_t)((PW_LAPY_PORT << 8) | (PW_LAPY_PORT >> 8));
     address.address = UINT32_C(0x0100007f);
+    set_stage(diagnostics, "connect");
     if (ps5log_ps5_connect(socket, (const struct sockaddr *)&address,
                            sizeof(address)) < 0) {
         saved_errno = errno ? errno : EIO;
         goto done;
     }
 
+    set_stage(diagnostics, "stream-helper");
     for (;;) {
         ssize_t count = read(helper, buffer, sizeof(buffer));
         if (count == 0) break;
@@ -196,12 +244,27 @@ int pw_lapy_elevation_request(int32_t pid)
             goto done;
         }
     }
-    if (exchange(socket, &request) == 0) result = 0;
+    if (exchange(socket, &request, diagnostics) == 0) result = 0;
     else saved_errno = errno ? errno : EIO;
 
 done:
     if (socket >= 0) (void)ps5log_ps5_close(socket);
     if (helper >= 0) (void)close(helper);
     if (result) errno = saved_errno;
+    if (diagnostics) {
+        diagnostics->error = result ? saved_errno : 0;
+        if (!result) diagnostics->stage = "complete";
+    }
     return result;
+}
+
+int pw_lapy_elevation_request(int32_t pid)
+{
+    return pw_lapy_elevation_request_at(pid, PW_LAPY_HELPER_PATH);
+}
+
+
+int pw_lapy_elevation_request_at(int32_t pid, const char *helper_path)
+{
+    return pw_lapy_elevation_request_at_detailed(pid, helper_path, NULL);
 }
