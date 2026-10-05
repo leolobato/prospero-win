@@ -5,9 +5,9 @@
  * The title runs one game per process (src/pw_wine_launch.h). Started with
  * no game it shows the launcher, without loading Wine; choosing a game
  * restarts the title with sceSystemServiceLoadExec and the game's
- * arguments. Holding Options+Create in a game sends it Alt+F4; when Wine
- * exits, or the game does not close in time, the title restarts into the
- * launcher.
+ * arguments. Holding Options+Create in a game sends it Alt+F4. The generic
+ * title restarts its launcher after Wine exits; a descriptor-backed game
+ * title records the session and returns to Home.
  *
  * The launcher and a game request the /data mount, where the library is.
  * A game then loads ntdll.prx, prepares Wine's
@@ -30,6 +30,8 @@
 #include "../src/pw_wine_start.h"
 #include "../src/pw_launcher_render.h"
 #include "../src/pw_script_input.h"
+#include "../src/pw_title_launch.h"
+#include "../src/pw_title_session.h"
 #include "../src/pw_wine_launch.h"
 #include "pw_data_mount.h"
 #include "pw_audio_ps5.h"
@@ -46,6 +48,8 @@
 
 #include <pthread.h>
 #include <signal.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -56,7 +60,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef PW_TITLE_ID
 #define PW_TITLE_ID "PPSA99995"
+#endif
 #define PW_APP_NAME "prospero-win-wine64"
 
 /* Where the title's Wine runtime can be seen: /app0 inside the sandbox;
@@ -218,7 +224,14 @@ static PwWineLibrary library;
 static PwWineApp catalog[PW_WINE_LIBRARY_MAX];
 static char catalog_detail[PW_WINE_LIBRARY_MAX][64];
 static size_t catalog_count;
+static const PwGameProfile *per_game_profile;
 static const char *library_root = PW_WINE64_ROOT_SANDBOX;
+static char per_game_library_root[sizeof(((PwTitleLaunch *)0)->data_root) + sizeof("/library")];
+static PwTitleLaunch title_launch;
+static PwTitleSession title_session;
+static const char *title_session_argument;
+static int per_game_mode;
+static volatile int per_game_running;
 
 /* The largest desktop shown: Wine's PS5 driver defaults to 800x600
  * (WINE_PS5_DESKTOP overrides, 1920x1080 for Warcraft III); bigger frames
@@ -318,6 +331,64 @@ static uint64_t now_ns(void)
 static uint64_t calibration_clock(void *context) { (void)context; return now_ns(); }
 static uint64_t calibration_tsc(void *context) { (void)context; return __builtin_ia32_rdtsc(); }
 
+/* Read the immutable per-game descriptor while this title's /app0 is still
+ * visible. 0 means the generic title has no descriptor, 1 means per-game
+ * mode, and -1 means a present descriptor was refused. */
+static int load_title_descriptor(char *error, size_t error_size)
+{
+    static char bytes[PW_TITLE_LAUNCH_MAX_BYTES + 1];
+    static const char path[] = "/app0/game-launch.json";
+    size_t used = 0;
+    int fd = open(path, O_RDONLY);
+
+    if (fd < 0) {
+        if (errno == ENOENT) return 0;
+        snprintf(error, error_size, "cannot open descriptor: %s", strerror(errno));
+        return -1;
+    }
+    for (;;) {
+        ssize_t got = read(fd, bytes + used, sizeof(bytes) - used);
+        if (got < 0) {
+            snprintf(error, error_size, "cannot read descriptor: %s", strerror(errno));
+            close(fd);
+            return -1;
+        }
+        if (!got) break;
+        used += (size_t)got;
+        if (used == sizeof(bytes)) {
+            snprintf(error, error_size, "descriptor exceeds %u bytes",
+                     (unsigned)PW_TITLE_LAUNCH_MAX_BYTES);
+            close(fd);
+            return -1;
+        }
+    }
+    close(fd);
+    if (pw_title_launch_parse(bytes, used, PW_TITLE_ID, &title_launch, error, error_size) != 0)
+        return -1;
+    return 1;
+}
+
+static int per_game_argument(int argc, char **argv, char *error, size_t error_size)
+{
+    const char *argument = NULL;
+
+    for (int i = 0; i < argc; i++) {
+        if (!argv || !argv[i] || !argv[i][0]) continue;
+        if (argument) {
+            snprintf(error, error_size, "per-game launch accepts one session argument");
+            return -1;
+        }
+        argument = argv[i];
+    }
+    if (argument && (strncmp(argument, "session=", 8) ||
+                     !pw_title_session_id_valid(argument + 8))) {
+        snprintf(error, error_size, "per-game launch rejects argument %.32s", argument);
+        return -1;
+    }
+    title_session_argument = argument;
+    return 0;
+}
+
 /* ---- Wine stderr -> ps5log, one line per text line -------------------- */
 
 static char sink_line[1024];
@@ -348,6 +419,21 @@ static void wine_output_sink(const char *str, size_t len)
  * of the low range PE32 executables occupy, and libc's heap is too small. */
 static PwWineFrameBox frames;
 static uint8_t *frame_shown;
+
+/* A created Wine thread is still bootstrap: a missing executable or DLL can
+ * fail there. Only validated game presentation (a nonblank frame actually
+ * shown, or sustained Vulkan presentation) advances the durable record. */
+static void observe_game_start(void)
+{
+    int expected = 0;
+
+    if (!per_game_mode || !__atomic_compare_exchange_n(&per_game_running, &expected, 1, 0,
+                                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;
+    int session_status = pw_title_session_running(&title_session);
+    PS5LOG_LOG("PW_WINE64 session id=%s phase=running evidence=graphics status=%d",
+               title_session.session_id, session_status);
+}
 
 static int wine_present(void *context, const void *bgra, uint32_t width, uint32_t height,
                         uint32_t stride)
@@ -520,8 +606,10 @@ static int vulkan_frames_show(VulkanFrames *vf, uint64_t *sequence, int scaling,
     if (!vf->tiled) return 0;
     if (!vf->idle()) {
         if (!loading->presenting_since) loading->presenting_since = now;
-        else if (now - loading->presenting_since >= PW_WINE64_PRESENTING_MS * 1000000ull)
+        else if (now - loading->presenting_since >= PW_WINE64_PRESENTING_MS * 1000000ull) {
             loading_done(loading, "vulkan");
+            observe_game_start();
+        }
         return 0;
     }
     loading->presenting_since = 0;
@@ -611,6 +699,11 @@ static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reas
     static char storage[2 * PW_WINE_LAUNCH_PATH_MAX + 64];
     char *next[PW_WINE_LAUNCH_ARGS];
 
+    if (per_game_mode) {
+        PS5LOG_LOG("PW_WINE64 per-game title will exit reason=%s", reason);
+        return;
+    }
+
     if (!pw_wine_launch_argv(app, cycle, storage, sizeof(storage), next, PW_WINE_LAUNCH_ARGS)) {
         PS5LOG_LOG("PW_WINE64 restart refused: arguments do not fit");
         return;
@@ -625,12 +718,20 @@ static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reas
     }
 }
 
-/* Wine ends the process with exit() when its last program ends: go back to
- * the launcher. */
+/* Wine ends the process with exit() when its last program ends. A generic
+ * title returns to its catalog; a per-game title records the observation and
+ * returns to Home. The callback does not carry Wine's exit status. */
 static void on_exit_report(void)
 {
     PS5LOG_LOG("PW_WINE64 exit sink_calls=%lu", sink_calls);
-    restart_title(NULL, launch.cycle + 1u, "wine-exit");
+    if (per_game_mode) {
+        if (__atomic_load_n(&per_game_running, __ATOMIC_ACQUIRE))
+            (void)pw_title_session_exited(&title_session, 0, 0);
+        else (void)pw_title_session_failed(&title_session, 0, 0);
+        pw_title_session_close(&title_session);
+    } else {
+        restart_title(NULL, launch.cycle + 1u, "wine-exit");
+    }
     pw_diagnostics_close("wine64-exit");
 }
 
@@ -641,17 +742,57 @@ static void on_exit_report(void)
 static int open_library(void)
 {
     PwDataMountResult mount;
+    char session_error[160];
+    int profile_path_refused = 0;
     int status;
 
     status = pw_data_mount_request(&mount);
-    if (status == 0) library_root = PW_WINE64_ROOT_DATA;
+    if (status == 0 && !per_game_mode) library_root = PW_WINE64_ROOT_DATA;
     PS5LOG_LOG("PW_WINE64 data_mount data_before=%d elevated_before=%d helper_completed=%d "
-               "helper_errno=%d data_after=%d elevated_after=%d waited_ms=%d settled_ms=%d root=%s",
+               "helper_errno=%d credential_errno=%d data_after=%d elevated_after=%d waited_ms=%d settled_ms=%d root=%s",
                mount.data_before, mount.elevated_before, mount.helper_completed,
-               mount.helper_errno, mount.data_after, mount.elevated_after, mount.waited_ms,
+               mount.helper_errno, mount.credential_errno, mount.data_after, mount.elevated_after, mount.waited_ms,
                mount.settled_ms, status == 0 ? library_root : "unavailable");
     if (status != 0) return -1;
+    if (per_game_mode) {
+        char profiles[PW_TITLE_SESSION_PATH_SIZE], prefixes[PW_TITLE_SESSION_PATH_SIZE];
+        char input[PW_TITLE_SESSION_PATH_SIZE];
+
+        if (!pw_title_path_is_directory(title_launch.data_root)) {
+            PS5LOG_LOG("PW_WINE64 per-game data root refused root=%s errno=%d",
+                       title_launch.data_root, errno);
+            return -1;
+        }
+        if (snprintf(per_game_library_root, sizeof(per_game_library_root), "%s/library",
+                     title_launch.data_root) >= (int)sizeof(per_game_library_root))
+            return -1;
+        library_root = per_game_library_root;
+        if (pw_title_session_start(&title_session, &title_launch, title_session_argument,
+                                   session_error, sizeof(session_error)) != 0) {
+            PS5LOG_LOG("PW_WINE64 session start refused reason=%s", session_error);
+            return -1;
+        }
+        PS5LOG_LOG("PW_WINE64 session id=%s origin=%s phase=starting",
+                   title_session.session_id, title_session.origin);
+        if (snprintf(profiles, sizeof(profiles), "%s/profiles", library_root) >=
+                (int)sizeof(profiles) ||
+            snprintf(prefixes, sizeof(prefixes), "%s/prefixes", library_root) >=
+                (int)sizeof(prefixes) ||
+            snprintf(input, sizeof(input), "%s/input", library_root) >= (int)sizeof(input) ||
+            !pw_title_path_is_directory(library_root) ||
+            !pw_title_path_is_directory(profiles) ||
+            !pw_title_path_is_directory(prefixes) || !pw_title_path_is_directory(input)) {
+            PS5LOG_LOG("PW_WINE64 managed library path refused root=%s", library_root);
+            (void)pw_title_session_failed(&title_session, 0, 0);
+            return -1;
+        }
+    }
     status = pw_wine_library_load(&library, library_root);
+    if (status != PW_OK && per_game_mode) {
+        (void)pw_title_session_failed(&title_session, 0, 0);
+        PS5LOG_LOG("PW_WINE64 library refused status=%s", pw_result_name(status));
+        return -1;
+    }
     catalog_count = 0;
     for (uint32_t i = 0; i < library.count; i++) {
         const PwWineLibraryEntry *entry = &library.entries[i];
@@ -661,6 +802,19 @@ static int open_library(void)
             continue;
         }
         const PwGameProfile *game = &entry->profile;
+        if (per_game_mode && strcmp(game->app.id, title_launch.default_profile_id)) continue;
+        if (per_game_mode) {
+            char profile_path[PW_TITLE_SESSION_PATH_SIZE];
+
+            if (snprintf(profile_path, sizeof(profile_path), "%s/profiles/%s", library_root,
+                         entry->file) >= (int)sizeof(profile_path) ||
+                !pw_title_path_is_regular_file(profile_path)) {
+                PS5LOG_LOG("PW_WINE64 default profile path refused file=%s", entry->file);
+                profile_path_refused = 1;
+                continue;
+            }
+            per_game_profile = game;
+        }
         if (game->display.width)
             snprintf(catalog_detail[catalog_count], sizeof(catalog_detail[0]), "%s  %s  %ux%u",
                      game->app.architecture == PW_APP_ARCH_PE64 ? "pe64" : "pe32",
@@ -675,6 +829,12 @@ static int open_library(void)
         catalog[catalog_count] = (PwWineApp){ game->app.id, game->app.name,
                                               catalog_detail[catalog_count], game->app.executable };
         catalog_count++;
+    }
+    if (per_game_mode && (catalog_count != 1 || profile_path_refused)) {
+        PS5LOG_LOG("PW_WINE64 default profile refused id=%s matches=%u",
+                   title_launch.default_profile_id, (unsigned)catalog_count);
+        (void)pw_title_session_failed(&title_session, 0, 0);
+        return -1;
     }
     PS5LOG_LOG("PW_WINE64 library status=%s listed_by=%d scan_errno=%d entries=%u games=%u "
                    "root=%s", pw_result_name(status), library.listed_by, library.scan_error,
@@ -954,18 +1114,40 @@ int main(int argc, char **argv)
     PwPadPs5Ops pad_ops;
     int status, video_status = PW_ERR_STATE, pad_status = PW_ERR_STATE, hid_status = PW_ERR_STATE;
     uint64_t close_requested = 0, combo_ticks = 0, started = now_ns();
+    char title_error[192];
 
     ps5log_config_defaults(&log_config);
     if (ps5log_load_config(ps5log_default_conf_paths, ps5log_default_conf_path_count,
                            &log_config, NULL) == 0)
         ps5log_init(&log_config, PW_TITLE_ID, PW_APP_NAME, now_ns());
-    pw_hid_ps5_preload(hid_log);   /* before the /data grant changes the title's credentials */
-    if (open_library() != 0) {
-        PS5LOG_LOG("PW_WINE64 startup blocked reason=data-helper-incomplete");
-        ps5log_close("data-helper-incomplete");
+    status = load_title_descriptor(title_error, sizeof(title_error));
+    if (status < 0) {
+        PS5LOG_LOG("PW_WINE64 startup blocked reason=invalid-descriptor detail=%s", title_error);
+        ps5log_close("invalid-descriptor");
         return 1;
     }
-    (void)pw_wine_launch_parse(argc, argv, catalog, catalog_count, &launch);
+    per_game_mode = status == 1;
+    if (per_game_mode && per_game_argument(argc, argv, title_error, sizeof(title_error)) != 0) {
+        PS5LOG_LOG("PW_WINE64 startup blocked reason=invalid-per-game-arguments detail=%s",
+                   title_error);
+        ps5log_close("invalid-per-game-arguments");
+        return 1;
+    }
+    pw_hid_ps5_preload(hid_log);   /* before the /data grant changes the title's credentials */
+    if (open_library() != 0) {
+        PS5LOG_LOG("PW_WINE64 startup blocked reason=%s",
+                   per_game_mode ? "per-game-bootstrap" : "data-helper-incomplete");
+        ps5log_close(per_game_mode ? "per-game-bootstrap" : "data-helper-incomplete");
+        return 1;
+    }
+    if (per_game_mode) {
+        memset(&launch, 0, sizeof(launch));
+        launch.mode = PW_WINE_LAUNCH_GAME;
+        launch.app = &catalog[0];
+        snprintf(launch.executable, sizeof(launch.executable), "%s", catalog[0].executable);
+    } else {
+        (void)pw_wine_launch_parse(argc, argv, catalog, catalog_count, &launch);
+    }
     (void)pw_diagnostics_open(library_root, PW_BUILD_ID,
                               launch.app ? launch.app->id : "launcher", launch.cycle);
     PS5LOG_LOG("PW_WINE64 args argc=%d mode=%s profile=%s cycle=%u refused=%u", argc,
@@ -976,13 +1158,49 @@ int main(int argc, char **argv)
     /* The game's profile: its prefix, desktop, scaling and input. A bare
      * path= runs in the default prefix with nothing bound. */
     pw_game_input_init(&game_input);
-    game = launch.app ? pw_wine_library_find(&library, launch.app->id) : NULL;
+    game = per_game_mode ? per_game_profile :
+           (launch.app ? pw_wine_library_find(&library, launch.app->id) : NULL);
     if (game && strcmp(game->app.prefix, "default"))
         snprintf(prefix, sizeof(prefix), "%s/prefixes/%s", library_root, game->app.prefix);
     else
         snprintf(prefix, sizeof(prefix), "%s/prefix", library_root);
     snprintf(radv_cache, sizeof(radv_cache), "%s/cache/radv", library_root);
+    if (per_game_mode && (!game || strcmp(game->app.prefix, "game") ||
+                          !pw_title_path_is_directory(prefix))) {
+        PS5LOG_LOG("PW_WINE64 per-game prefix refused profile=%s prefix=%s",
+                   game ? game->app.id : "-", prefix);
+        (void)pw_title_session_failed(&title_session, 0, 0);
+        pw_title_session_close(&title_session);
+        pw_diagnostics_close("per-game-prefix-refused");
+        return 1;
+    }
+    if (per_game_mode) {
+        char executable_path[PW_TITLE_SESSION_PATH_SIZE];
+
+        if (pw_wine_launch_host_dir(prefix, launch.executable, executable_path,
+                                    sizeof(executable_path)) != 0 ||
+            !pw_title_path_is_regular_file(executable_path)) {
+            PS5LOG_LOG("PW_WINE64 per-game executable refused exe=%s", launch.executable);
+            (void)pw_title_session_failed(&title_session, 0, 0);
+            pw_title_session_close(&title_session);
+            pw_diagnostics_close("per-game-executable-refused");
+            return 1;
+        }
+    }
     if (game) {
+        if (per_game_mode && game->input.preset[0]) {
+            char input_path[PW_TITLE_SESSION_PATH_SIZE];
+
+            if (snprintf(input_path, sizeof(input_path), "%s/input/%s.input", library_root,
+                         game->input.preset) >= (int)sizeof(input_path) ||
+                !pw_title_path_is_regular_file(input_path)) {
+                PS5LOG_LOG("PW_WINE64 per-game input refused preset=%s", game->input.preset);
+                (void)pw_title_session_failed(&title_session, 0, 0);
+                pw_title_session_close(&title_session);
+                pw_diagnostics_close("per-game-input-refused");
+                return 1;
+            }
+        }
         int input_status = pw_wine_library_input(game, library_root, &game_input);
         scaling = (int)game->display.scaling;
         if (game->display.view == PW_GAME_VIEW_DESKTOP) snprintf(view, sizeof(view), "desktop");
@@ -1361,6 +1579,8 @@ int main(int argc, char **argv)
                 if (show_scaled(&video, &view, scaling) == PW_OK) {
                     shown++;          /* present waits for the vblank */
                     presented = 1;
+                    if (!pw_spinner_frame_blank(view.pixels, view.width, view.height, view.stride))
+                        observe_game_start();
                 }
             } else if ((next = loading_frame(&loading, now, started, &spinner)) &&
                        pw_videoout_ps5_present_scaled(&video, next, PW_PRESENT_SCALE_FIT, 0) == PW_OK) {
@@ -1395,6 +1615,7 @@ int main(int argc, char **argv)
         }
         if (close_requested && now - close_requested >= (uint64_t)PW_WINE64_CLOSE_WAIT_S * 1000000000u) {
             PS5LOG_LOG("PW_WINE64 close timeout: leaving the game");
+            if (per_game_mode) (void)pw_title_session_failed(&title_session, 0, 0);
             restart_title(NULL, launch.cycle + 1u, "close-timeout");
             break;
         }
@@ -1465,7 +1686,11 @@ int main(int argc, char **argv)
         }
     }
     PS5LOG_LOG("PW_WINE64 done status=%d stage=%d", status, start.stage);
-    if (status != PW_OK) restart_title(NULL, launch.cycle + 1u, "start-failed");
+    if (status != PW_OK) {
+        if (per_game_mode) (void)pw_title_session_failed(&title_session, 1, status);
+        restart_title(NULL, launch.cycle + 1u, "start-failed");
+    }
+    if (per_game_mode) pw_title_session_close(&title_session);
     pw_diagnostics_close(status == PW_OK ? "wine64-restart-failed" : "wine64-start-failed");
     _exit(1);
 }

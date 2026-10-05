@@ -33,19 +33,26 @@
 #                    ps5/wow64native.prx, the native WoW64 CPU that 32-bit
 #                    games run on by default.
 #   --lapy-release FILE  the release.json tools/build_native.sh saved for the
-#                    lapy.elf it fetched (build/native/lapy-helper-release.json).
+#                    lapy.elf it fetched (build/native/lapy-helper-release.json);
+#                    required unless --helper-elf names a local helper.
 #   --mesa-zink DIR  tools/build_mesa_zink.sh's artifacts/ directory:
 #                    PE32/PE64 WGL/Zink, hashes and component licence texts.
 #                    OpenGL games draw through it (graphics = opengl).
-#   --out DIR        where PPSA99995/ is written (replaced).
-#   --zip            also write DIR/PPSA99995.zip.
+#   --title-id ID    output title identity (default PW_TITLE_ID or PPSA99995).
+#   --helper-elf FILE and --helper-manifest FILE provide the matching pinned
+#                    helper pair; they are required for non-default titles.
+#   --out DIR        where TITLE_ID/ is written (replaced).
+#   --zip            also write DIR/TITLE_ID.zip.
 #
 # A game's prefix gets its own copy of wowprospero.dll from
 # tools/pw_prefix.py push --cpu-dll.
 set -eu
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 mesa_zink= title= wine_ps5= host_wine= cpu_dll= native_cpu= lapy_release= out= zip=0
+title_id=${PW_TITLE_ID:-PPSA99995}
+helper_elf=${PW_LAPY_HELPER_ELF:-}
+helper_manifest=${PW_LAPY_HELPER_MANIFEST:-}
 fail() { echo "package_release: $*" >&2; exit 2; }
 while [ $# -gt 0 ]; do
     case $1 in
@@ -57,12 +64,85 @@ while [ $# -gt 0 ]; do
     --native-cpu) native_cpu=$2; shift 2 ;;
     --lapy-release) lapy_release=$2; shift 2 ;;
     --out) out=$2; shift 2 ;;
+    --title-id) title_id=$2; shift 2 ;;
+    --helper-elf) helper_elf=$2; shift 2 ;;
+    --helper-manifest) helper_manifest=$2; shift 2 ;;
     --zip) zip=1; shift ;;
     *) fail "unknown argument $1" ;;
     esac
 done
+printf '%s\n' "$title_id" | grep -Eq '^[A-Z]{4}[0-9]{5}$' ||
+    fail "--title-id must be four uppercase letters followed by five digits"
+[ -z "$helper_elf" ] && [ -z "$helper_manifest" ] ||
+    { [ -n "$helper_elf" ] && [ -n "$helper_manifest" ]; } ||
+    fail "--helper-elf and --helper-manifest must be set together"
+if [ "$title_id" != PPSA99995 ] && [ -z "$helper_elf" ]; then
+    fail "per-game --title-id $title_id requires --helper-elf and --helper-manifest"
+fi
+if [ -n "$helper_elf" ]; then
+    [ -f "$helper_elf" ] || fail "--helper-elf: no file '$helper_elf'"
+    [ -f "$helper_manifest" ] || fail "--helper-manifest: no file '$helper_manifest'"
+    if ! python3 - "$root" "$helper_elf" "$helper_manifest" "$title_id" \
+        "$root/native/lapy_elevation_protocol.h" <<'PY'
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from tools.fetch_lapy_helper import validate_helper_manifest
+try:
+    validate_helper_manifest(json.loads(pathlib.Path(sys.argv[3]).read_text()),
+                             pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[5]),
+                             sys.argv[4])
+except (OSError, ValueError, json.JSONDecodeError) as error:
+    raise SystemExit(str(error))
+PY
+    then
+        exit 2
+    fi
+fi
 [ -f "$title/eboot.bin" ] && [ -d "$title/sce_sys" ] || fail "--title: no eboot.bin and sce_sys/ in '$title'"
 [ -f "$title/lapy.elf" ] || fail "--title: no lapy.elf in '$title'"
+native_build_manifest=$title/native-title-build.json
+if [ "$title_id" != PPSA99995 ] && [ ! -f "$native_build_manifest" ]; then
+    fail "--title: no native-title-build.json for per-game title '$title_id'"
+fi
+if [ -f "$native_build_manifest" ]; then
+    if ! python3 - "$native_build_manifest" "$title/eboot.bin" "$title_id" <<'PY'
+import hashlib, json, pathlib, re, sys
+manifest_path, eboot_path, title_id = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+try:
+    manifest = json.loads(manifest_path.read_text())
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"invalid native-title-build.json: {error}")
+if manifest.get("schema") != "prospero-win-native-title/1":
+    raise SystemExit("native-title-build.json has unsupported schema")
+if manifest.get("title_id") != title_id:
+    raise SystemExit(
+        f"compiled title {manifest.get('title_id')!r} does not match requested {title_id}")
+revision = manifest.get("source_revision")
+if not isinstance(revision, str) or not re.fullmatch(r"(?:[0-9a-f]{40}|unknown)", revision):
+    raise SystemExit("native-title-build.json has invalid source_revision")
+if not isinstance(manifest.get("source_dirty"), bool):
+    raise SystemExit("native-title-build.json has invalid source_dirty")
+recorded = manifest.get("eboot_sha256")
+actual = hashlib.sha256(eboot_path.read_bytes()).hexdigest()
+if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]{64}", recorded) or recorded != actual:
+    raise SystemExit("native-title-build.json eboot digest does not match eboot.bin")
+PY
+    then
+        exit 2
+    fi
+fi
+if ! python3 - "$title/sce_sys/param.json" "$title_id" <<'PY'
+import json, pathlib, sys
+try:
+    actual = json.loads(pathlib.Path(sys.argv[1]).read_text()).get("titleId")
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"invalid title param.json: {error}")
+if actual != sys.argv[2]:
+    raise SystemExit(f"param.json titleId {actual!r} does not match {sys.argv[2]}")
+PY
+then
+    exit 2
+fi
 ls "$wine_ps5"/prx/sce_module/ntdll.prx >/dev/null 2>&1 || fail "--wine-ps5: no prx/sce_module/ntdll.prx in '$wine_ps5'"
 [ -d "$wine_ps5/prx/fonts" ] || fail "--wine-ps5: no prx/fonts in '$wine_ps5'"
 [ -d "$host_wine/lib/wine/i386-windows" ] && [ -d "$host_wine/lib/wine/x86_64-windows" ] &&
@@ -70,7 +150,9 @@ ls "$wine_ps5"/prx/sce_module/ntdll.prx >/dev/null 2>&1 || fail "--wine-ps5: no 
 [ -f "$cpu_dll" ] || fail "--cpu-dll: no file '$cpu_dll'"
 [ -f "$native_cpu/x86_64-windows/wow64native.dll" ] && [ -f "$native_cpu/ps5/wow64native.prx" ] ||
     fail "--native-cpu: no x86_64-windows/wow64native.dll and ps5/wow64native.prx in '$native_cpu'"
-[ -f "$lapy_release" ] || fail "--lapy-release: no file '$lapy_release'"
+if [ -z "$helper_elf" ] || [ -n "$lapy_release" ]; then
+    [ -f "$lapy_release" ] || fail "--lapy-release: no file '$lapy_release'"
+fi
 [ -f "$wine_ps5/report.json" ] || fail "--wine-ps5: no report.json in '$wine_ps5'"
 for file in LICENSE COPYING.LIB AUTHORS NOTICES.md; do
     [ -f "$wine_ps5/source/$file" ] || fail "--wine-ps5: no Wine source/$file in '$wine_ps5'"
@@ -93,7 +175,7 @@ fi
 [ -n "$mesa_zink" ] || fail "--mesa-zink DIR is required: OpenGL games draw through Zink"
 python3 "$root/tools/package_mesa_zink.py" "$mesa_zink" || fail "--mesa-zink: invalid artifact directory '$mesa_zink'"
 
-app=$out/PPSA99995
+app=$out/$title_id
 rm -rf "$app"
 mkdir -p "$app"
 # The title, without the builder's log destination.
@@ -101,6 +183,10 @@ mkdir -p "$app"
     mkdir -p "$app/$(dirname "$file")"
     cp "$title/$file" "$app/$file"
 done
+if [ -n "$helper_elf" ]; then
+    cp "$helper_elf" "$app/lapy.elf"
+    cp "$helper_manifest" "$app/lapy-manifest.json"
+fi
 
 lib=$app/win/wine/lib/wine
 share=$app/win/wine/share/wine
@@ -155,11 +241,13 @@ if [ "$tls" = 1 ]; then
 fi
 
 # SOURCES.txt: the revision of each part, from the build's own records.
-python3 - "$root" "$wine_ps5/report.json" "$lapy_release" "$app" <<'PY' || exit 2
+# A local helper (--helper-elf) has no release record; its manifest names it.
+python3 - "$root" "$wine_ps5/report.json" "$lapy_release" "$app" "$helper_manifest" <<'PY' || exit 2
 import hashlib, json, re, subprocess, sys
 from pathlib import Path
-root, report, lapy, app = Path(sys.argv[1]), json.loads(Path(sys.argv[2]).read_text()), \
-    json.loads(Path(sys.argv[3]).read_text()), Path(sys.argv[4])
+root, report, app = Path(sys.argv[1]), json.loads(Path(sys.argv[2]).read_text()), Path(sys.argv[4])
+lapy = json.loads(Path(sys.argv[3]).read_text()) if sys.argv[3] else {}
+helper = json.loads(Path(sys.argv[5]).read_text()) if sys.argv[5] else None
 def pin(script, name):
     return re.search(rf"^{name}=(\S+)$", (root / "tools" / script).read_text(), re.M).group(1)
 def fail(message):
@@ -168,7 +256,7 @@ git = lambda *args: subprocess.run(["git", "-C", str(root), *args], capture_outp
 sources = report.get("sources") or {}
 if not report.get("wine_commit"):
     fail("--wine-ps5: report.json names no Wine commit")
-if not lapy.get("tag_name"):
+if helper is None and not lapy.get("tag_name"):
     fail("--lapy-release: no tag_name")
 vulkan = (app / "win/wine/lib/wine/x86_64-unix/libvulkan.prx").exists()
 if vulkan and not sources.get("ps5_mesa"):
@@ -189,7 +277,8 @@ lines = [
     f"{pin('build_wine_ps5.sh', 'FREETYPE_URL').replace('$FREETYPE_VERSION', pin('build_wine_ps5.sh', 'FREETYPE_VERSION'))}",
     f"  SHA-256 {pin('build_wine_ps5.sh', 'FREETYPE_SHA256')}",
     f"Lapy JB Daemon (lapy.elf)  {lapy.get('release_url') or 'https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon'}"
-    f"  release {lapy['tag_name']}",
+    + (f"  release {lapy['tag_name']}" if helper is None else
+       f"  {helper.get('mode')} for {helper.get('target_title')}, lapy.elf SHA-256 {helper.get('elf_sha256')}"),
 ]
 if vulkan:
     lines += [f"RADV (libvulkan.prx)  https://github.com/mpereiraesaa/PS5_Mesa  commit {sources['ps5_mesa']}",
@@ -230,7 +319,7 @@ files=$(find "$app" -type f | wc -l)
 size=$(du -sh "$app" | cut -f1)
 echo "package_release: $app: $files files, $size"
 if [ "$zip" = 1 ]; then
-    rm -f "$out/PPSA99995.zip"
-    ( cd "$out" && zip -qr PPSA99995.zip PPSA99995 )
-    echo "package_release: $out/PPSA99995.zip"
+    rm -f "$out/$title_id.zip"
+    ( cd "$out" && zip -qr "$title_id.zip" "$title_id" )
+    echo "package_release: $out/$title_id.zip"
 fi

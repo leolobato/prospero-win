@@ -27,13 +27,39 @@ def run(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["sh", str(SCRIPT), *args], capture_output=True, text=True)
 
 
+def make_helper(root: Path, title_id: str) -> tuple[Path, Path]:
+    helper = root / "lapy.elf"
+    manifest = root / "lapy-manifest.json"
+    write(helper, "\x7fELFhelper")
+    protocol = ROOT / "native" / "lapy_elevation_protocol.h"
+    manifest.write_text(json.dumps({
+        "mode": "elf-helper",
+        "target_title": title_id,
+        "elf_sha256": hashlib.sha256(helper.read_bytes()).hexdigest(),
+        "protocol_sha256": hashlib.sha256(protocol.read_bytes()).hexdigest(),
+        "features": ["root_layout_probe_retry"],
+    }))
+    return helper, manifest
+
+
+def write_native_build_manifest(title: Path, title_id: str) -> None:
+    eboot = title / "eboot.bin"
+    write(title / "native-title-build.json", json.dumps({
+        "schema": "prospero-win-native-title/1",
+        "title_id": title_id,
+        "source_revision": "0123456789abcdef0123456789abcdef01234567",
+        "source_dirty": False,
+        "eboot_sha256": hashlib.sha256(eboot.read_bytes()).hexdigest(),
+    }))
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         title, ps5, host = root / "title", root / "wine-ps5", root / "usr"
         write(title / "eboot.bin", "eboot")
         write(title / "lapy.elf", "helper")
-        write(title / "sce_sys" / "param.json", "{}")
+        write(title / "sce_sys" / "param.json", json.dumps({"titleId": "PPSA99995"}))
         write(title / "sce_module" / "libc.prx", "libc")
         write(title / "dev.conf", "DEV_SERVER=builder-pc")
         for name in ("ntdll.prx", "win32u.prx", "libvulkan.prx", "libgnutls.prx", "secur32.prx"):
@@ -106,7 +132,7 @@ def main() -> int:
             ["libgnutls.prx", "libvulkan.prx", "ntdll.prx", "secur32.prx", "win32u.prx", "wow64native.prx"]
         assert (share / "nls" / "locale.nls").exists() and (share / "fonts" / "tahoma.ttf").exists()
         assert (share / "ca-certificates.crt").read_text() == "roots"
-        assert "PPSA99995: 51 files" in result.stdout, result.stdout
+        assert "PPSA99995:" in result.stdout and " 51 files" in result.stdout, result.stdout
         # OpenGL: Mesa WGL/Zink for both architectures, with its manifest.
         zink = app / "win" / "mesa-zink"
         for arch in ("i386-windows", "x86_64-windows"):
@@ -226,6 +252,74 @@ def main() -> int:
         (ps5 / "source" / "NOTICES.md").unlink()
         bad = run(*inputs, "--out", str(out))
         assert bad.returncode == 2 and "NOTICES.md" in bad.stderr, bad.stderr
+        write(ps5 / "source" / "NOTICES.md", "wine NOTICES.md")
+        report["sources"].update(ps5_mesa="c" * 40, ps5_vulkan="d" * 40, ps5vk=None)
+        write(ps5 / "report.json", json.dumps(report))
+
+        custom_title_id = "FAKE78001"
+        helper, manifest = make_helper(root / "helper", custom_title_id)
+        write(title / "sce_sys" / "param.json", json.dumps({"titleId": custom_title_id}))
+        write_native_build_manifest(title, custom_title_id)
+        custom = run("--title", str(title), "--wine-ps5", str(ps5), "--host-wine", str(host),
+                     "--cpu-dll", str(root / "wowprospero.dll"), "--native-cpu", str(native), "--mesa-zink", str(mesa),
+                     "--out", str(out), "--title-id", custom_title_id, "--helper-elf", str(helper),
+                     "--helper-manifest", str(manifest), "--zip")
+        assert custom.returncode == 0, custom.stderr
+        app = out / custom_title_id
+        assert (app / "lapy.elf").read_bytes() == helper.read_bytes()
+        assert (app / "lapy-manifest.json").read_bytes() == manifest.read_bytes()
+        assert (app / "native-title-build.json").read_bytes() == \
+            (title / "native-title-build.json").read_bytes()
+        assert (out / f"{custom_title_id}.zip").exists()
+        assert not (out / "PPSA99995.zip").exists()
+        # A local helper has no release record: SOURCES.txt names it by digest.
+        sources = (app / "SOURCES.txt").read_text()
+        assert f"elf-helper for {custom_title_id}, lapy.elf SHA-256 " \
+            f"{hashlib.sha256(helper.read_bytes()).hexdigest()}" in sources, sources
+
+        (title / "native-title-build.json").unlink()
+        bad = run("--title", str(title), "--wine-ps5", str(ps5), "--host-wine", str(host),
+                  "--cpu-dll", str(root / "wowprospero.dll"), "--native-cpu", str(native), "--mesa-zink", str(mesa),
+                  "--out", str(out), "--title-id", custom_title_id, "--helper-elf", str(helper),
+                  "--helper-manifest", str(manifest))
+        assert bad.returncode == 2 and "native-title-build.json" in bad.stderr
+
+        write_native_build_manifest(title, "FAKE78002")
+        bad = run("--title", str(title), "--wine-ps5", str(ps5), "--host-wine", str(host),
+                  "--cpu-dll", str(root / "wowprospero.dll"), "--native-cpu", str(native), "--mesa-zink", str(mesa),
+                  "--out", str(out), "--title-id", custom_title_id, "--helper-elf", str(helper),
+                  "--helper-manifest", str(manifest))
+        assert bad.returncode == 2 and "compiled title" in bad.stderr
+
+        write_native_build_manifest(title, custom_title_id)
+        write(title / "eboot.bin", "changed eboot")
+        bad = run("--title", str(title), "--wine-ps5", str(ps5), "--host-wine", str(host),
+                  "--cpu-dll", str(root / "wowprospero.dll"), "--native-cpu", str(native), "--mesa-zink", str(mesa),
+                  "--out", str(out), "--title-id", custom_title_id, "--helper-elf", str(helper),
+                  "--helper-manifest", str(manifest))
+        assert bad.returncode == 2 and "eboot digest" in bad.stderr
+        write(title / "eboot.bin", "eboot")
+        write_native_build_manifest(title, custom_title_id)
+
+        write(title / "sce_sys" / "param.json", json.dumps({"titleId": "PPSA99995"}))
+        bad = run("--title", str(title), "--wine-ps5", str(ps5), "--host-wine", str(host),
+                  "--cpu-dll", str(root / "wowprospero.dll"), "--native-cpu", str(native), "--mesa-zink", str(mesa),
+                  "--out", str(out), "--title-id", custom_title_id, "--helper-elf", str(helper),
+                  "--helper-manifest", str(manifest))
+        assert bad.returncode == 2 and "param.json titleId" in bad.stderr
+
+        write(title / "sce_sys" / "param.json", json.dumps({"titleId": custom_title_id}))
+        wrong_helper, wrong_manifest = make_helper(root / "wrong-helper", "FAKE78002")
+        bad = run("--title", str(title), "--wine-ps5", str(ps5), "--host-wine", str(host),
+                  "--cpu-dll", str(root / "wowprospero.dll"), "--native-cpu", str(native), "--mesa-zink", str(mesa),
+                  "--out", str(out), "--title-id", custom_title_id, "--helper-elf", str(wrong_helper),
+                  "--helper-manifest", str(wrong_manifest))
+        assert bad.returncode == 2 and "title or digest does not match" in bad.stderr
+
+        bad = run("--title", str(title), "--wine-ps5", str(ps5), "--host-wine", str(host),
+                  "--cpu-dll", str(root / "wowprospero.dll"), "--native-cpu", str(native), "--mesa-zink", str(mesa),
+                  "--out", str(out), "--title-id", "bad-title")
+        assert bad.returncode == 2 and "--title-id" in bad.stderr
     print("package release passed: layout, dev.conf and PC-only modules left out, patched xinput, "
           "eboot and PRX modules executable, licences and source revisions, schannel's notices and "
           "bundle with it and not without, Mesa Zink packaged, non-RADV Vulkan refused, a clean "

@@ -12,6 +12,11 @@
 #                          its dependencies, which would mutate a tree the
 #                          laboratory's other projects share (default 0)
 #   PW_NATIVE_MODE         wine64, the only mode (accepted for older scripts)
+#   PW_TITLE_ID            four uppercase letters and five digits
+#                          (default PPSA99995)
+#   PW_LAPY_HELPER_ELF     local title-specific Lapy helper
+#   PW_LAPY_HELPER_MANIFEST matching manifest; required with the helper and
+#                          required for every non-default title
 #   PW_OUTPUT_SUFFIX       isolated build/dist suffix, e.g. -wine-smoke
 #   PW_WINE64_SCRIPT       1 drives the launcher unattended (validation)
 #   PW_WINE64_SECONDS      close each game after this many seconds; 0 never
@@ -19,8 +24,10 @@
 #   PW_WINE64_WAIT_WATCHDOG 1 turns on Wine's wait watchdog (patch 0680) in
 #                          every game: a snapshot of the server's waits every
 #                          two seconds, for diagnosing stalls (default 0)
-#   Lapy helper             fetched from the GitHub release pinned below
-#                          (lapy_release, lapy_elf_sha256)
+#   Lapy helper             PPSA99995 fetches the GitHub release pinned below
+#                          (lapy_release, lapy_elf_sha256); per-game titles
+#                          take local pinned inputs (PW_LAPY_HELPER_ELF and
+#                          PW_LAPY_HELPER_MANIFEST)
 set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -39,7 +46,9 @@ wine64_script=${PW_WINE64_SCRIPT:-0}
 wine64_seconds=${PW_WINE64_SECONDS:-0}
 wine64_cycles=${PW_WINE64_SCRIPT_CYCLES:-2}
 wine64_watchdog=${PW_WINE64_WAIT_WATCHDOG:-0}
-title_id=PPSA99995
+title_id=${PW_TITLE_ID:-PPSA99995}
+lapy_helper_elf=${PW_LAPY_HELPER_ELF:-}
+lapy_helper_manifest=${PW_LAPY_HELPER_MANIFEST:-}
 
 [[ $native_mode == wine64 ]] || {
     echo "PW_NATIVE_MODE must be wine64: the direct Win32 runtime was removed" >&2; exit 2; }
@@ -53,18 +62,41 @@ title_id=PPSA99995
     echo "PW_OUTPUT_SUFFIX must contain only letters, digits, '_' or '-'" >&2
     exit 2
 }
-helper_download=$(mktemp -d "${TMPDIR:-/tmp}/prospero-lapy-helper.XXXXXX")
-trap 'rm -rf -- "$helper_download"' EXIT
-python3 "$root/tools/fetch_lapy_helper.py" \
-    --repo mpereiraesaa/PS5-Lapy-JB-Daemon --tag "$lapy_release" \
-    --sha256 "$lapy_elf_sha256" --out "$helper_download"
-lapy_helper_elf="$helper_download/lapy.elf"
-helper_magic=$(od -An -tx1 -N4 "$lapy_helper_elf" | tr -d ' \n')
-[[ $helper_magic == 7f454c46 ]] || {
-    echo "Lapy release $lapy_release helper is not an ELF file" >&2
+[[ $title_id =~ ^[A-Z]{4}[0-9]{5}$ ]] || {
+    echo "PW_TITLE_ID must be four uppercase letters followed by five digits" >&2
     exit 2
 }
-python3 - "$root" "$lapy_helper_elf" "$helper_download/lapy-manifest.json" \
+[[ -z $lapy_helper_elf && -z $lapy_helper_manifest ]] ||
+    [[ -n $lapy_helper_elf && -n $lapy_helper_manifest ]] || {
+        echo "PW_LAPY_HELPER_ELF and PW_LAPY_HELPER_MANIFEST must be set together" >&2
+        exit 2
+    }
+if [[ $title_id != PPSA99995 && -z $lapy_helper_elf ]]; then
+    echo "per-game PW_TITLE_ID=$title_id requires PW_LAPY_HELPER_ELF and PW_LAPY_HELPER_MANIFEST" >&2
+    exit 2
+fi
+
+helper_download=
+if [[ -z $lapy_helper_elf ]]; then
+    helper_download=$(mktemp -d "${TMPDIR:-/tmp}/prospero-lapy-helper.XXXXXX")
+    trap 'rm -rf -- "$helper_download"' EXIT
+    python3 "$root/tools/fetch_lapy_helper.py" \
+        --repo mpereiraesaa/PS5-Lapy-JB-Daemon --tag "$lapy_release" \
+        --sha256 "$lapy_elf_sha256" --out "$helper_download"
+    lapy_helper_elf="$helper_download/lapy.elf"
+    lapy_helper_manifest="$helper_download/lapy-manifest.json"
+else
+    [[ -f $lapy_helper_elf ]] || {
+        echo "PW_LAPY_HELPER_ELF is not a file: $lapy_helper_elf" >&2; exit 2; }
+    [[ -f $lapy_helper_manifest ]] || {
+        echo "PW_LAPY_HELPER_MANIFEST is not a file: $lapy_helper_manifest" >&2; exit 2; }
+fi
+helper_magic=$(od -An -tx1 -N4 "$lapy_helper_elf" | tr -d ' \n')
+[[ $helper_magic == 7f454c46 ]] || {
+    echo "Lapy helper is not an ELF file" >&2
+    exit 2
+}
+if ! python3 - "$root" "$lapy_helper_elf" "$lapy_helper_manifest" \
     "$title_id" "$root/native/lapy_elevation_protocol.h" <<'PY'
 import json, pathlib, sys
 sys.path.insert(0, sys.argv[1])
@@ -77,6 +109,9 @@ try:
 except ValueError as error:
     raise SystemExit(str(error))
 PY
+then
+    exit 2
+fi
 
 if [[ ! -e $foundation/.git ]]; then
     mkdir -p -- "$(dirname -- "$foundation")"
@@ -136,17 +171,29 @@ build="$root/build/native$output_suffix"
 dist="$root/dist/$title_id$output_suffix"
 rm -rf -- "$build" "$dist"
 mkdir -p "$build/obj" "$build/import-stubs" "$dist/sce_sys" "$dist/sce_module"
-cp "$helper_download/release.json" "$build/lapy-helper-release.json"
-cp "$helper_download/lapy-manifest.json" "$build/lapy-helper-manifest.json"
+if [[ -n $helper_download ]]; then
+    cp "$helper_download/release.json" "$build/lapy-helper-release.json"
+else
+    printf '{"source":"local"}\n' > "$build/lapy-helper-release.json"
+fi
+cp "$lapy_helper_manifest" "$build/lapy-helper-manifest.json"
 
 cc=(env PS5_PAYLOAD_SDK="$sdk" sh "$foundation/tooling/prospero-clang18")
-# A source archive has no Git metadata; its builds report "unknown".
-if build_id=$(git -C "$root" rev-parse HEAD 2>/dev/null); then
-    git -C "$root" diff --quiet || build_id="$build_id-dirty"
+# A source archive has no Git metadata. Keep revision and dirtiness separate
+# in the build manifest so release-kit validation can reject either explicitly.
+if source_revision=$(git -C "$root" rev-parse HEAD 2>/dev/null); then
+    source_dirty=false
+    if [[ -n $(git -C "$root" status --porcelain --untracked-files=normal) ]]; then
+        source_dirty=true
+    fi
 else
-    build_id=unknown
+    source_revision=unknown
+    source_dirty=false
 fi
-common=(-DPW_BUILD_ID=\""$build_id"\" -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections
+build_id=$source_revision
+[[ $source_dirty == false ]] || build_id="$build_id-dirty"
+common=(-DPW_BUILD_ID=\""$build_id"\" -DPW_TITLE_ID=\""$title_id"\"
+        -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections
         -I"$root/include" -I"$root/src" -I"$root/native"
         -I"$root/native/ps5log"
         -DPW_WINE64_SCRIPT="$wine64_script" -DPW_WINE64_SECONDS="$wine64_seconds"
@@ -158,6 +205,7 @@ sources=(
     native/pw_lapy_elevation.c
     native/pw_wine_display.c native/pw_wine_library.c native/pw_hid_ps5.c native/pw_wine_prefix.c
     src/pw_result.c src/pw_wine_start.c src/pw_wine_launch.c src/pw_game_profile.c src/pw_prefix_temp.c
+    src/pw_title_launch.c src/pw_title_session.c
     src/pw_app_profile.c src/pw_profile_catalog.c src/pw_launcher_render.c src/pw_present.c
     src/pw_pad.c src/pw_hid.c src/pw_spinner.c src/pw_script_input.c src/pw_tsc_calibrate.c
     wine/ps5/pw_wine_prx.c
@@ -211,12 +259,35 @@ done
     --companion-sdk 0x08050001 --file-name eboot.elf
 "$tool" self --sign --in "$build/eboot.elf" --out "$dist/eboot.bin" \
     --magic 0x1D3D154F
+python3 - "$dist/eboot.bin" "$dist/native-title-build.json" "$title_id" \
+    "$source_revision" "$source_dirty" <<'PY'
+import hashlib, json, pathlib, sys
+eboot, destination = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+manifest = {
+    "schema": "prospero-win-native-title/1",
+    "title_id": sys.argv[3],
+    "source_revision": sys.argv[4],
+    "source_dirty": sys.argv[5] == "true",
+    "eboot_sha256": hashlib.sha256(eboot.read_bytes()).hexdigest(),
+}
+destination.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+PY
 # The console installer copies icon0.png into /user/app/<title> and aborts
 # the whole registration if it is absent, so it is not optional.
 [[ -f $root/sce_sys/icon0.png ]] || python3 "$root/tools/make_icon.py"
-cp "$root/sce_sys/param.json" "$root/sce_sys/icon0.png" "$dist/sce_sys/"
+python3 - "$root/sce_sys/param.json" "$dist/sce_sys/param.json" "$title_id" <<'PY'
+import json, pathlib, sys
+source, destination, title_id = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+param = json.loads(source.read_text())
+param["titleId"] = title_id
+param["conceptId"] = title_id[-5:]
+param["contentId"] = f"UP9000-{title_id}_00-PROSPEROWIN00001"
+destination.write_text(json.dumps(param, indent=2) + "\n")
+PY
+cp "$root/sce_sys/icon0.png" "$dist/sce_sys/"
 cp "$foundation/runtime/libc.prx" "$dist/sce_module/libc.prx"
 cp "$lapy_helper_elf" "$dist/lapy.elf"
+cp "$lapy_helper_manifest" "$dist/lapy-manifest.json"
 # The console refuses to start a title whose eboot lacks execute permission
 # (exec fails with EACCES) and its loader refuses a PRX without it ("mount
 # flag / attribute error"), so mark both here. An FTP upload may still reset

@@ -23,6 +23,15 @@ ROOT = Path(__file__).resolve().parents[1]
 # dependency on the platform and must be argued for, not slipped in.
 CORE_HEADERS = {"<stddef.h>", "<stdint.h>", "<string.h>", "<limits.h>"}
 
+# Session persistence is the other deliberate POSIX adapter: it creates a
+# game-scoped directory and atomically renames bounded JSON records. Keep its
+# platform surface explicit rather than treating every portable-core source
+# as eligible for filesystem imports.
+TITLE_SESSION_HEADERS = {
+    "<errno.h>", "<fcntl.h>", "<stdarg.h>", "<stdio.h>", "<string.h>",
+    "<sys/stat.h>", "<sys/types.h>", "<unistd.h>",
+}
+
 # Symbols the core must never reference.
 #   strcasestr: its FW 12.02 provider is unusable (playbook post-mortem).
 #   getcwd/chdir/access/opendir: measured EPERM or faulting from a title.
@@ -69,6 +78,13 @@ def test_core_imports_nothing_surprising() -> None:
         text = read(relative)
         if name in ("pw_vm_posix.c", "pw_vm_posix.h"):
             continue                    # the one deliberate POSIX backend
+        if name == "pw_title_session.c":
+            assert set(includes(text)) <= TITLE_SESSION_HEADERS, includes(text)
+            code = code_without_literals_or_comments(text)
+            for symbol in set(FORBIDDEN_CORE) - {"snprintf"}:
+                assert not re.search(rf"\b{symbol}\s*\(", code), \
+                    f"{relative} calls {symbol}"
+            continue                    # bounded session filesystem adapter
         for header in includes(text):
             assert header in CORE_HEADERS, f"{relative} includes {header}"
         code = code_without_literals_or_comments(text)
