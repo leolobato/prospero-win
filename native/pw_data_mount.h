@@ -33,13 +33,15 @@ typedef struct PwDataMountResult {
     int data_before;   /* /data was already reachable */
     int helper_completed; /* helper returned success for this process */
     int helper_errno;     /* errno for a failed request, else 0 */
+    int credential_errno; /* original effective UID restoration/verification failed */
     int data_after;    /* /data became reachable */
     int waited_ms;     /* time spent waiting for it */
     int settled_ms;    /* time waited after it appeared (a new grant only) */
 } PwDataMountResult;   /* what one request reached, for logging */
 
 /* Request /data for pid, waiting up to max_wait_ms after a successful helper
- * response. Returns 0 once access is visible and settled, or -1 on failure.
+ * response. Restores and verifies the original effective UID before checking
+ * access. Returns 0 once access is visible and settled, or -1 on failure.
  * detail, when non-NULL, is always filled. */
 int pw_data_mount_request_with(const PwDataMountOps *ops, int32_t pid, int max_wait_ms,
                                PwDataMountResult *detail);

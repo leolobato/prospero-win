@@ -12,9 +12,11 @@ int pw_data_mount_request_with(const PwDataMountOps *ops, int32_t pid,
                                int max_wait_ms, PwDataMountResult *detail)
 {
     PwDataMountResult local;
+    uid_t original_effective_uid;
 
     if (!detail) detail = &local;
     detail->data_before = detail->helper_completed = detail->helper_errno = 0;
+    detail->credential_errno = 0;
     detail->data_after = detail->waited_ms = detail->settled_ms = 0;
     if (!ops || !ops->request || !ops->data_visible || !ops->sleep_ms ||
         pid <= 1 || max_wait_ms < 0) return -1;
@@ -25,11 +27,25 @@ int pw_data_mount_request_with(const PwDataMountOps *ops, int32_t pid,
         return 0;
     }
 
+    original_effective_uid = geteuid();
     errno = 0;
     if (ops->request(pid) == 0)
         detail->helper_completed = 1;
     else
         detail->helper_errno = errno ? errno : EIO;
+
+    /* The helper grants the root view but changes EUID. Keep private bottle
+     * ownership usable before any managed path access, even on request failure. */
+    if (geteuid() != original_effective_uid && seteuid(original_effective_uid) != 0) {
+        detail->credential_errno = errno ? errno : EACCES;
+        errno = detail->credential_errno;
+        return -1;
+    }
+    if (geteuid() != original_effective_uid) {
+        detail->credential_errno = EACCES;
+        errno = EACCES;
+        return -1;
+    }
 
     /* A successful wire response is necessary, then confirm actual access. */
     if (!detail->helper_completed) return -1;
