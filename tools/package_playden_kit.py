@@ -257,6 +257,23 @@ def _validate_crypto_view(registry: str, prefix: str, label: str) -> None:
         raise KitError(f"{label} cryptography view does not bind the pinned RSA provider")
 
 
+def _recipe_identity(recipe: dict[str, Any]) -> tuple[str, str]:
+    """Playden owns recipe_id/recipe_version; retain unambiguous legacy kits."""
+    identities = []
+    for id_key, version_key in (("recipe_id", "recipe_version"), ("id", "version")):
+        if id_key not in recipe and version_key not in recipe:
+            continue
+        identifier = _require_id(recipe.get(id_key), "recipe identity")
+        version = recipe.get(version_key)
+        if (type(version) not in (str, int) or not str(version) or
+                len(str(version)) > 64):
+            raise KitError("recipe identity version is malformed")
+        identities.append((identifier, str(version)))
+    if not identities or any(identity != identities[0] for identity in identities):
+        raise KitError("recipe identity is missing or has conflicting aliases")
+    return identities[0]
+
+
 def _recipe_requires_ps5_audio(recipe: dict[str, Any]) -> bool:
     requirements = recipe.get("requirements")
     prospero = recipe.get("prospero")
@@ -645,8 +662,7 @@ def package_kit(spec_path: str | Path, out: str | Path) -> dict[str, Any]:
     if not isinstance(recipe_version, str) or not recipe_version or len(recipe_version) > 64:
         raise KitError("recipe version must be an explicit non-empty string")
     recipe_document = _read_json(recipe_source, "recipe")
-    if (recipe_document.get("id") != recipe_id or
-            str(recipe_document.get("version", "")) != recipe_version):
+    if _recipe_identity(recipe_document) != (recipe_id, recipe_version):
         raise KitError("recipe id or version does not match the kit specification")
     runtime_inventory = _load_runtime_inventory(
         runtime_inventory_path, str(runtime.get("inventory_prefix", "")))
@@ -885,8 +901,7 @@ def validate_kit(kit: str | Path, manifest_path: str | Path | None = None) -> di
     if _sha256(recipe_path) != recipe.get("sha256"):
         raise KitError("recipe hash does not match its identity")
     recipe_document = _read_json(recipe_path, "recipe")
-    if (recipe_document.get("id") != recipe_id or
-            str(recipe_document.get("version", "")) != recipe["version"]):
+    if _recipe_identity(recipe_document) != (recipe_id, recipe["version"]):
         raise KitError("packaged recipe id or version does not match its identity")
     prefix = _resolve_kit_path(root, template.get("path"))
     if template.get("path") != "template/bottle":
