@@ -188,9 +188,20 @@ objects+=("$build/obj/ps5log.o" "$build/obj/ps5log_ps5_net.o")
 "$sdk/bin/prospero-lld" --shared -soname libSceAgcDriver.prx \
     -o "$build/import-stubs/libSceAgcDriver.so" "$build/obj/agc-driver-import.o"
 
+# Payload kernel stubs describe different import libraries. Including all of
+# them lets the weak stub select libkernel_web, which a native title does not
+# load: clock_gettime then calls NULL before startup logging on FW 13.60.
+# Keep the native provider first and omit the payload/weak variants.
+native_stubs=("$sdk/target/lib/libkernel.so")
+for stub in "$sdk"/target/lib/*.so; do
+    case "${stub##*/}" in
+        libkernel*.so) continue ;;
+    esac
+    native_stubs+=("$stub")
+done
 "$sdk/bin/prospero-lld" -T "$layout" --eh-frame-hdr -e _start \
     -o "$build/llvm-pie.elf" "$build/obj/app_crt.o" "${objects[@]}" \
-    --as-needed "$sdk"/target/lib/*.so "$build/import-stubs/libSceAgc.so" \
+    --as-needed "${native_stubs[@]}" "$build/import-stubs/libSceAgc.so" \
     "$build/import-stubs/libSceAgcDriver.so"
 "$tool" link --in "$build/llvm-pie.elf" --out "$build/eboot.elf" \
     --stub-dir "$sdk/target/lib" --module-sdk 0x02000009 \
