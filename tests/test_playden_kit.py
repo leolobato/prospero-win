@@ -244,6 +244,34 @@ class PlaydenKitTests(unittest.TestCase):
     def package(self) -> dict:
         return package_kit(self.fixture.spec, self.fixture.out)
 
+    def test_playden_recipe_identity_is_supported(self) -> None:
+        self.fixture.recipe.write_text(json.dumps({
+            "recipe_id": "steam-220-hl2-v1", "recipe_version": 1,
+            "requirements": {"audio": "ps5"},
+        }))
+        manifest = self.package()
+        self.assertEqual(validate_kit(self.fixture.out), manifest)
+
+    def test_recipe_identity_aliases_must_be_complete_and_agree(self) -> None:
+        for document in (
+                {"recipe_id": "steam-220-hl2-v1", "recipe_version": 1, "id": "different", "version": "1"},
+                {"recipe_id": "steam-220-hl2-v1", "recipe_version": 1, "version": "1"},
+                {"recipe_id": "steam-220-hl2-v1", "recipe_version": True},
+                {"recipe_id": "steam-220-hl2-v1", "recipe_version": 1.0}):
+            with self.subTest(document=document):
+                self.fixture.recipe.write_text(json.dumps(document))
+                with self.assertRaisesRegex(KitError, "recipe identity"):
+                    self.package()
+                self.assertFalse(self.fixture.out.exists())
+
+    def test_matching_recipe_aliases_are_supported(self) -> None:
+        self.fixture.recipe.write_text(json.dumps({
+            "recipe_id": "steam-220-hl2-v1", "recipe_version": 1,
+            "id": "steam-220-hl2-v1", "version": "1",
+        }))
+        manifest = self.package()
+        self.assertEqual(validate_kit(self.fixture.out), manifest)
+
     def test_packages_and_validates_complete_offline_kit(self) -> None:
         manifest = self.package()
         validated = validate_kit(self.fixture.out)
