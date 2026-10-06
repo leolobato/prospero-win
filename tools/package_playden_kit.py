@@ -95,6 +95,10 @@ REQUIRED_PROVENANCE: dict[str, dict[str, str]] = {
 # helper artifact.  Helper manifests cannot add or override trust anchors.
 REQUIRED_HELPER_SHA256: dict[str, str] = {
     "FAKE78001": "5608915201204dfcd1846b01dd2a9e60d03aa390c69b1dc61f3b150566bf1935",
+    # Same reviewed e9f2cfc source, SDK v0.42 toolchain and build procedure;
+    # only TARGET_TITLE and its derived owned ID differ (the FAKE78001 build
+    # reproduces byte for byte with the same procedure).
+    "FAKE78002": "e2449875f8b22a8c595a0d40c02a57c706e0661054986a4d96076c763deaafb2",
 }
 
 
