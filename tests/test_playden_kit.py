@@ -720,6 +720,14 @@ class PlaydenKitTests(unittest.TestCase):
                 inventory.pop("embedded.bin")
                 self.fixture.runtime_inventory.write_text(json.dumps(inventory))
 
+    def test_manifest_orders_sibling_names_by_full_path(self) -> None:
+        # "Fonts-extra" sorts before "Fonts/" as a string but after it as path parts.
+        write(self.fixture.prefix / "drive_c/windows/Fonts/a.ttf", b"font")
+        write(self.fixture.prefix / "drive_c/windows/Fonts-extra/b.ttf", b"font")
+        manifest = self.package()
+        paths = [entry["path"] for entry in manifest["files"]]
+        self.assertEqual(paths, sorted(paths))
+
     def test_development_kit_permits_only_runtime_build_paths(self) -> None:
         payload = self.fixture.runtime / "embedded.bin"
         write(payload, b"\x54\x14\xf5\xee/home/alice/build/source/dlls/x.c\x00")

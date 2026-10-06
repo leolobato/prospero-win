@@ -629,7 +629,9 @@ def _validate_sources(spec: dict[str, Any]) -> dict[str, Any]:
 
 def _file_entries(root: Path) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
-    for path in sorted(root.rglob("*")):
+    # Byte order of the POSIX relative path, as the validator and the C++
+    # consumer require; Path ordering differs when "a-b" sits beside "a/".
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
         if path.name == "manifest.json" or path.is_dir():
             continue
         if path.is_symlink():
