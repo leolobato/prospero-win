@@ -720,6 +720,19 @@ class PlaydenKitTests(unittest.TestCase):
                 inventory.pop("embedded.bin")
                 self.fixture.runtime_inventory.write_text(json.dumps(inventory))
 
+    def test_console_form_template_keeps_its_drive_table(self) -> None:
+        dosdevices = self.fixture.prefix / "dosdevices"
+        for link in dosdevices.iterdir():
+            link.unlink()
+        write(dosdevices / ".pw-symlinks", "c:\t../drive_c\nz:\t/\n")
+        manifest = self.package()
+        table = self.fixture.out / manifest["template"]["path"] / "dosdevices/.pw-symlinks"
+        self.assertEqual(table.read_text(), "c:\t../drive_c\nz:\t/\n")
+        write(dosdevices / ".pw-symlinks", "c:\t../drive_c\nz\n")
+        shutil.rmtree(self.fixture.out)
+        with self.assertRaisesRegex(KitError, "link table is malformed"):
+            self.package()
+
     def test_manifest_orders_sibling_names_by_full_path(self) -> None:
         # "Fonts-extra" sorts before "Fonts/" as a string but after it as path parts.
         write(self.fixture.prefix / "drive_c/windows/Fonts/a.ttf", b"font")

@@ -194,6 +194,19 @@ def _copy_console_prefix(source: Path, destination: Path) -> None:
         else:
             shutil.copyfile(path, target)
         target.chmod(stat.S_IMODE(path.stat().st_mode))
+    # An approved console-form template already carries its link tables in
+    # place of symbolic links. Keep those entries; a name must not be both.
+    for table_path in sorted(source.rglob(LINK_TABLE)):
+        relative = table_path.parent.relative_to(source).as_posix()
+        relative = "" if relative == "." else relative
+        existing = links.setdefault(relative, {})
+        for line in table_path.read_text(encoding="utf-8").splitlines():
+            name, separator, target = line.partition("\t")
+            if not separator or not name or "/" in name or not target:
+                raise KitError(f"template link table is malformed: {table_path.relative_to(source)}")
+            if name in existing and existing[name] != target:
+                raise KitError(f"template link {name} conflicts with its link table")
+            existing[name] = target
     for relative, entries in sorted(links.items()):
         table = destination / relative / LINK_TABLE
         table.parent.mkdir(parents=True, exist_ok=True)
