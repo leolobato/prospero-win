@@ -45,6 +45,9 @@ except ModuleNotFoundError:  # Direct execution from tools/.
 
 SPEC_SCHEMA = "playden-prospero-kit-spec/1"
 MANIFEST_SCHEMA = "playden-prospero-kit/1"
+PUBLICATION_GUARD = "playden-publication-guard-v1"
+# Independent pin for the reviewed scalar provider provenance, not a kit claim.
+PUBLICATION_PROVIDER_SHA256 = "f14d5e3ecb31951e3cf5bfdc41972181a9be1d96ed0dc7cb3aeebb8e4aab844a"
 TITLE_RE = re.compile(r"FAKE78\d{3}\Z")
 ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,95}\Z")
 REVISION_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -405,7 +408,8 @@ def _validate_runtime(runtime: Path, inventory: dict[str, str]) -> dict[str, int
 
 
 def _validate_native_title_build(path: Path, eboot: Path, title_id: str,
-                                 wrapper_revision: str) -> None:
+                                 wrapper_revision: str, *,
+                                 require_publication_guard: bool = False) -> None:
     manifest = _read_json(path, "native title build manifest")
     if manifest.get("schema") != "prospero-win-native-title/1":
         raise KitError("native title build manifest has unknown schema")
@@ -422,6 +426,11 @@ def _validate_native_title_build(path: Path, eboot: Path, title_id: str,
     if (not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]{64}", recorded) or
             not eboot.is_file() or recorded != _sha256(eboot)):
         raise KitError("native title build manifest eboot hash does not match eboot.bin")
+    if require_publication_guard and (
+            manifest.get("managed_publication_guard") != PUBLICATION_GUARD or
+            manifest.get("managed_descriptor_required") is not True or
+            manifest.get("publication_provider_sha256") != PUBLICATION_PROVIDER_SHA256):
+        raise KitError("native title build manifest lacks the required publication guard contract")
 
 
 def _validate_prefix(prefix: Path, dxvk: dict[str, Any], recipe: dict[str, Any]) -> None:
@@ -710,7 +719,8 @@ def package_kit(spec_path: str | Path, out: str | Path) -> dict[str, Any]:
         if parameter.get("titleId") != title_id:
             raise KitError(f"variant {variant_id} title metadata does not match {title_id}")
         _validate_native_title_build(native_build_path, title_source / "eboot.bin",
-                                     title_id, raw["wrapper_revision"])
+                                     title_id, raw["wrapper_revision"],
+                                     require_publication_guard=PUBLICATION_GUARD in capabilities)
         _required_executable(title_source / "eboot.bin", f"variant {variant_id} eboot.bin")
         _required_executable(helper, f"variant {variant_id} lapy.elf")
         prepared_variants.append({
@@ -954,7 +964,8 @@ def validate_kit(kit: str | Path, manifest_path: str | Path | None = None) -> di
         if parameter.get("titleId") != title_id:
             raise KitError(f"variant {variant_id} title metadata does not match")
         _validate_native_title_build(native_build, title / "eboot.bin", title_id,
-                                     variant["wrapper_revision"])
+                                     variant["wrapper_revision"],
+                                     require_publication_guard=PUBLICATION_GUARD in manifest["capabilities"])
         _required_executable(title / "eboot.bin", f"variant {variant_id} eboot.bin")
         _required_executable(title / "lapy.elf", f"variant {variant_id} lapy.elf")
         for module in title.rglob("*.prx"):
