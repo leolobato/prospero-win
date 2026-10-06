@@ -29,11 +29,10 @@ __attribute__((naked, noinline)) static struct LockResult lock_syscall(
         "ret\n");
 }
 
-int pw_title_publication_ps5_lock(void *context, int descriptor)
+static int ensure_gateway(uintptr_t *out)
 {
     uintptr_t gateway = atomic_load_explicit(&lock_gateway, memory_order_acquire);
     struct LockResult result;
-    (void)context;
     if (!gateway) {
         void *entry = NULL;
         if (sceKernelDlsym(0x2001, "getpid", &entry) != 0 || !entry) {
@@ -48,7 +47,31 @@ int pw_title_publication_ps5_lock(void *context, int descriptor)
         }
         atomic_store_explicit(&lock_gateway, gateway, memory_order_release);
     }
+    *out = gateway;
+    return 0;
+}
+
+int pw_title_publication_ps5_lock(void *context, int descriptor)
+{
+    uintptr_t gateway;
+    struct LockResult result;
+    (void)context;
+    if (ensure_gateway(&gateway) != 0) return -1;
     result = lock_syscall((void *)gateway, SYS_flock, descriptor, LOCK_SH | LOCK_NB);
+    if (result.failed) {
+        errno = (int)result.value;
+        return -1;
+    }
+    return (int)result.value;
+}
+
+/* umask is exported only by libkernel_sys, which titles do not link. */
+int pw_title_ps5_umask(unsigned mask)
+{
+    uintptr_t gateway;
+    struct LockResult result;
+    if (ensure_gateway(&gateway) != 0) return -1;
+    result = lock_syscall((void *)gateway, SYS_umask, (long)mask, 0);
     if (result.failed) {
         errno = (int)result.value;
         return -1;
