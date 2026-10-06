@@ -719,6 +719,29 @@ class PlaydenKitTests(unittest.TestCase):
                 inventory.pop("embedded.bin")
                 self.fixture.runtime_inventory.write_text(json.dumps(inventory))
 
+    def test_development_kit_permits_only_runtime_build_paths(self) -> None:
+        payload = self.fixture.runtime / "embedded.bin"
+        write(payload, b"\x7fELF\x00/home/alice/build/source/dlls/x.c\x00")
+        inventory = json.loads(self.fixture.runtime_inventory.read_text())
+        inventory["embedded.bin"] = digest(payload)
+        self.fixture.runtime_inventory.write_text(json.dumps(inventory))
+        result = package_kit(self.fixture.spec, self.fixture.out, development_build_paths=True)
+        self.assertEqual(len(result["development_exceptions"]), 1)
+        self.assertTrue(result["development_exceptions"][0].endswith("embedded.bin"))
+        manifest = json.loads((self.fixture.out / "manifest.json").read_text())
+        self.assertNotIn("development_exceptions", manifest)
+        # The default (release-capable) validation still refuses the same kit.
+        with self.assertRaisesRegex(KitError, "host personal path.*embedded.bin"):
+            validate_kit(self.fixture.out)
+        self.assertEqual(len(validate_kit(self.fixture.out, development_build_paths=True)
+                             ["development_exceptions"]), 1)
+
+    def test_development_kit_still_refuses_title_build_paths(self) -> None:
+        payload = self.fixture.title / "embedded.bin"
+        write(payload, b"\x7fELF\x00/home/alice/build/private.c\x00")
+        with self.assertRaisesRegex(KitError, "host personal path.*embedded.bin"):
+            package_kit(self.fixture.spec, self.fixture.out, development_build_paths=True)
+
     def test_rejects_wrong_or_ambiguous_windows_user_registry_binding(self) -> None:
         path = self.fixture.prefix / "user.reg"
         pristine = path.read_text()
