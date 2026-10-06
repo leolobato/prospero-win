@@ -2,7 +2,6 @@
 #include "pw_title_launch.h"
 #include <string.h>
 #include <stddef.h>
-#include <stdio.h>
 
 typedef struct Reader {
     const unsigned char *next, *end;
@@ -89,6 +88,22 @@ static int game_root(const char *path) {
         part = p + 1;
     }
 }
+/* "/data/homebrew/<title>/games/<app>" without stdio (portable core contract). */
+static int legacy_game_root(char *out, size_t capacity, const char *title_id, uint32_t app_id) {
+    char digits[11];
+    size_t count = 0, used = 0;
+    do { digits[count++] = (char)('0' + app_id % 10u); app_id /= 10u; } while (app_id);
+    const char *parts[] = {"/data/homebrew/", title_id, "/games/"};
+    for (unsigned i = 0; i < 3; ++i) {
+        size_t n = strlen(parts[i]);
+        if (n >= capacity - used) return 0;
+        memcpy(out + used, parts[i], n); used += n;
+    }
+    if (count >= capacity - used) return 0;
+    while (count) out[used++] = digits[--count];
+    out[used] = 0;
+    return 1;
+}
 static int fail(char *error, size_t size, int status, const char *message) {
     if (error && size) {
         size_t n = strlen(message);
@@ -172,8 +187,8 @@ int pw_title_launch_parse(const char *bytes, size_t length, const char *expected
             return fail(error, error_size, PW_ERR_MALFORMED, "descriptor data root is not its managed install root");
     }
     if (candidate.schema_version == 1) {
-        if (snprintf(candidate.game_root, sizeof(candidate.game_root), "/data/homebrew/%s/games/%u",
-                     candidate.title_id, candidate.app_id) <= 0)
+        if (!legacy_game_root(candidate.game_root, sizeof(candidate.game_root),
+                              candidate.title_id, candidate.app_id))
             return fail(error, error_size, PW_ERR_LIMIT, "legacy game root outside bounds");
     } else if (!game_root(candidate.game_root))
         return fail(error, error_size, PW_ERR_MALFORMED, "game root is not a canonical console storage path");
