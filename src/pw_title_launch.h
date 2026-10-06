@@ -17,6 +17,9 @@ typedef struct PwTitleLaunch {
     char recipe_id[65];
     char recipe_version[65];
     char exit_policy[16];
+    /* Schema 2 binds the recorded Steam download root independently of title.
+     * Schema 1 retains its legacy per-title inferred root. */
+    char game_root[1024];
 } PwTitleLaunch;
 /* Bounded flat JSON schema. Output is written only on success. Filesystem
  * symlink/ownership checks are performed by the native caller after elevation. */
