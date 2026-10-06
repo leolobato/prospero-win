@@ -116,7 +116,7 @@ def test_builder_builds_the_wine64_title() -> None:
     builder = read("tools/build_native.sh")
     sources = builder[builder.index("sources=("):]
     sources = sources[:sources.index(")")]
-    listed = re.findall(r"[\w/]+\.c", sources)
+    listed = re.findall(r"[\w/.-]+\.c", sources)
     assert listed[0] == "native/wine64_main.c"
     for name in listed:
         assert (ROOT / name).is_file(), f"tools/build_native.sh compiles missing {name}"
