@@ -1588,7 +1588,13 @@ int main(int argc, char **argv)
             void (*set_audio)(PwWineAudioSink, void *) = (void (*)(PwWineAudioSink, void *))
                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_audio_sink");
             int audio_status = set_audio ? pw_audio_ps5_platform_ops(&audio_ops) : PW_ERR_NOT_FOUND;
+            /* The audio library sets up its connection with the system's
+             * audio service under the process umask; with the private 077 the
+             * port does not open (status state, measured after eba69f8). Open
+             * it under the console's own umask 0, then restore the private one. */
+            const int audio_mask = per_game_mode ? pw_title_ps5_umask(0) : -1;
             if (audio_status == PW_OK) audio_status = pw_audio_ps5_open_port(&audio_ops, &audio_port);
+            if (audio_mask >= 0) (void)pw_title_ps5_umask((unsigned)audio_mask);
             if (audio_status == PW_OK) set_audio(wine_audio, NULL);
             PS5LOG_LOG("PW_WINE64 audio sink=%d port=%d status=%s", set_audio != NULL, audio_port,
                        pw_result_name(audio_status));
