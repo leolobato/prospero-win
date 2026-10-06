@@ -576,7 +576,8 @@ static int verify_publication(const PwTitlePublicationDescriptor *before,
     char control[1024], lock_path[1024], receipt_path[1024], metadata_path[1024];
     char profile_path[1024], catalog_path[1024], input_path[1024], prefix_path[1024], user_reg[1024];
     char host_lock[2048], digest[65], expected_catalog[128], working[1024], executable[1024];
-    char expected_dxvk[1100], game_root[1024];
+    char expected_dxvk[1100];
+    const char *game_root = NULL;
     FileIdentity directories[7], control_before, control_after, lock_before, lock_opened, lock_after;
     char directory_paths[7][PW_TITLE_PUBLICATION_NATIVE_PATH]; struct stat info;
     PwTitlePublicationDescriptor reread; PwTitlePublication receipt; PwTitlePublicationMetadata metadata;
@@ -675,14 +676,14 @@ static int verify_publication(const PwTitlePublicationDescriptor *before,
     }
     if ((profile.input.preset[0] && !has_selected) || (!profile.input.preset[0] && has_selected)) goto done;
     stage = 6;
+    game_root = reread.launch.game_root;
 
     if (append_identifier_path(prefix_path, sizeof(prefix_path), before->launch.data_root,
           "library/prefixes/", profile.app.prefix, "") || strcmp(profile.app.prefix, "game") ||
         pw_wine_launch_host_dir(prefix_path, profile.app.working_directory, working, sizeof(working)) ||
         pw_wine_launch_host_dir(prefix_path, profile.app.executable, executable, sizeof(executable)) ||
         !canonical(working) || !canonical(executable) ||
-        snprintf(game_root, sizeof(game_root), "/data/homebrew/%s/games/%u",
-                 before->launch.title_id, before->launch.app_id) <= 0 ||
+        !canonical(game_root) ||
         (strcmp(working, game_root) &&
          (strncmp(working, game_root, strlen(game_root)) || working[strlen(game_root)] != '/')) ||
         strncmp(executable, game_root, strlen(game_root)) ||
