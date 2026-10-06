@@ -475,8 +475,57 @@ static void cross_process_lock_contract(void)
     fixture_destroy(&f);
 }
 
+static void publisher_verification_contract(void)
+{
+    Fixture f; int calls = 0; fixture_init(&f, &calls); char mapped[1200], digest_text[65], error[256];
+    path(mapped, sizeof(mapped), &f, "/data/playden/games/install-220/.playden-control/publication.lock");
+    int writer = open(mapped, O_RDONLY); CHECK(writer >= 0 && flock(writer, LOCK_EX | LOCK_NB) == 0);
+    digest(f.metadata, strlen(f.metadata), digest_text);
+    PwTitlePublicationContents contents, sentinel; memset(&contents, 0xa5, sizeof(contents)); sentinel = contents;
+    f.platform.context = &calls;
+    CHECK(pw_title_publication_verify_locked(&f.before, &f.platform, writer,
+          (const uint8_t *)f.receipt, strlen(f.receipt), digest_text, &contents, error, sizeof(error)) == 0);
+    CHECK(calls == 0 && !strcmp(contents.profile.app.id, "playden-steam-220") && contents.has_preset);
+    PwTitlePublicationPlatform no_shared = f.platform; no_shared.try_lock_shared = NULL;
+    CHECK(pw_title_publication_verify_locked(&f.before, &no_shared, writer,
+          (const uint8_t *)f.receipt, strlen(f.receipt), digest_text, &contents, error, sizeof(error)) == 0);
+    char foreign_path[1200]; path(foreign_path, sizeof(foreign_path), &f,
+        "/data/playden/games/install-220/library/profiles/playden-steam-220.profile");
+    int foreign = open(foreign_path, O_RDONLY); CHECK(foreign >= 0); contents = sentinel;
+    CHECK(pw_title_publication_verify_locked(&f.before, &f.platform, foreign,
+          (const uint8_t *)f.receipt, strlen(f.receipt), digest_text, &contents, error, sizeof(error)) != 0);
+    CHECK(!memcmp(&contents, &sentinel, sizeof(contents)) && fcntl(foreign, F_GETFD) >= 0);
+    CHECK(close(foreign) == 0);
+    PwTitlePublicationLease reader; CHECK(admit(&f, &reader) == PW_TITLE_PUBLICATION_ADMISSION_BUSY);
+    CHECK(fcntl(writer, F_GETFD) >= 0); // Verification did not release/close the caller's lease.
+    char pending[8192]; strcpy(pending, f.receipt);
+    replace_once(pending, sizeof(pending), "\"phase\":\"committed\"", "\"phase\":\"pending\"");
+    char *hash = strstr(pending, "\"publication_sha256\":\""); CHECK(hash); hash += strlen("\"publication_sha256\":\"");
+    memmove(hash, hash + 64, strlen(hash + 64) + 1);
+    write_file(&f, "/data/playden/games/install-220/.playden-control/publication-state.v1", pending, strlen(pending), 0600);
+    CHECK(pw_title_publication_verify_locked(&f.before, &f.platform, writer,
+          (const uint8_t *)pending, strlen(pending), digest_text, &contents, error, sizeof(error)) == 0);
+    CHECK(calls == 1); // Only the separate reader attempted a shared lock.
+    contents = sentinel;
+    CHECK(pw_title_publication_verify_locked(&f.before, &f.platform, writer,
+          (const uint8_t *)f.receipt, strlen(f.receipt), digest_text, &contents, error, sizeof(error)) != 0);
+    CHECK(!memcmp(&contents, &sentinel, sizeof(contents)) && fcntl(writer, F_GETFD) >= 0);
+    digest_text[0] = digest_text[0] == '0' ? '1' : '0';
+    CHECK(pw_title_publication_verify_locked(&f.before, &f.platform, writer,
+          (const uint8_t *)pending, strlen(pending), digest_text, &contents, error, sizeof(error)) != 0);
+    CHECK(!memcmp(&contents, &sentinel, sizeof(contents)));
+    digest(f.metadata, strlen(f.metadata), digest_text);
+    write_file(&f, "/data/playden/games/install-220/library/input/gamepad.input", "[input]\nmode=keyboard\n", 22, 0600);
+    CHECK(pw_title_publication_verify_locked(&f.before, &f.platform, writer,
+          (const uint8_t *)pending, strlen(pending), digest_text, &contents, error, sizeof(error)) != 0);
+    CHECK(!memcmp(&contents, &sentinel, sizeof(contents)));
+    CHECK(close(writer) == 0); fixture_refresh(&f);
+    CHECK(admit(&f, &reader) == 0); pw_title_publication_close(&reader);
+    fixture_destroy(&f);
+}
 int main(void)
 {
+    publisher_verification_contract();
     valid_and_descriptor_contract();
     refusal_contract();
     filesystem_and_registry_contract();
