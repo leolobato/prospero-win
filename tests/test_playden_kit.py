@@ -722,7 +722,7 @@ class PlaydenKitTests(unittest.TestCase):
 
     def test_development_kit_permits_only_runtime_build_paths(self) -> None:
         payload = self.fixture.runtime / "embedded.bin"
-        write(payload, b"\x7fELF\x00/home/alice/build/source/dlls/x.c\x00")
+        write(payload, b"\x54\x14\xf5\xee/home/alice/build/source/dlls/x.c\x00")
         inventory = json.loads(self.fixture.runtime_inventory.read_text())
         inventory["embedded.bin"] = digest(payload)
         self.fixture.runtime_inventory.write_text(json.dumps(inventory))
