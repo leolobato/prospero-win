@@ -1244,7 +1244,11 @@ int main(int argc, char **argv)
     /* The console starts titles with umask 0, so Wine would save the private
      * bottle's registry as 0666, which publication admission then refuses on
      * the next start. Everything this title creates is the app user's. */
-    if (per_game_mode) umask(077);
+    if (per_game_mode && pw_title_ps5_umask(077) < 0) {
+        PS5LOG_LOG("PW_WINE64 startup blocked reason=umask errno=%d", errno);
+        ps5log_close("umask");
+        return 1;
+    }
     if (per_game_mode && per_game_argument(argc, argv, title_error, sizeof(title_error)) != 0) {
         PS5LOG_LOG("PW_WINE64 startup blocked reason=invalid-per-game-arguments detail=%s",
                    title_error);
