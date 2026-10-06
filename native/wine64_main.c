@@ -40,6 +40,8 @@
 #include "pw_videoout_ps5.h"
 #include "pw_wine_library.h"
 #include "pw_wine_prefix.h"
+#include "pw_title_publication_native.h"
+#include "pw_title_publication_ps5_lock.h"
 #include "../src/pw_present.h"
 #include "../src/pw_spinner.h"
 #include "pw_wine_display.h"
@@ -63,6 +65,9 @@
 #define PW_TITLE_ID "PPSA99995"
 #endif
 #define PW_APP_NAME "prospero-win-wine64"
+#ifndef PW_MANAGED_DESCRIPTOR_REQUIRED
+#define PW_MANAGED_DESCRIPTOR_REQUIRED 0
+#endif
 
 /* Where the title's Wine runtime can be seen: /app0 inside the sandbox;
  * once /data is granted the process sees the real root, where /app0 does
@@ -227,6 +232,8 @@ static const PwGameProfile *per_game_profile;
 static const char *library_root = PW_WINE64_ROOT_SANDBOX;
 static char per_game_library_root[sizeof(((PwTitleLaunch *)0)->data_root) + sizeof("/library")];
 static PwTitleLaunch title_launch;
+static PwTitlePublicationDescriptor title_descriptor;
+static PwTitlePublicationLease title_publication = { .lock_fd = -1 };
 static PwTitleSession title_session;
 static const char *title_session_argument;
 static int per_game_mode;
@@ -337,7 +344,7 @@ static int load_title_descriptor(char *error, size_t error_size)
     int fd = open(path, O_RDONLY);
 
     if (fd < 0) {
-        if (errno == ENOENT) return 0;
+        if (errno == ENOENT && !PW_MANAGED_DESCRIPTOR_REQUIRED) return 0;
         snprintf(error, error_size, "cannot open descriptor: %s", strerror(errno));
         return -1;
     }
@@ -358,9 +365,19 @@ static int load_title_descriptor(char *error, size_t error_size)
         }
     }
     close(fd);
-    if (pw_title_launch_parse(bytes, used, PW_TITLE_ID, &title_launch, error, error_size) != 0)
+    if (pw_title_publication_descriptor_parse((const uint8_t *)bytes, used,
+            PW_TITLE_ID, &title_descriptor, error, error_size) != 0)
         return -1;
+    title_launch = title_descriptor.launch;
     return 1;
+}
+
+/* Registered before admission: every normal exit retains the reader lease
+ * until session reporting has finished. Kernel process teardown closes it on
+ * abnormal termination. Never release it on primary-program return. */
+static void close_title_publication(void)
+{
+    pw_title_publication_close(&title_publication);
 }
 
 static int per_game_argument(int argc, char **argv, char *error, size_t error_size)
@@ -749,12 +766,13 @@ static int open_library(void)
                mount.settled_ms, status == 0 ? library_root : "unavailable");
     if (status != 0) return -1;
     if (per_game_mode) {
-        char profiles[PW_TITLE_SESSION_PATH_SIZE], prefixes[PW_TITLE_SESSION_PATH_SIZE];
-        char input[PW_TITLE_SESSION_PATH_SIZE];
-
-        if (!pw_title_path_is_directory(title_launch.data_root)) {
-            PS5LOG_LOG("PW_WINE64 per-game data root refused root=%s errno=%d",
-                       title_launch.data_root, errno);
+        const PwTitlePublicationPlatform platform = {
+            .host_root = NULL, .owner_uid = (uint32_t)geteuid(),
+            .try_lock_shared = pw_title_publication_ps5_lock, .context = NULL
+        };
+        if (pw_title_publication_open(&title_descriptor, &platform,
+                &title_publication, session_error, sizeof(session_error)) != 0) {
+            PS5LOG_LOG("PW_WINE64 publication refused reason=%s", session_error);
             return -1;
         }
         if (snprintf(per_game_library_root, sizeof(per_game_library_root), "%s/library",
@@ -768,20 +786,14 @@ static int open_library(void)
         }
         PS5LOG_LOG("PW_WINE64 session id=%s origin=%s phase=starting",
                    title_session.session_id, title_session.origin);
-        if (snprintf(profiles, sizeof(profiles), "%s/profiles", library_root) >=
-                (int)sizeof(profiles) ||
-            snprintf(prefixes, sizeof(prefixes), "%s/prefixes", library_root) >=
-                (int)sizeof(prefixes) ||
-            snprintf(input, sizeof(input), "%s/input", library_root) >= (int)sizeof(input) ||
-            !pw_title_path_is_directory(library_root) ||
-            !pw_title_path_is_directory(profiles) ||
-            !pw_title_path_is_directory(prefixes) || !pw_title_path_is_directory(input)) {
-            PS5LOG_LOG("PW_WINE64 managed library path refused root=%s", library_root);
-            (void)pw_title_session_failed(&title_session, 0, 0);
-            return -1;
-        }
+        /* The guard admitted and cached these bytes under the lease. Avoid
+         * reopening profile/input files after their validation. */
+        memset(&library, 0, sizeof(library));
+        library.count = 1;
+        library.entries[0].status = PW_OK;
+        library.entries[0].profile = title_publication.profile;
     }
-    status = pw_wine_library_load(&library, library_root);
+    status = per_game_mode ? PW_OK : pw_wine_library_load(&library, library_root);
     if (status != PW_OK && per_game_mode) {
         (void)pw_title_session_failed(&title_session, 0, 0);
         PS5LOG_LOG("PW_WINE64 library refused status=%s", pw_result_name(status));
@@ -798,15 +810,6 @@ static int open_library(void)
         const PwGameProfile *game = &entry->profile;
         if (per_game_mode && strcmp(game->app.id, title_launch.default_profile_id)) continue;
         if (per_game_mode) {
-            char profile_path[PW_TITLE_SESSION_PATH_SIZE];
-
-            if (snprintf(profile_path, sizeof(profile_path), "%s/profiles/%s", library_root,
-                         entry->file) >= (int)sizeof(profile_path) ||
-                !pw_title_path_is_regular_file(profile_path)) {
-                PS5LOG_LOG("PW_WINE64 default profile path refused file=%s", entry->file);
-                profile_path_refused = 1;
-                continue;
-            }
             per_game_profile = game;
         }
         if (game->display.width)
@@ -1102,6 +1105,7 @@ int main(int argc, char **argv)
     char title_error[192];
 
     ps5log_config_defaults(&log_config);
+    if (atexit(close_title_publication) != 0) return 1;
     if (ps5log_load_config(ps5log_default_conf_paths, ps5log_default_conf_path_count,
                            &log_config, NULL) == 0)
         ps5log_init(&log_config, PW_TITLE_ID, PW_APP_NAME, now_ns());
@@ -1172,20 +1176,15 @@ int main(int argc, char **argv)
         }
     }
     if (game) {
-        if (per_game_mode && game->input.preset[0]) {
-            char input_path[PW_TITLE_SESSION_PATH_SIZE];
-
-            if (snprintf(input_path, sizeof(input_path), "%s/input/%s.input", library_root,
-                         game->input.preset) >= (int)sizeof(input_path) ||
-                !pw_title_path_is_regular_file(input_path)) {
-                PS5LOG_LOG("PW_WINE64 per-game input refused preset=%s", game->input.preset);
-                (void)pw_title_session_failed(&title_session, 0, 0);
-                pw_title_session_close(&title_session);
-                pw_diagnostics_close("per-game-input-refused");
-                return 1;
-            }
+        int input_status;
+        if (per_game_mode) {
+            if (title_publication.has_preset) game_input = title_publication.preset;
+            pw_game_input_overlay(&game_input, &game->input);
+            pw_game_input_default_mode(&game_input);
+            input_status = PW_OK;
+        } else {
+            input_status = pw_wine_library_input(game, library_root, &game_input);
         }
-        int input_status = pw_wine_library_input(game, library_root, &game_input);
         scaling = (int)game->display.scaling;
         if (game->display.view == PW_GAME_VIEW_DESKTOP) snprintf(view, sizeof(view), "desktop");
         if (game->display.width) {
