@@ -865,6 +865,14 @@ static int open_library(void)
             return -1;
         diagnostics_opened = pw_diagnostics_open(per_game_library_root, PW_BUILD_ID,
                                                  title_launch.default_profile_id, 0) == 0;
+        /* The console starts titles with umask 0, so Wine would save the
+         * private bottle's registry as 0666, which publication admission then
+         * refuses on the next start. Everything this title creates is the app
+         * user's. The libkernel gateway resolves only after the grant. */
+        const int previous_mask = pw_title_ps5_umask(077);
+        PS5LOG_LOG("PW_WINE64 umask private=%d previous=%o errno=%d", previous_mask >= 0,
+                   previous_mask >= 0 ? (unsigned)previous_mask : 0u, previous_mask >= 0 ? 0 : errno);
+        if (previous_mask < 0) return -1;
         const PwTitlePublicationPlatform platform = {
             .host_root = NULL, .owner_uid = (uint32_t)geteuid(),
             .try_lock_shared = pw_title_publication_ps5_lock, .context = NULL
@@ -1241,14 +1249,8 @@ int main(int argc, char **argv)
         return 1;
     }
     per_game_mode = status == 1;
-    /* The console starts titles with umask 0, so Wine would save the private
-     * bottle's registry as 0666, which publication admission then refuses on
-     * the next start. Everything this title creates is the app user's. */
-    if (per_game_mode && pw_title_ps5_umask(077) < 0) {
-        PS5LOG_LOG("PW_WINE64 startup blocked reason=umask errno=%d", errno);
-        ps5log_close("umask");
-        return 1;
-    }
+    /* The private umask is set after the data grant (see open_library): the
+     * libkernel gateway it uses is not resolvable before it. */
     if (per_game_mode && per_game_argument(argc, argv, title_error, sizeof(title_error)) != 0) {
         PS5LOG_LOG("PW_WINE64 startup blocked reason=invalid-per-game-arguments detail=%s",
                    title_error);
