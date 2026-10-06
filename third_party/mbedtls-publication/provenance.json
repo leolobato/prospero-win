@@ -1,0 +1,98 @@
+{
+  "schema": "pw-publication-sha256-provenance/1",
+  "upstream_version": "3.6.6",
+  "upstream_archive_sha256": "8fb65fae8dcae5840f793c0a334860a411f884cc537ea290ce1c52bb64ca007a",
+  "upstream_license": "Apache-2.0 OR GPL-2.0-or-later",
+  "compiled_sources": [
+    "src/pw_publication_sha256.c",
+    "third_party/mbedtls-publication/library/sha256.c"
+  ],
+  "config": "third_party/mbedtls-publication/pw_publication_config.h",
+  "files": [
+    {
+      "path": "third_party/mbedtls-publication/LICENSE",
+      "origin": "mbedtls-3.6.6/LICENSE",
+      "sha256": "9b405ef4c89342f5eae1dd828882f931747f71001cfba7d114801039b52ad09b"
+    },
+    {
+      "path": "third_party/mbedtls-publication/include/mbedtls/build_info.h",
+      "origin": "mbedtls-3.6.6/include/mbedtls/build_info.h",
+      "sha256": "9b599075b04e8d4629a9617bced2ff726a0b9407b6f343e01a32c86ea52a8998"
+    },
+    {
+      "path": "third_party/mbedtls-publication/include/mbedtls/check_config.h",
+      "origin": "mbedtls-3.6.6/include/mbedtls/check_config.h",
+      "sha256": "66696df9cc3f7cbbe84786046937242b18140963b94c34347404f7827c428efa"
+    },
+    {
+      "path": "third_party/mbedtls-publication/include/mbedtls/config_adjust_legacy_crypto.h",
+      "origin": "mbedtls-3.6.6/include/mbedtls/config_adjust_legacy_crypto.h",
+      "sha256": "f404960e2878c21c22a5d67caba6cd1d29f382b3d913a56ce856931dd15b2886"
+    },
+    {
+      "path": "third_party/mbedtls-publication/include/mbedtls/config_adjust_ssl.h",
+      "origin": "mbedtls-3.6.6/include/mbedtls/config_adjust_ssl.h",
+      "sha256": "2d37a7552566e9fbd8a5a8b3e6cf6d4e21125a5e48a7e24ca30f3c683d141871"
+    },
+    {
+      "path": "third_party/mbedtls-publication/include/mbedtls/config_adjust_x509.h",
+      "origin": "mbedtls-3.6.6/include/mbedtls/config_adjust_x509.h",
+      "sha256": "92909d91c59340f13eb2b447cf44e0075a0ee742a18f22fb7843f6a18c5af5dc"
+    },
+    {
+      "path": "third_party/mbedtls-publication/include/mbedtls/error.h",
+      "origin": "mbedtls-3.6.6/include/mbedtls/error.h",
+      "sha256": "ddcb14c1bf9d6fd2f2f1d2eb62117ce9bf05a0f9430c6931d7555b23f9ed3ddb"
+    },
+    {
+      "path": "third_party/mbedtls-publication/include/mbedtls/platform.h",
+      "origin": "mbedtls-3.6.6/include/mbedtls/platform.h",
+      "sha256": "e6e1edc99d90698acf751d5d837c9b59898d7277deb993bcbf7473172b7a3523"
+    },
+    {
+      "path": "third_party/mbedtls-publication/include/mbedtls/platform_util.h",
+      "origin": "mbedtls-3.6.6/include/mbedtls/platform_util.h",
+      "sha256": "1237d849e96bc15b479e8086160e4568c1de86563bb51c60eead45b99ad1b4ac"
+    },
+    {
+      "path": "third_party/mbedtls-publication/include/mbedtls/private_access.h",
+      "origin": "mbedtls-3.6.6/include/mbedtls/private_access.h",
+      "sha256": "c897213b3e534e8d5db83629177f9c01d90461ed6fea57906836262dba87056d"
+    },
+    {
+      "path": "third_party/mbedtls-publication/include/mbedtls/sha256.h",
+      "origin": "mbedtls-3.6.6/include/mbedtls/sha256.h",
+      "sha256": "a2ee050ca15b7598a8d227cac0e0ec9fd6c38615b817737a8007e90b3feab0d9"
+    },
+    {
+      "path": "third_party/mbedtls-publication/library/alignment.h",
+      "origin": "mbedtls-3.6.6/library/alignment.h",
+      "sha256": "76979a482c57089aecd8c2370474f19ce983fe9dad2e99925a1645364b44d0a1"
+    },
+    {
+      "path": "third_party/mbedtls-publication/library/common.h",
+      "origin": "mbedtls-3.6.6/library/common.h",
+      "sha256": "adfd493f8ecb11f87f7e75f270a97cbd05d1902345ef32db51d39c076e4f8fde"
+    },
+    {
+      "path": "third_party/mbedtls-publication/library/sha256.c",
+      "origin": "mbedtls-3.6.6/library/sha256.c",
+      "sha256": "632672d0c954d8bc0e20fdc8370c9f1725f3ffc5fcdaacc14949e42a1b5424d7"
+    },
+    {
+      "path": "third_party/mbedtls-publication/pw_publication_config.h",
+      "origin": "authored-publication-provider",
+      "sha256": "684ee25b6dddae4f12bef130caca6e86fc3f5efd1b7eb30b5f04c0be991dcfa9"
+    },
+    {
+      "path": "src/pw_publication_sha256.c",
+      "origin": "authored-publication-provider",
+      "sha256": "60c3b53e9ad6737cff5122722b5d35d4b1abca60dcef3c717723daa314dffaf4"
+    },
+    {
+      "path": "src/pw_publication_sha256.h",
+      "origin": "authored-publication-provider",
+      "sha256": "ecffb764fbae76915c0908ee50275358587db8d0923358a12ccdcbec94211b4b"
+    }
+  ]
+}
