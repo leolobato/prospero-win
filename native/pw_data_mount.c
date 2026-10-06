@@ -37,6 +37,22 @@ int pw_data_mount_request_with(const PwDataMountOps *ops, int32_t pid,
     else
         detail->helper_errno = errno ? errno : EIO;
 
+    /* It also leaves the real UID at 0. Wine's server refuses a prefix that
+     * is not owned by the real UID, and private bottles belong to the app
+     * user, so return the real UID too. Do it while the effective UID is
+     * still 0: without root, FreeBSD only allows a real UID equal to the
+     * current real or saved UID. The saved UID stays as the helper left it. */
+    if (getuid() != original_effective_uid &&
+        setreuid(original_effective_uid, (uid_t)-1) != 0) {
+        detail->credential_errno = errno ? errno : EACCES;
+        errno = detail->credential_errno;
+        return -1;
+    }
+    if (getuid() != original_effective_uid) {
+        detail->credential_errno = EACCES;
+        errno = EACCES;
+        return -1;
+    }
     /* The helper grants the root view but changes EUID. Keep private bottle
      * ownership usable before any managed path access, even on request failure. */
     if (geteuid() != original_effective_uid && seteuid(original_effective_uid) != 0) {
@@ -45,20 +61,6 @@ int pw_data_mount_request_with(const PwDataMountOps *ops, int32_t pid,
         return -1;
     }
     if (geteuid() != original_effective_uid) {
-        detail->credential_errno = EACCES;
-        errno = EACCES;
-        return -1;
-    }
-    /* It also leaves the real UID at 0. Wine's server refuses a prefix that
-     * is not owned by the real UID, and private bottles belong to the app
-     * user, so return the real UID to it too. Nothing later regains root. */
-    if (getuid() != original_effective_uid &&
-        setreuid(original_effective_uid, (uid_t)-1) != 0) {
-        detail->credential_errno = errno ? errno : EACCES;
-        errno = detail->credential_errno;
-        return -1;
-    }
-    if (getuid() != original_effective_uid) {
         detail->credential_errno = EACCES;
         errno = EACCES;
         return -1;

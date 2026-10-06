@@ -22,6 +22,9 @@ int seteuid(uid_t uid) {
 uid_t getuid(void) { return real_uid; }
 int setreuid(uid_t ruid, uid_t euid) {
     if (real_restore_fail) { errno = EPERM; return -1; }
+    /* FreeBSD: without root, a new real UID must equal the current real UID
+     * (the saved UID is 0 here, as the helper left it). */
+    if (effective_uid != 0 && ruid != (uid_t)-1 && ruid != real_uid && ruid != 0) { errno = EPERM; return -1; }
     if (ruid != (uid_t)-1) real_uid = ruid;
     if (euid != (uid_t)-1) effective_uid = euid;
     return 0;
