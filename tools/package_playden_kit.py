@@ -433,7 +433,9 @@ def _validate_native_title_build(path: Path, eboot: Path, title_id: str,
         raise KitError("native title build manifest lacks the required publication guard contract")
 
 
-def _validate_prefix(prefix: Path, dxvk: dict[str, Any], recipe: dict[str, Any]) -> None:
+def _validate_prefix(prefix: Path, dxvk: dict[str, Any], recipe: dict[str, Any],
+                     development_build_paths: bool = False,
+                     exceptions: list[str] | None = None) -> None:
     for registry in REGISTRY:
         if not (prefix / registry).is_file():
             raise KitError(f"template is missing {registry}")
@@ -502,15 +504,24 @@ def _validate_prefix(prefix: Path, dxvk: dict[str, Any], recipe: dict[str, Any])
             if not isinstance(expected[name], str) or _sha256(path) != expected[name]:
                 raise KitError(f"DXVK {label}/{name} hash does not match the pinned input")
 
-    _validate_no_personal_state(prefix, "template")
+    _validate_no_personal_state(prefix, "template", (prefix,) if development_build_paths else (),
+                                exceptions)
+
+
+def _compiled_binary(path: Path) -> bool:
+    with path.open("rb") as stream:
+        magic = stream.read(4)
+    return magic[:2] == b"MZ" or magic == b"\x7fELF"
 
 
 def _validate_no_personal_state(root: Path, label: str,
-                                build_path_exempt: Path | None = None,
+                                exempt_roots: tuple[Path, ...] = (),
                                 exceptions: list[str] | None = None) -> None:
     """Refuse personal/account state. A development kit may exempt compiled
-    build paths (for example __FILE__ strings) inside build_path_exempt; each
-    exempt file is appended to exceptions and is a release blocker."""
+    PE/ELF modules inside exempt_roots whose only finding is an embedded
+    host build path (for example __FILE__ strings). Text, registry and config
+    files are never exempt. Each exempt file is appended to exceptions and is a
+    release blocker."""
     for path in root.rglob("*"):
         lowered = path.name.lower()
         if lowered in PERSONAL_NAMES or lowered.startswith("ssfn") or (
@@ -527,8 +538,9 @@ def _validate_no_personal_state(root: Path, label: str,
                 raise KitError(
                     f"{label} contains personal or account state: {path.relative_to(root)}")
         if path.is_file() and _contains_host_personal_path(path):
-            if (build_path_exempt is not None and exceptions is not None and
-                    build_path_exempt.resolve() in path.resolve().parents):
+            resolved = path.resolve()
+            if (exceptions is not None and _compiled_binary(path) and
+                    any(exempt.resolve() in resolved.parents for exempt in exempt_roots)):
                 exceptions.append(path.relative_to(root).as_posix())
                 continue
             raise KitError(
@@ -690,10 +702,12 @@ def package_kit(spec_path: str | Path, out: str | Path,
     runtime_inventory = _load_runtime_inventory(
         runtime_inventory_path, str(runtime.get("inventory_prefix", "")))
     module_counts = _validate_runtime(runtime_source, runtime_inventory)
-    _validate_prefix(prefix_source, spec.get("dxvk"), recipe_document)
+    template_exceptions: list[str] = []
+    _validate_prefix(prefix_source, spec.get("dxvk"), recipe_document,
+                     development_build_paths, template_exceptions)
     runtime_exceptions: list[str] = []
     _validate_no_personal_state(runtime_source, "runtime",
-                                runtime_source if development_build_paths else None,
+                                (runtime_source,) if development_build_paths else (),
                                 runtime_exceptions)
 
     prepared_variants: list[dict[str, Any]] = []
@@ -940,7 +954,7 @@ def validate_kit(kit: str | Path, manifest_path: str | Path | None = None,
         raise KitError("template path is not canonical")
     if template.get("user") != "prospero":
         raise KitError("template user must be prospero")
-    _validate_prefix(prefix, manifest.get("dxvk"), recipe_document)
+    _validate_prefix(prefix, manifest.get("dxvk"), recipe_document, development_build_paths, [])
     drive_links = prefix / "dosdevices" / LINK_TABLE
     if not drive_links.is_file():
         raise KitError("template is missing console drive mappings")
@@ -995,7 +1009,8 @@ def validate_kit(kit: str | Path, manifest_path: str | Path | None = None,
     for module in runtime_root.rglob("*.prx"):
         _required_executable(module, module.relative_to(root).as_posix())
     exceptions: list[str] = []
-    _validate_no_personal_state(root, "kit", runtime_root if development_build_paths else None, exceptions)
+    _validate_no_personal_state(root, "kit", (runtime_root, prefix) if development_build_paths else (),
+                                exceptions)
     if exceptions:
         manifest = dict(manifest)
         manifest["development_exceptions"] = exceptions
