@@ -8,6 +8,9 @@
 #include <time.h>
 #include <unistd.h>
 
+/* XSI; hidden by _POSIX_C_SOURCE in the PS5 SDK headers. */
+int setreuid(uid_t ruid, uid_t euid);
+
 int pw_data_mount_request_with(const PwDataMountOps *ops, int32_t pid,
                                int max_wait_ms, PwDataMountResult *detail)
 {
@@ -50,6 +53,20 @@ int pw_data_mount_request_with(const PwDataMountOps *ops, int32_t pid,
         return -1;
     }
     if (geteuid() != original_effective_uid) {
+        detail->credential_errno = EACCES;
+        errno = EACCES;
+        return -1;
+    }
+    /* It also leaves the real UID at 0. Wine's server refuses a prefix that
+     * is not owned by the real UID, and private bottles belong to the app
+     * user, so return the real UID to it too. Nothing later regains root. */
+    if (getuid() != original_effective_uid &&
+        setreuid(original_effective_uid, (uid_t)-1) != 0) {
+        detail->credential_errno = errno ? errno : EACCES;
+        errno = detail->credential_errno;
+        return -1;
+    }
+    if (getuid() != original_effective_uid) {
         detail->credential_errno = EACCES;
         errno = EACCES;
         return -1;
