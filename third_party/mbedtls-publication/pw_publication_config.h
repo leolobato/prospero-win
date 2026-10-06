@@ -1,0 +1,17 @@
+/* Scalar SHA-256 only; no TLS, PSA, accelerators, or platform allocators. */
+#ifndef PW_PUBLICATION_MBEDTLS_CONFIG_H
+#define PW_PUBLICATION_MBEDTLS_CONFIG_H
+#define MBEDTLS_CONFIG_VERSION 0x03060600
+#define MBEDTLS_SHA256_C
+#define MBEDTLS_PLATFORM_ZEROIZE_ALT
+/* Isolate this provider from an application's independently linked Mbed TLS. */
+#define mbedtls_sha256_init pw_publication_mbedtls_sha256_init
+#define mbedtls_sha256_free pw_publication_mbedtls_sha256_free
+#define mbedtls_sha256_clone pw_publication_mbedtls_sha256_clone
+#define mbedtls_sha256_starts pw_publication_mbedtls_sha256_starts
+#define mbedtls_sha256_update pw_publication_mbedtls_sha256_update
+#define mbedtls_sha256_finish pw_publication_mbedtls_sha256_finish
+#define mbedtls_sha256 pw_publication_mbedtls_sha256
+#define mbedtls_internal_sha256_process pw_publication_mbedtls_internal_sha256_process
+#define mbedtls_platform_zeroize pw_publication_mbedtls_platform_zeroize
+#endif
