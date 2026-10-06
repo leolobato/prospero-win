@@ -71,6 +71,24 @@ data_root=${PW_DATA_ROOT:-/data/prospero-win}
 fixed_profile=${PW_FIXED_PROFILE:-}
 lapy_helper_elf=${PW_LAPY_HELPER_ELF:-}
 lapy_helper_manifest=${PW_LAPY_HELPER_MANIFEST:-}
+managed_descriptor_required=0
+[[ $title_id == PPSA99995 ]] || managed_descriptor_required=1
+
+# Verify the independently reviewed inventory before compiling the provider.
+publication_provider_sha256=$(python3 - "$root" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+pin = "f14d5e3ecb31951e3cf5bfdc41972181a9be1d96ed0dc7cb3aeebb8e4aab844a"
+raw = (root / "third_party/mbedtls-publication/provenance.json").read_bytes()
+if hashlib.sha256(raw).hexdigest() != pin:
+    raise SystemExit("publication provider provenance differs from reviewed pin")
+for entry in json.loads(raw)["files"]:
+    path = root / entry["path"]
+    if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
+        raise SystemExit("publication provider inventory mismatch: " + entry["path"])
+print(pin)
+PY
+)
 
 [[ $native_mode == wine64 ]] || {
     echo "PW_NATIVE_MODE must be wine64: the direct Win32 runtime was removed" >&2; exit 2; }
@@ -224,6 +242,10 @@ build_id=$source_revision
 common=(-DPW_BUILD_ID=\""$build_id"\" -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections
         -I"$root/include" -I"$root/src" -I"$root/native"
         -I"$root/native/ps5log"
+        -I"$root/third_party/mbedtls-publication/include"
+        -I"$root/third_party/mbedtls-publication"
+        -DMBEDTLS_CONFIG_FILE=\"pw_publication_config.h\"
+        -DPW_MANAGED_DESCRIPTOR_REQUIRED="$managed_descriptor_required"
         -DPW_WINE64_SCRIPT="$wine64_script" -DPW_WINE64_SECONDS="$wine64_seconds"
         -DPW_WINE64_SCRIPT_CYCLES="$wine64_cycles" -DPW_WINE64_WAIT_WATCHDOG="$wine64_watchdog"
         -DPW_TITLE_ID=\""$title_id"\" -DPW_FIXED_PROFILE=\""$fixed_profile"\"
@@ -238,6 +260,9 @@ sources=(
     native/pw_wine_prefix.c
     src/pw_result.c src/pw_wine_start.c src/pw_wine_launch.c src/pw_game_profile.c src/pw_prefix_temp.c
     src/pw_title_launch.c src/pw_title_session.c
+    native/pw_title_publication_native.c native/pw_title_publication_ps5_lock.c
+    src/pw_title_publication.c src/pw_publication_sha256.c
+    third_party/mbedtls-publication/library/sha256.c
     src/pw_app_profile.c src/pw_profile_catalog.c src/pw_launcher_render.c src/pw_present.c
     src/pw_pad.c src/pw_game_menu.c src/pw_osk.c src/pw_hid.c src/pw_spinner.c src/pw_script_input.c
     src/pw_tsc_calibrate.c
@@ -293,7 +318,8 @@ done
 "$tool" self --sign --in "$build/eboot.elf" --out "$dist/eboot.bin" \
     --magic 0x1D3D154F
 python3 - "$dist/eboot.bin" "$dist/native-title-build.json" "$title_id" \
-    "$source_revision" "$source_dirty" <<'PY'
+    "$source_revision" "$source_dirty" "$managed_descriptor_required" \
+    "$publication_provider_sha256" <<'PY'
 import hashlib, json, pathlib, sys
 eboot, destination = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 manifest = {
@@ -303,6 +329,12 @@ manifest = {
     "source_dirty": sys.argv[5] == "true",
     "eboot_sha256": hashlib.sha256(eboot.read_bytes()).hexdigest(),
 }
+if sys.argv[6] == "1":
+    manifest.update({
+        "managed_publication_guard": "playden-publication-guard-v1",
+        "managed_descriptor_required": True,
+        "publication_provider_sha256": sys.argv[7],
+    })
 destination.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 PY
 # The console installer copies icon0.png into /user/app/<title> and aborts
@@ -327,6 +359,9 @@ PY
 cp "$foundation/runtime/libc.prx" "$dist/sce_module/libc.prx"
 cp "$lapy_helper_elf" "$dist/lapy.elf"
 cp "$lapy_helper_manifest" "$dist/lapy-manifest.json"
+mkdir -p "$dist/licenses/mbedtls-publication"
+cp "$root/third_party/mbedtls-publication/LICENSE" "$dist/licenses/mbedtls-publication/"
+cp "$root/third_party/mbedtls-publication/provenance.json" "$dist/licenses/mbedtls-publication/"
 # The console refuses to start a title whose eboot lacks execute permission
 # (exec fails with EACCES) and its loader refuses a PRX without it ("mount
 # flag / attribute error"), so mark both here. An FTP upload may still reset
