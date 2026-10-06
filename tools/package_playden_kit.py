@@ -511,7 +511,8 @@ def _validate_prefix(prefix: Path, dxvk: dict[str, Any], recipe: dict[str, Any],
 def _compiled_binary(path: Path) -> bool:
     with path.open("rb") as stream:
         magic = stream.read(4)
-    return magic[:2] == b"MZ" or magic == b"\x7fELF"
+    # PE, ELF and PS5 signed (SELF) modules.
+    return magic[:2] == b"MZ" or magic in (b"\x7fELF", b"\x54\x14\xf5\xee")
 
 
 def _validate_no_personal_state(root: Path, label: str,
