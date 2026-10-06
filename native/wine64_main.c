@@ -731,6 +731,17 @@ static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reas
     }
 }
 
+/* A title that ends its process directly is reported by the system as a
+ * crash (CE-108255-1, measured after HL2's own Quit). Ask the system to close
+ * the title instead, as other titles do, and wait here for it. Returns only if
+ * the request is refused. */
+static void leave_to_home(void)
+{
+    close_title_publication();
+    if (sceSystemServiceLoadExec("exit", NULL) != 0) return;
+    for (;;) usleep(100000);
+}
+
 /* Wine ends the process with exit() when its last program ends. A generic
  * title returns to its catalog; a per-game title records the observation and
  * returns to Home. The callback does not carry Wine's exit status. */
@@ -746,6 +757,7 @@ static void on_exit_report(void)
         restart_title(NULL, launch.cycle + 1u, "wine-exit");
     }
     pw_diagnostics_close("wine64-exit");
+    if (per_game_mode) leave_to_home();
 }
 
 /* ---- library ------------------------------------------------------------ */
