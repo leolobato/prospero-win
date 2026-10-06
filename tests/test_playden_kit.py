@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import struct
 import sys
@@ -735,6 +736,17 @@ class PlaydenKitTests(unittest.TestCase):
             validate_kit(self.fixture.out)
         self.assertEqual(len(validate_kit(self.fixture.out, development_build_paths=True)
                              ["development_exceptions"]), 1)
+
+    def test_development_kit_exempts_template_binaries_but_not_text(self) -> None:
+        module = self.fixture.prefix / "drive_c/windows/system32/built.dll"
+        write(module, b"MZ\x90\x00/home/alice/build/dlls/built/main.c\x00")
+        result = package_kit(self.fixture.spec, self.fixture.out, development_build_paths=True)
+        self.assertTrue(any(path.endswith("built.dll") for path in result["development_exceptions"]))
+        shutil.rmtree(self.fixture.out)
+        settings = self.fixture.prefix / "drive_c/windows/settings.conf"
+        write(settings, "cache=/home/alice/private\n")
+        with self.assertRaisesRegex(KitError, "host personal path.*settings.conf"):
+            package_kit(self.fixture.spec, self.fixture.out, development_build_paths=True)
 
     def test_development_kit_still_refuses_title_build_paths(self) -> None:
         payload = self.fixture.title / "embedded.bin"
