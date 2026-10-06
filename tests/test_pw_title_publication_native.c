@@ -20,6 +20,7 @@ typedef struct Fixture {
     char root[256];
     PwTitlePublicationPlatform platform;
     PwTitlePublicationDescriptor before;
+    char game_root[1024];
     char descriptor[8192];
     char profile[8192];
     char input[8192];
@@ -136,7 +137,9 @@ static void fixture_refresh(Fixture *f)
     digest(f->input, strlen(f->input), input_hash);
     digest(dxvk, strlen(dxvk), dxvk_hash);
     hex("gamepad.input", input_name, sizeof(input_name));
-    hex("/data/homebrew/FAKE78001/games/220/dxvk.conf", dxvk_path, sizeof(dxvk_path));
+    char dxvk_file[1100];
+    CHECK(snprintf(dxvk_file, sizeof(dxvk_file), "%s/dxvk.conf", f->game_root) > 0);
+    hex(dxvk_file, dxvk_path, sizeof(dxvk_path));
     hex("Software\\Wine\\AppDefaults\\hl2.exe", key0, sizeof(key0));
     hex("Version", name0, sizeof(name0)); hex("win7", value0, sizeof(value0));
     hex("Control Panel\\Desktop", key1, sizeof(key1)); hex("LogPixels", name1, sizeof(name1));
@@ -170,7 +173,7 @@ static void fixture_refresh(Fixture *f)
     write_file(f, "/data/playden/games/install-220/library/input/gamepad.input", f->input, strlen(f->input), 0600);
     write_file(f, "/data/playden/games/install-220/library/profiles/.playden-publication", f->metadata, strlen(f->metadata), 0600);
     write_file(f, "/data/playden/games/install-220/.playden-control/publication-state.v1", f->receipt, strlen(f->receipt), 0600);
-    write_file(f, "/data/homebrew/FAKE78001/games/220/dxvk.conf", dxvk, strlen(dxvk), 0644);
+    write_file(f, dxvk_file, dxvk, strlen(dxvk), 0644);
     write_file(f, "/data/playden/games/install-220/library/prefixes/game/user.reg", user_reg, strlen(user_reg), 0644);
 }
 
@@ -205,6 +208,7 @@ static void fixture_init(Fixture *f, int *lock_calls)
     directory(f, "/data/homebrew/FAKE78001", 0755);
     directory(f, "/data/homebrew/FAKE78001/games/220", 0755);
     write_file(f, "/data/playden/games/install-220/.playden-control/publication.lock", "", 0, 0600);
+    strcpy(f->game_root, "/data/homebrew/FAKE78001/games/220");
     strcpy(f->descriptor,
         "{\"schema_version\":1,\"app_id\":220,\"settings_revision\":7,"
         "\"title_id\":\"FAKE78001\",\"install_id\":\"install-220\","
@@ -523,8 +527,31 @@ static void publisher_verification_contract(void)
     CHECK(admit(&f, &reader) == 0); pw_title_publication_close(&reader);
     fixture_destroy(&f);
 }
+static void explicit_download_root_contract(void) {
+    const char *roots[] = {"/data/homebrew/FAKE77031/games/220", "/mnt/usb0/playden/games/220", NULL};
+    for (unsigned i = 0; roots[i]; ++i) {
+        Fixture f; int calls = 0; fixture_init(&f, &calls);
+        strcpy(f.game_root, roots[i]); directory(&f, f.game_root, 0755);
+        char suffix[1200]; CHECK(snprintf(suffix, sizeof(suffix), ",\"game_root\":\"%s\"}\n", f.game_root) > 0);
+        replace_once(f.descriptor, sizeof(f.descriptor), "\"schema_version\":1", "\"schema_version\":2");
+        replace_once(f.descriptor, sizeof(f.descriptor), "}\n", suffix);
+        char windows[1100]; CHECK(snprintf(windows, sizeof(windows), "Z:%s", f.game_root) > 0);
+        for (char *p = windows; *p; ++p) if (*p == '/') *p = '\\';
+        replace_once(f.profile, sizeof(f.profile), "Z:\\data\\homebrew\\FAKE78001\\games\\220", windows);
+        replace_once(f.profile, sizeof(f.profile), "Z:\\data\\homebrew\\FAKE78001\\games\\220", windows);
+        fixture_refresh(&f);
+        CHECK(pw_title_publication_descriptor_parse((const uint8_t *)f.descriptor, strlen(f.descriptor), "FAKE78001", &f.before, NULL, 0) == PW_OK);
+        strcpy(f.before.launch.game_root, "/data/unrelated/220"); // Bind parsed on-disk bytes, not a modified observation field.
+        PwTitlePublicationLease lease; CHECK(admit(&f, &lease) == PW_OK); pw_title_publication_close(&lease);
+        // Rehashed profile bytes outside the explicit root still fail semantics.
+        replace_once(f.profile, sizeof(f.profile), windows, "Z:\\data\\unrelated\\220");
+        fixture_refresh(&f); CHECK(admit(&f, &lease) != PW_OK);
+        fixture_destroy(&f);
+    }
+}
 int main(void)
 {
+    explicit_download_root_contract();
     publisher_verification_contract();
     valid_and_descriptor_contract();
     refusal_contract();

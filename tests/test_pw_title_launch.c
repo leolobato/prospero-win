@@ -23,7 +23,30 @@ static void rejects_replacement(const char *old, const char *replacement) {
     assert(!memcmp(&out, &untouched, sizeof(out)));
     assert(error[0] != '\0');
 }
+static void explicit_game_root_contract(void) {
+    char text[2048], error[128]; PwTitleLaunch out;
+    snprintf(text, sizeof(text), "{\"game_root\":\"/data/homebrew/FAKE77031/games/220\",%s", valid + 1);
+    char *schema = strstr(text, "\"schema_version\":1"); assert(schema); schema[strlen("\"schema_version\":")] = '2';
+    assert(parse(text, &out, error) == PW_OK);
+    assert(out.schema_version == 2 && !strcmp(out.game_root, "/data/homebrew/FAKE77031/games/220"));
+    schema[strlen("\"schema_version\":")] = '1';
+    assert(parse(text, &out, error) != PW_OK); // Schema 1 cannot smuggle a different root.
+    const char *roots[] = {"/mnt/usb0/playden/games/220", "/data/games/220", "/data/playdens/220", NULL};
+    for (unsigned i = 0; roots[i]; ++i) {
+        snprintf(text, sizeof(text), "{\"game_root\":\"%s\",%s", roots[i], valid + 1);
+        schema = strstr(text, "\"schema_version\":1"); schema[strlen("\"schema_version\":")] = '2';
+        assert(parse(text, &out, error) == PW_OK && !strcmp(out.game_root, roots[i]));
+    }
+    const char *bad[] = {"", "/", "data/games/220", "/data/games/220/", "/data//220", "/data/games/../220", "/mnt/./220", "/other/games/220",
+                         "/data/playden", "/data/playden/games/install-220", "/data/homebrew/x\\\\y", NULL};
+    for (unsigned i = 0; bad[i]; ++i) {
+        snprintf(text, sizeof(text), "{\"game_root\":\"%s\",%s", bad[i], valid + 1);
+        schema = strstr(text, "\"schema_version\":1"); schema[strlen("\"schema_version\":")] = '2';
+        assert(parse(text, &out, error) != PW_OK);
+    }
+}
 int main(void) {
+    explicit_game_root_contract();
     PwTitleLaunch out;
     char error[128], text[1024];
     assert(parse(valid, &out, error) == PW_OK);
@@ -33,7 +56,8 @@ int main(void) {
     assert(!strcmp(out.default_profile_id, "playden-steam-220"));
     assert(out.schema_version == 1 && out.app_id == 220 && out.settings_revision == 0);
     assert(!strcmp(out.recipe_version, "1") && !strcmp(out.exit_policy, "exit-title"));
-    rejects_replacement("\"schema_version\":1", "\"schema_version\":2");
+    rejects_replacement("\"schema_version\":1", "\"schema_version\":2"); // Schema 2 requires its explicit root.
+    rejects_replacement("\"schema_version\":1", "\"schema_version\":3");
     rejects_replacement("FAKE78001", "FAKE78002");
     rejects_replacement("FAKE78001", "fake78001");
     rejects_replacement("\"app_id\":220", "\"app_id\":0");
