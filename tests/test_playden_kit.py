@@ -555,6 +555,45 @@ class PlaydenKitTests(unittest.TestCase):
         with self.assertRaisesRegex(KitError, "eboot"):
             self.package()
 
+    def test_publication_guard_claim_requires_compiled_variant_markers(self) -> None:
+        spec = json.loads(self.fixture.spec.read_text())
+        spec["capabilities"].append("playden-publication-guard-v1")
+        self.fixture.spec.write_text(json.dumps(spec))
+        build = self.fixture.title / "native-title-build.json"
+        original = json.loads(build.read_text())
+        qualified = {
+            **original,
+            "managed_publication_guard": "playden-publication-guard-v1",
+            "managed_descriptor_required": True,
+            "publication_provider_sha256": "f14d5e3ecb31951e3cf5bfdc41972181a9be1d96ed0dc7cb3aeebb8e4aab844a",
+        }
+        for change in (
+                original,
+                {**qualified, "managed_publication_guard": "other"},
+                {**qualified, "managed_publication_guard": True},
+                {**qualified, "managed_descriptor_required": False},
+                {**qualified, "managed_descriptor_required": 1},
+                {**qualified, "publication_provider_sha256": "0" * 64},
+                {**qualified, "publication_provider_sha256": "F" * 64}):
+            with self.subTest(change=change):
+                build.write_text(json.dumps(change))
+                with self.assertRaisesRegex(KitError, "publication guard"):
+                    self.package()
+                self.assertFalse(self.fixture.out.exists())
+        build.write_text(json.dumps(qualified))
+        manifest = self.package()
+        self.assertIn("playden-publication-guard-v1", manifest["capabilities"])
+        self.assertEqual(validate_kit(self.fixture.out), manifest)
+
+    def test_standalone_validator_refuses_guard_claim_on_legacy_variant(self) -> None:
+        self.package()
+        path = self.fixture.out / "manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["capabilities"] = sorted(manifest["capabilities"] + ["playden-publication-guard-v1"])
+        path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(KitError, "publication guard"):
+            validate_kit(self.fixture.out)
+
     def test_rejects_wrong_dxvk_architecture_or_hash(self) -> None:
         dll = self.fixture.prefix / "drive_c/windows/syswow64/d3d9.dll"
         dll.write_bytes(pe("pe64", b"wrong architecture"))
