@@ -44,6 +44,25 @@ typedef struct PwTitlePublicationLease {
     int has_preset;
 } PwTitlePublicationLease;
 
+typedef struct PwTitlePublicationContents {
+    PwGameProfile profile;
+    PwGameInput preset;
+    int has_preset;
+} PwTitlePublicationContents;
+
+/* Verify the exact frozen pending/committed receipt and metadata digest using
+ * the same file semantics as reader admission. Caller must already hold the
+ * qualified exclusive lease on borrowed_lock_fd through all subsequent effects.
+ * This function checks its identity against the canonical stable lock; it does
+ * not acquire, convert, release or close that descriptor and grants no startup
+ * lease. Output is unchanged on failure. */
+int pw_title_publication_verify_locked(
+    const PwTitlePublicationDescriptor *descriptor,
+    const PwTitlePublicationPlatform *platform, int borrowed_lock_fd,
+    const uint8_t *expected_receipt_bytes, size_t expected_receipt_length,
+    const char expected_metadata_sha256[65], PwTitlePublicationContents *contents,
+    char *error, size_t error_size);
+
 void pw_title_publication_lease_init(PwTitlePublicationLease *lease);
 void pw_title_publication_close(PwTitlePublicationLease *lease);
 

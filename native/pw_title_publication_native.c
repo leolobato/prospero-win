@@ -290,7 +290,7 @@ static int append_identifier_path(char *output, size_t capacity, const char *bas
 
 static int receipt_matches(const PwTitlePublication *r, const PwTitleLaunch *l)
 {
-    return r->phase == PW_TITLE_PUBLICATION_COMMITTED &&
+    return
         !strcmp(r->install_id, l->install_id) && !strcmp(r->title_id, l->title_id) &&
         !strcmp(r->runtime_bundle_id, l->runtime_bundle_id) &&
         !strcmp(r->recipe_id, l->recipe_id) && !strcmp(r->recipe_version, l->recipe_version) &&
@@ -566,10 +566,12 @@ static int private_tree_unchanged(const PwTitlePublicationPlatform *platform,
     return 1;
 }
 
-int pw_title_publication_open(const PwTitlePublicationDescriptor *before,
+static int verify_publication(const PwTitlePublicationDescriptor *before,
                               const PwTitlePublicationPlatform *platform,
                               PwTitlePublicationLease *lease,
-                              char *error, size_t error_size)
+                              char *error, size_t error_size,
+                              int borrowed_fd, const uint8_t *expected_receipt,
+                              size_t expected_receipt_length, const char *metadata_digest)
 {
     char control[1024], lock_path[1024], receipt_path[1024], metadata_path[1024];
     char profile_path[1024], catalog_path[1024], input_path[1024], prefix_path[1024], user_reg[1024];
@@ -585,7 +587,7 @@ int pw_title_publication_open(const PwTitlePublicationDescriptor *before,
     pw_title_publication_lease_init(lease);
     pw_game_input_init(&selected);
     if (error && error_size) error[0] = 0;
-    if (!before || !platform || !platform->try_lock_shared || !canonical(before->launch.data_root) ||
+    if (!before || !platform || (borrowed_fd < 0 && !platform->try_lock_shared) || !canonical(before->launch.data_root) ||
         !private_tree(platform, before->launch.data_root, directories, directory_paths) ||
         append_path(control, sizeof(control), before->launch.data_root, ".playden-control") ||
         append_path(lock_path, sizeof(lock_path), control, "publication.lock") ||
@@ -597,10 +599,10 @@ int pw_title_publication_open(const PwTitlePublicationDescriptor *before,
         info.st_uid != (uid_t)platform->owner_uid || info.st_nlink != 1 || (info.st_mode & 07777) != 0600)
         return failure(error, error_size, "publication lock refused");
     lock_before = identity(&info);
-    lock_fd = open(host_lock, O_RDONLY | O_NOFOLLOW);
+    lock_fd = borrowed_fd >= 0 ? borrowed_fd : open(host_lock, O_RDONLY | O_NOFOLLOW);
     if (lock_fd < 0 || fstat(lock_fd, &info) || !same_identity(lock_before, identity(&info))) goto done;
     lock_opened = identity(&info); errno = 0;
-    if (platform->try_lock_shared(platform->context, lock_fd)) {
+    if (borrowed_fd < 0 && platform->try_lock_shared(platform->context, lock_fd)) {
         result = (errno == EWOULDBLOCK || errno == EAGAIN) ? PW_TITLE_PUBLICATION_ADMISSION_BUSY : PW_TITLE_PUBLICATION_ADMISSION_INVALID;
         if (result == PW_TITLE_PUBLICATION_ADMISSION_BUSY && error && error_size)
             snprintf(error, error_size, "publication is busy");
@@ -618,13 +620,17 @@ int pw_title_publication_open(const PwTitlePublicationDescriptor *before,
 
     bytes = read_regular(platform, receipt_path, PW_TITLE_PUBLICATION_MAX_BYTES, 0, &length);
     if (!bytes || pw_title_publication_parse(bytes, length, &receipt) != PW_OK ||
-        !receipt_matches(&receipt, &before->launch)) goto done;
+        !receipt_matches(&receipt, &before->launch) ||
+        (borrowed_fd < 0 && receipt.phase != PW_TITLE_PUBLICATION_COMMITTED) ||
+        (borrowed_fd >= 0 && (length != expected_receipt_length || memcmp(bytes, expected_receipt, length))) ||
+        (borrowed_fd >= 0 && receipt.phase == PW_TITLE_PUBLICATION_COMMITTED &&
+         strcmp(receipt.publication_sha256, metadata_digest))) goto done;
     free(bytes); bytes = NULL;
     stage = 2;
     if (append_path(metadata_path, sizeof(metadata_path), before->launch.data_root,
                     "library/profiles/.playden-publication")) goto done;
     bytes = read_regular(platform, metadata_path, PW_TITLE_PUBLICATION_METADATA_MAX_BYTES, 0, &length);
-    if (!bytes || digest_hex(bytes, length, digest) || strcmp(digest, receipt.publication_sha256) ||
+    if (!bytes || digest_hex(bytes, length, digest) || strcmp(digest, borrowed_fd >= 0 ? metadata_digest : receipt.publication_sha256) ||
         pw_title_publication_metadata_parse(bytes, length, &metadata) != PW_OK ||
         !metadata_matches(&metadata, &receipt, &before->launch)) goto done;
     free(bytes); bytes = NULL;
@@ -702,12 +708,48 @@ int pw_title_publication_open(const PwTitlePublicationDescriptor *before,
     if (!checked_approved_directory(platform, working, &working_after) ||
         !same_identity(working_before, working_after) ||
         !private_tree_unchanged(platform, directories, directory_paths)) goto done;
-    lease->lock_fd = lock_fd; lease->lock_device = lock_opened.device; lease->lock_inode = lock_opened.inode;
+    lease->lock_fd = borrowed_fd >= 0 ? -1 : lock_fd; lease->lock_device = lock_opened.device; lease->lock_inode = lock_opened.inode;
     lease->profile = profile; lease->preset = selected; lease->has_preset = has_selected;
     lock_fd = -1; result = PW_OK;
 done:
-    free(bytes); if (lock_fd >= 0) close(lock_fd);
+    free(bytes); if (lock_fd >= 0 && borrowed_fd < 0) close(lock_fd);
     if (result != PW_OK && result != PW_TITLE_PUBLICATION_ADMISSION_BUSY)
         if (error && error_size) snprintf(error, error_size, "publication admission refused at stage %d", stage);
     return result;
+}
+
+int pw_title_publication_open(const PwTitlePublicationDescriptor *before,
+                              const PwTitlePublicationPlatform *platform,
+                              PwTitlePublicationLease *lease,
+                              char *error, size_t error_size)
+{
+    return verify_publication(before, platform, lease, error, error_size, -1, NULL, 0, NULL);
+}
+
+int pw_title_publication_verify_locked(
+    const PwTitlePublicationDescriptor *descriptor,
+    const PwTitlePublicationPlatform *platform, int borrowed_lock_fd,
+    const uint8_t *expected_receipt_bytes, size_t expected_receipt_length,
+    const char expected_metadata_sha256[65], PwTitlePublicationContents *contents,
+    char *error, size_t error_size)
+{
+    PwTitlePublication parsed; PwTitlePublicationLease verified;
+    if (borrowed_lock_fd < 0 || !contents || !expected_receipt_bytes ||
+        !expected_metadata_sha256 || !expected_receipt_length ||
+        expected_receipt_length > PW_TITLE_PUBLICATION_MAX_BYTES ||
+        pw_title_publication_parse(expected_receipt_bytes, expected_receipt_length, &parsed) != PW_OK)
+        return failure(error, error_size, "invalid locked verification contract");
+    for (unsigned i = 0; i < 64; ++i) {
+        unsigned ch = (unsigned char)expected_metadata_sha256[i];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')))
+            return failure(error, error_size, "invalid locked metadata digest");
+    }
+    if (expected_metadata_sha256[64]) return failure(error, error_size, "invalid locked metadata digest");
+    int rc = verify_publication(descriptor, platform, &verified, error, error_size,
+        borrowed_lock_fd, expected_receipt_bytes, expected_receipt_length, expected_metadata_sha256);
+    if (rc == PW_OK) {
+        contents->profile = verified.profile; contents->preset = verified.preset;
+        contents->has_preset = verified.has_preset;
+    }
+    return rc;
 }

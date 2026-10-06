@@ -34,3 +34,22 @@ contract, release package layout, portable title parser/session and data mount
 checks pass. The full x86 Linux suite remains unverified under the available ARM
 host's Docker x86 emulation (original MAP32 host-execution assertion). None of the
 focused checks substitutes for full release or hardware acceptance.
+
+
+## Locked publisher verification
+
+`pw_title_publication_verify_locked` reuses the reader admission's full file and
+registry semantics while the publisher retains its qualified exclusive stable
+lock. The caller supplies the frozen exact pending/committed receipt and metadata
+SHA-256, and must hold that lease throughout verification and later effects.
+The verifier checks the borrowed descriptor against the canonical lock inode,
+never acquires/converts/releases/closes it, and returns profile/input contents
+without a reader/startup lease. Pending verification never permits Wine startup;
+`pw_title_publication_open` still requires a committed receipt and its own shared
+lease. Output is unchanged after a refusal. This is not an API for acquiring a
+publisher lock or proving stopped-title activity.
+
+Host tests cover both receipt phases, exact receipt/metadata/input drift,
+foreign borrowed descriptors, output preservation and continued reader exclusion
+under the retained publisher lock. Optimized/UBSan tests and SDK v0.42 object
+compilation pass. Native publisher/Wine lifetime acceptance remains pending.
