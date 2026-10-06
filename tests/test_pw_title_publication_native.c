@@ -196,7 +196,10 @@ static void publish_modified_metadata(Fixture *f)
 static void fixture_init(Fixture *f, int *lock_calls)
 {
     memset(f, 0, sizeof(*f));
-    strcpy(f->root, "/private/tmp/pw-publication-native.XXXXXX"); CHECK(mkdtemp(f->root));
+    /* A canonical temporary root: macOS /tmp is a symlink that admission refuses. */
+    strcpy(f->root, access("/private/tmp", W_OK) == 0 ? "/private/tmp/pw-publication-native.XXXXXX"
+                                                    : "/tmp/pw-publication-native.XXXXXX");
+    CHECK(mkdtemp(f->root));
     f->platform.host_root = f->root; f->platform.owner_uid = (uint32_t)geteuid();
     f->platform.try_lock_shared = host_lock; f->platform.context = lock_calls;
     const char *private_directories[] = {
