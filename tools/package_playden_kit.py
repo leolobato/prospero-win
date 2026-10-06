@@ -505,7 +505,12 @@ def _validate_prefix(prefix: Path, dxvk: dict[str, Any], recipe: dict[str, Any])
     _validate_no_personal_state(prefix, "template")
 
 
-def _validate_no_personal_state(root: Path, label: str) -> None:
+def _validate_no_personal_state(root: Path, label: str,
+                                build_path_exempt: Path | None = None,
+                                exceptions: list[str] | None = None) -> None:
+    """Refuse personal/account state. A development kit may exempt compiled
+    build paths (for example __FILE__ strings) inside build_path_exempt; each
+    exempt file is appended to exceptions and is a release blocker."""
     for path in root.rglob("*"):
         lowered = path.name.lower()
         if lowered in PERSONAL_NAMES or lowered.startswith("ssfn") or (
@@ -522,6 +527,10 @@ def _validate_no_personal_state(root: Path, label: str) -> None:
                 raise KitError(
                     f"{label} contains personal or account state: {path.relative_to(root)}")
         if path.is_file() and _contains_host_personal_path(path):
+            if (build_path_exempt is not None and exceptions is not None and
+                    build_path_exempt.resolve() in path.resolve().parents):
+                exceptions.append(path.relative_to(root).as_posix())
+                continue
             raise KitError(
                 f"{label} contains a host personal path in {path.relative_to(root)}")
 
@@ -629,8 +638,13 @@ def _files_digest(entries: list[dict[str, Any]]) -> str:
     return hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
 
 
-def package_kit(spec_path: str | Path, out: str | Path) -> dict[str, Any]:
-    """Package validated local inputs into a new immutable kit directory."""
+def package_kit(spec_path: str | Path, out: str | Path,
+                development_build_paths: bool = False) -> dict[str, Any]:
+    """Package validated local inputs into a new immutable kit directory.
+
+    development_build_paths permits compiled host build paths inside the
+    runtime only. Such a kit is not releasable; the exempt files are returned
+    in the result's development_exceptions, outside the manifest."""
     spec_path = Path(spec_path).resolve()
     spec = _read_json(spec_path, "kit specification")
     if spec.get("schema") != SPEC_SCHEMA:
@@ -677,7 +691,10 @@ def package_kit(spec_path: str | Path, out: str | Path) -> dict[str, Any]:
         runtime_inventory_path, str(runtime.get("inventory_prefix", "")))
     module_counts = _validate_runtime(runtime_source, runtime_inventory)
     _validate_prefix(prefix_source, spec.get("dxvk"), recipe_document)
-    _validate_no_personal_state(runtime_source, "runtime")
+    runtime_exceptions: list[str] = []
+    _validate_no_personal_state(runtime_source, "runtime",
+                                runtime_source if development_build_paths else None,
+                                runtime_exceptions)
 
     prepared_variants: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -804,9 +821,13 @@ def package_kit(spec_path: str | Path, out: str | Path) -> dict[str, Any]:
         (staging / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         (staging / "manifest.json").chmod(0o644)
-        validate_kit(staging)
+        exceptions = validate_kit(staging, development_build_paths=development_build_paths
+                                  ).get("development_exceptions", [])
         os.replace(staging, destination)
-        return manifest
+        result = dict(manifest)
+        if exceptions:
+            result["development_exceptions"] = exceptions
+        return result
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -825,7 +846,8 @@ def _resolve_kit_path(root: Path, value: object) -> Path:
     return path
 
 
-def validate_kit(kit: str | Path, manifest_path: str | Path | None = None) -> dict[str, Any]:
+def validate_kit(kit: str | Path, manifest_path: str | Path | None = None,
+                 development_build_paths: bool = False) -> dict[str, Any]:
     """Validate a packaged kit and return its manifest."""
     root = Path(kit).resolve()
     manifest_file = Path(manifest_path).resolve() if manifest_path else root / "manifest.json"
@@ -972,7 +994,11 @@ def validate_kit(kit: str | Path, manifest_path: str | Path | None = None) -> di
             _required_executable(module, module.relative_to(root).as_posix())
     for module in runtime_root.rglob("*.prx"):
         _required_executable(module, module.relative_to(root).as_posix())
-    _validate_no_personal_state(root, "kit")
+    exceptions: list[str] = []
+    _validate_no_personal_state(root, "kit", runtime_root if development_build_paths else None, exceptions)
+    if exceptions:
+        manifest = dict(manifest)
+        manifest["development_exceptions"] = exceptions
     return manifest
 
 
@@ -984,16 +1010,26 @@ def main(argv: list[str] | None = None) -> int:
     package.add_argument("--out", required=True)
     validate = commands.add_parser("validate", help="validate an existing kit")
     validate.add_argument("kit")
+    for command in (package, validate):
+        command.add_argument(
+            "--development-build-paths", action="store_true",
+            help="development only: permit compiled host build paths in runtime files")
     try:
         arguments = parser.parse_args(argv)
         if arguments.command == "package":
-            result = package_kit(arguments.spec, arguments.out)
+            result = package_kit(arguments.spec, arguments.out, arguments.development_build_paths)
             print(f"Playden kit packaged: {result['kit_id']} files={len(result['files'])} "
                   f"sha256={result['files_sha256']}")
         else:
-            result = validate_kit(arguments.kit)
+            result = validate_kit(arguments.kit,
+                                  development_build_paths=arguments.development_build_paths)
             print(f"Playden kit valid: {result['kit_id']} variants={len(result['variants'])} "
                   f"files={len(result['files'])} sha256={result['files_sha256']}")
+        if result.get("development_exceptions"):
+            print(f"DEVELOPMENT KIT, NOT RELEASABLE: {len(result['development_exceptions'])} runtime "
+                  "files contain host build paths", file=sys.stderr)
+            for path in result["development_exceptions"]:
+                print(f"  {path}", file=sys.stderr)
         return 0
     except KitError as error:
         print(f"Playden kit error: {error}", file=sys.stderr)
