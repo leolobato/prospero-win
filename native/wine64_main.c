@@ -231,6 +231,7 @@ static char catalog_detail[PW_WINE_LIBRARY_MAX][64];
 static size_t catalog_count;
 static const PwGameProfile *per_game_profile;
 static const char *library_root = PW_WINE64_ROOT_SANDBOX;
+static int diagnostics_opened;
 static char per_game_library_root[sizeof(((PwTitleLaunch *)0)->data_root) + sizeof("/library")];
 static PwTitleLaunch title_launch;
 static PwTitlePublicationDescriptor title_descriptor;
@@ -772,6 +773,14 @@ static int open_library(void)
                mount.settled_ms, status == 0 ? library_root : "unavailable");
     if (status != 0) return -1;
     if (per_game_mode) {
+        /* Open the session report as soon as the private library is reachable,
+         * before publication admission, so a refused start leaves its reason
+         * (buffered earlier records are flushed into it as well). */
+        if (snprintf(per_game_library_root, sizeof(per_game_library_root), "%s/library",
+                     title_launch.data_root) >= (int)sizeof(per_game_library_root))
+            return -1;
+        diagnostics_opened = pw_diagnostics_open(per_game_library_root, PW_BUILD_ID,
+                                                 title_launch.default_profile_id, 0) == 0;
         const PwTitlePublicationPlatform platform = {
             .host_root = NULL, .owner_uid = (uint32_t)geteuid(),
             .try_lock_shared = pw_title_publication_ps5_lock, .context = NULL
@@ -781,9 +790,6 @@ static int open_library(void)
             PS5LOG_LOG("PW_WINE64 publication refused reason=%s", session_error);
             return -1;
         }
-        if (snprintf(per_game_library_root, sizeof(per_game_library_root), "%s/library",
-                     title_launch.data_root) >= (int)sizeof(per_game_library_root))
-            return -1;
         library_root = per_game_library_root;
         if (pw_title_session_start(&title_session, &title_launch, title_session_argument,
                                    session_error, sizeof(session_error)) != 0) {
@@ -1152,8 +1158,9 @@ int main(int argc, char **argv)
     } else {
         (void)pw_wine_launch_parse(argc, argv, catalog, catalog_count, &launch);
     }
-    (void)pw_diagnostics_open(library_root, PW_BUILD_ID,
-                              launch.app ? launch.app->id : "launcher", launch.cycle);
+    if (!diagnostics_opened)
+        (void)pw_diagnostics_open(library_root, PW_BUILD_ID,
+                                  launch.app ? launch.app->id : "launcher", launch.cycle);
     PS5LOG_LOG("PW_WINE64 args argc=%d mode=%s profile=%s cycle=%u refused=%u", argc,
                launch.mode == PW_WINE_LAUNCH_GAME ? "game" : "launcher",
                launch.app ? launch.app->id : "-", (unsigned)launch.cycle, launch.refused);
