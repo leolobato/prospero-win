@@ -224,7 +224,7 @@ common=(-DPW_BUILD_ID=\""$build_id"\" -DPW_TITLE_ID=\""$title_id"\"
 sources=(
     native/wine64_main.c native/pw_diagnostics.c native/pw_audio_ps5.c native/pw_pad_ps5.c native/pw_agc_ps5.c
     native/pw_agc_submit_lifecycle.c native/pw_videoout_ps5.c native/pw_data_mount.c
-    native/pw_lapy_elevation.c
+    native/pw_lapy_elevation.c native/native_libkernel_resolver.c
     native/pw_wine_display.c native/pw_wine_library.c native/pw_hid_ps5.c native/pw_wine_prefix.c
     src/pw_result.c src/pw_wine_start.c src/pw_wine_launch.c src/pw_game_profile.c src/pw_prefix_temp.c
     src/pw_title_launch.c src/pw_title_session.c
