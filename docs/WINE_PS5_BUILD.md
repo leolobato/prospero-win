@@ -216,7 +216,10 @@ Module conversion publishes exports from foundation commit `5bd0887`
 onward, and binds imports between application PRXs from
 `30597512539e7edfde079cbcaf4a626bc0a948c5` (the name-form export hash) onward. The
 build requires the second. Both are on the foundation's `exp/prx-module`
-branch, and the title's pinned foundation predates them. `PS5_PRX_FOUNDATION` (or `--prx-foundation`) names a checkout
+branch, and the title's pinned foundation predates them. The same commits
+rebased onto the foundation's main also qualify (the name-form hash there is
+`e879c08a408ac17186b4736d86f67bcc1aa9dab8`); that converter writes every
+Wine PRX byte for byte the same. `PS5_PRX_FOUNDATION` (or `--prx-foundation`) names a checkout
 that has it; otherwise the PRX link is skipped and the report says why.
 
 `report.json` gains a `prx` section. For each module it lists whether the
