@@ -66,6 +66,9 @@
 #define PW_TITLE_ID "PPSA99995"
 #endif
 #define PW_APP_NAME "prospero-win-wine64"
+#ifndef PW_TITLE_PROBE
+#define PW_TITLE_PROBE 0
+#endif
 #ifndef PW_MANAGED_DESCRIPTOR_REQUIRED
 #define PW_MANAGED_DESCRIPTOR_REQUIRED 0
 #endif
@@ -1118,6 +1121,140 @@ static int start_thread(void (*entry)(void *), void *arg, size_t stack_bytes)
     return status;
 }
 
+#if PW_TITLE_PROBE
+/* Step-0 probe for one shell serving many titles: record every way this
+ * process can learn its own title ID, before and after the /data grant, in
+ * /app0/title-probe.txt (read back over FTP), then exit. */
+#include <dirent.h>
+
+struct pw_probe_app_info {   /* as PS5-Lapy-JB-Daemon's helper reads it, with room to spare */
+    uint32_t app_id;
+    uint64_t unknown1;
+    char title_id[14];
+    char unknown2[0x3c + 0x400];
+};
+int sceKernelGetAppInfo(pid_t pid, struct pw_probe_app_info *info);
+int sysctl(const int *name, unsigned length, void *old, size_t *old_length,
+           const void *new_value, size_t new_length);
+
+static void probe_list(FILE *out, const char *label, const char *path)
+{
+    DIR *dir = opendir(path);
+    struct dirent *entry;
+    unsigned shown = 0;
+
+    fprintf(out, "%s path=%s open=%d errno=%d\n", label, path, dir != NULL, dir ? 0 : errno);
+    if (!dir) return;
+    while ((entry = readdir(dir)) && shown < 64) {
+        fprintf(out, "%s entry=%s\n", label, entry->d_name);
+        shown++;
+    }
+    closedir(dir);
+}
+
+static void probe_identity(FILE *out, const char *phase)
+{
+    struct pw_probe_app_info info;
+    struct stat st;
+    char text[1024];
+    int mib[4] = { 1, 14, 12, -1 };   /* kern.proc.pathname of this process */
+    size_t size = sizeof(text) - 1;
+    int rc, fd;
+
+    memset(&info, 0, sizeof(info));
+    fprintf(out, "%s step=appinfo\n", phase);
+    rc = sceKernelGetAppInfo(getpid(), &info);
+    fprintf(out, "%s pid=%d uid=%d euid=%d\n", phase, (int)getpid(), (int)getuid(), (int)geteuid());
+    fprintf(out, "%s appinfo rc=0x%x app_id=0x%x title_id=%.14s\n", phase, (unsigned)rc,
+            (unsigned)info.app_id, info.title_id);
+    fprintf(out, "%s app0 stat=%d errno=%d\n", phase, stat("/app0", &st), errno);
+    memset(text, 0, sizeof(text));
+    fprintf(out, "%s step=sysctl\n", phase);
+    rc = sysctl(mib, 4, text, &size, NULL, 0);
+    fprintf(out, "%s pathname rc=%d errno=%d value=%s\n", phase, rc, rc ? errno : 0, text);
+    memset(text, 0, sizeof(text));
+    /* getcwd terminates the title (CE-108255-1, measured) */
+    fd = open("/app0/sce_sys/param.json", O_RDONLY);
+    fprintf(out, "%s param open=%d errno=%d\n", phase, fd >= 0, fd >= 0 ? 0 : errno);
+    if (fd >= 0) {
+        char param[4096];
+        ssize_t got = read(fd, param, sizeof(param) - 1);
+        const char *key;
+        close(fd);
+        param[got > 0 ? got : 0] = 0;
+        key = strstr(param, "\"titleId\"");
+        fprintf(out, "%s param bytes=%zd titleId=%.32s\n", phase, got, key ? key : "(absent)");
+    }
+    probe_list(out, phase, "/mnt/sandbox");
+}
+
+/* With the title's probe-allow-list present, install it as a root-owned allow-list
+ * for the rule-mode helper probe, the way a launcher would. */
+#define PW_PROBE_ALLOW_DIR "/data/title-shell-probe/rule"
+static void probe_allow_list(FILE *out)
+{
+    char list[256];
+    struct stat st;
+    int in = open("/data/homebrew/" PW_TITLE_ID "/probe-allow-list", O_RDONLY), fd;
+    ssize_t got;
+
+    if (in < 0) { fprintf(out, "allow-list source absent\n"); return; }
+    got = read(in, list, sizeof(list));
+    close(in);
+    (void)mkdir("/data/title-shell-probe", 0755);
+    (void)mkdir(PW_PROBE_ALLOW_DIR, 0755);
+    (void)chmod(PW_PROBE_ALLOW_DIR, 0755);
+    (void)unlink(PW_PROBE_ALLOW_DIR "/allow-list");
+    fd = open(PW_PROBE_ALLOW_DIR "/allow-list", O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (fd >= 0) {
+        if (got > 0 && write(fd, list, (size_t)got) != got) got = -1;
+        (void)fchmod(fd, 0644);
+        close(fd);
+    }
+    fprintf(out, "allow-list write fd=%d bytes=%zd errno=%d\n", fd, got, fd >= 0 ? 0 : errno);
+    if (!lstat(PW_PROBE_ALLOW_DIR, &st))
+        fprintf(out, "allow-list dir uid=%d mode=%o\n", (int)st.st_uid, (unsigned)(st.st_mode & 07777));
+    if (!lstat(PW_PROBE_ALLOW_DIR "/allow-list", &st))
+        fprintf(out, "allow-list file uid=%d mode=%o nlink=%d\n", (int)st.st_uid,
+                (unsigned)(st.st_mode & 07777), (int)st.st_nlink);
+}
+
+static int title_probe(void)
+{
+    PwDataMountResult grant;
+    FILE *out = fopen("/app0/title-probe.txt", "w");
+    int rc;
+
+    if (!out) return 1;
+    setvbuf(out, NULL, _IONBF, 0);   /* every line lands even if a step crashes */
+    fprintf(out, "build=%s compiled_title=%s\n", PW_BUILD_ID, PW_TITLE_ID);
+    probe_identity(out, "before");
+    fflush(out);
+    fprintf(out, "step=grant\n");
+    rc = pw_data_mount_request(&grant);
+    fprintf(out, "grant rc=%d completed=%d helper_errno=%d credential_errno=%d data_after=%d\n", rc,
+            grant.helper_completed, grant.helper_errno, grant.credential_errno, grant.data_after);
+    probe_identity(out, "after");
+    probe_list(out, "after", "/data/homebrew");
+    {   /* can a granted title write a root-owned file (a launcher's allow-list)? */
+        uid_t effective = geteuid();
+        struct stat st;
+        int raised = seteuid(0), raise_errno = raised ? errno : 0, fd = -1, stat_rc = -1;
+        if (raised == 0) {
+            fd = open("/data/homebrew/" PW_TITLE_ID "/root-probe.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) { stat_rc = fstat(fd, &st); close(fd); }
+            probe_allow_list(out);
+            (void)seteuid(effective);
+        }
+        fprintf(out, "root-write seteuid=%d errno=%d open=%d file_uid=%d mode=%o restored_euid=%d\n",
+                raised, raise_errno, fd >= 0, stat_rc ? -1 : (int)st.st_uid,
+                stat_rc ? 0 : (unsigned)(st.st_mode & 07777), (int)geteuid());
+    }
+    fclose(out);
+    return 0;
+}
+#endif
+
 int main(int argc, char **argv)
 {
     static char prefix[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY], desktop[24], view[8] = "window";
@@ -1174,6 +1311,9 @@ int main(int argc, char **argv)
     uint64_t close_requested = 0, combo_ticks = 0, started = now_ns();
     char title_error[192];
 
+#if PW_TITLE_PROBE
+    return title_probe();
+#endif
     ps5log_config_defaults(&log_config);
     if (atexit(close_title_publication) != 0) return 1;
     if (ps5log_load_config(ps5log_default_conf_paths, ps5log_default_conf_path_count,
