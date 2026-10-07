@@ -825,7 +825,7 @@ The title build fetches the helper and manifest from one pinned release of
 `mpereiraesaa/PS5-Lapy-JB-Daemon` every time: `lapy_release` in
 `tools/build_native.sh`, with the SHA-256 of its `lapy.elf` beside it
 (`lapy_elf_sha256`). A newer release is not picked up until both are bumped,
-and the build does not use a local cached ELF. The release must include
+and the default title's build does not use a local cached ELF. The release must include
 `lapy.elf` and `lapy-manifest.json`; the build checks the ELF against the pin
 and the manifest, and the title ID and shared protocol digest, before staging
 it:
@@ -833,6 +833,15 @@ it:
 ~~~sh
 tools/build_native.sh
 ~~~
+
+A per-game title (`PW_TITLE_ID` other than `PPSA99995`) cannot use that
+release, which is built for `PPSA99995`. It needs a helper owned by its own
+title: `PW_LAPY_HELPER_ELF` and `PW_LAPY_HELPER_MANIFEST` name the pair, and
+the build checks them the same way (title, ELF and protocol digests, required
+features) instead of fetching the release. `tools/package_release.sh` takes
+the pair as `--helper-elf` and `--helper-manifest`; `--lapy-release` is then
+optional, and `SOURCES.txt` names the helper by its manifest's mode, title and
+ELF SHA-256.
 
 The helper release is built from the Lapy fork with
 `PS5_PAYLOAD_SDK=<sdk> make owned-helper TARGET_TITLE=PPSA99995`. Upload the
