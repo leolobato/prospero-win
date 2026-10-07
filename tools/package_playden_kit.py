@@ -7,6 +7,9 @@ Wine, DXVK, the native title, or its helper.  Its JSON spec names the finite
 set of title/helper variants that Playden may allocate at install time.
 Each title's helper bytes must also have a reviewed hash in
 ``REQUIRED_HELPER_SHA256``; extending title coverage requires adding that pin.
+One variant may instead be an "any title" shell (``any_title``): a single
+shell and title-rule helper that Playden copies into a new title for every
+game; such a kit carries the ``title-any-id`` capability.
 
 Usage:
     package_playden_kit.py package --spec kit-spec.json --out KIT
@@ -46,6 +49,7 @@ except ModuleNotFoundError:  # Direct execution from tools/.
 SPEC_SCHEMA = "playden-prospero-kit-spec/1"
 MANIFEST_SCHEMA = "playden-prospero-kit/1"
 PUBLICATION_GUARD = "playden-publication-guard-v1"
+ANY_TITLE_CAPABILITY = "title-any-id"
 # Independent pin for the reviewed scalar provider provenance, not a kit claim.
 PUBLICATION_PROVIDER_SHA256 = "f14d5e3ecb31951e3cf5bfdc41972181a9be1d96ed0dc7cb3aeebb8e4aab844a"
 TITLE_RE = re.compile(r"FAKE78\d{3}\Z")
@@ -91,8 +95,16 @@ REQUIRED_PROVENANCE: dict[str, dict[str, str]] = {
         "archive_sha256": "17761876556afd55736cb895d184f5a1c55d43350f1b1e3b129f8d28706d7992",
     },
 }
+# Helper revisions a kit may name: the pinned one above, and a8f391b plus the
+# title-rule mode (feat/title-rule) for the any-title helper.
+ACCEPTED_HELPER_REVISIONS = frozenset({
+    REQUIRED_PROVENANCE["helper"]["revision"],
+    "66ab4f10f9a6c6a5a42d05f1d165230c13ae2ab7",
+})
 # Extend this source-owned allowlist only after reviewing the exact per-title
 # helper artifact.  Helper manifests cannot add or override trust anchors.
+# "FAKE78*" pins the any-title helper (rule FAKE78, allow-list
+# /data/playden/title-rule/allow-list).
 REQUIRED_HELPER_SHA256: dict[str, str] = {
     # Lapy a8f391b (upstream v0.3.2-experimental b48b7d7 plus the exact FAKE
     # title and checkout-independent build commits), SDK v0.42 toolchain,
@@ -109,6 +121,10 @@ REQUIRED_HELPER_SHA256: dict[str, str] = {
     "FAKE78008": "fe9ef47dabf5de4fc5b72f6fee9a71278486446845adcfe9995058fea22bbccb",
     "FAKE78009": "559658cea0b11877b44af4d2091f982b75663cd9ce3e5b6f8c2bbc9c786ac4e1",
     "FAKE78010": "c534953c24364266170e2985146c89b0fb6609ed8d6441f056191167e0dc721a",
+    # Lapy 66ab4f1, SDK v0.42, build_owned_daemon.py --elf-helper --title-rule
+    # FAKE78 --allow-list /data/playden/title-rule/allow-list. Its rule was
+    # run on a console with a probe allow-list path (results/20261007-title-shells).
+    "FAKE78*": "17f7fc80688273aa7ef807de8f7040aabaf307049125abb460bcde5011ce1792",
 }
 
 
@@ -607,6 +623,36 @@ def _validate_kit_contract(document: dict[str, Any]) -> None:
         raise KitError("kit capabilities must be a list of strings")
 
 
+def _variant_any_title(variant: dict[str, Any], variant_id: str) -> bool:
+    value = variant.get("any_title", False)
+    if not isinstance(value, bool):
+        raise KitError(f"variant {variant_id} any_title must be true or false")
+    return value
+
+
+def _helper_pin_key(variant_id: str, title_id: str, any_title: bool,
+                    helper_manifest: dict[str, Any], native_build: Path) -> str:
+    """The REQUIRED_HELPER_SHA256 key of a variant; checks an any-title shell
+    against its helper's rule."""
+    build = _read_json(native_build, "native title build manifest")
+    if not any_title:
+        if build.get("any_title") is not None:
+            raise KitError(f"variant {variant_id} is an any-title shell but not marked any_title")
+        return title_id
+    rule = helper_manifest.get("title_rule")
+    if (build.get("any_title") is not True or not isinstance(rule, dict) or
+            build.get("title_rule") != rule or not isinstance(rule.get("prefix"), str)):
+        raise KitError(f"variant {variant_id} is not an any-title shell with its helper's title rule")
+    return rule["prefix"] + "*"
+
+
+def _validate_any_title_count(count: int, capabilities: list[str]) -> None:
+    if count > 1:
+        raise KitError("a kit carries at most one any-title variant")
+    if (count == 1) != (ANY_TITLE_CAPABILITY in capabilities):
+        raise KitError(f"an any-title variant and the {ANY_TITLE_CAPABILITY} capability go together")
+
+
 def _validate_helper_pin(helper: Path, title_id: str, variant_id: str) -> None:
     expected = REQUIRED_HELPER_SHA256.get(title_id)
     if expected is None:
@@ -636,9 +682,11 @@ def _validate_sources(spec: dict[str, Any]) -> dict[str, Any]:
     helper = sources["helper"]
     if wrapper.get("baseline_revision") != REQUIRED_PROVENANCE["wrapper"]["baseline_revision"]:
         raise KitError("wrapper provenance does not name the tested baseline revision")
-    for name in ("wine", "helper", "foundation"):
+    for name in ("wine", "foundation"):
         if sources[name].get("revision") != REQUIRED_PROVENANCE[name]["revision"]:
             raise KitError(f"source provenance for {name} is not the pinned revision")
+    if helper.get("revision") not in ACCEPTED_HELPER_REVISIONS:
+        raise KitError("source provenance for helper is not the pinned revision")
     if helper.get("base_revision") != REQUIRED_PROVENANCE["helper"]["base_revision"]:
         raise KitError("helper provenance does not match the exact tested base revision")
     sdk = sources["sdk"]
@@ -770,10 +818,13 @@ def package_kit(spec_path: str | Path, out: str | Path,
         if native_build_path != title_source / "native-title-build.json":
             raise KitError(f"variant {variant_id} native build manifest path is not canonical")
         helper = title_source / "lapy.elf"
-        _validate_helper_pin(helper, title_id, variant_id)
+        any_title = _variant_any_title(raw, variant_id)
+        helper_document = _read_json(helper_manifest_path, "helper manifest")
+        _validate_helper_pin(helper, _helper_pin_key(variant_id, title_id, any_title,
+                                                     helper_document, native_build_path),
+                             variant_id)
         try:
-            validate_helper_manifest(_read_json(helper_manifest_path, "helper manifest"),
-                                     helper, protocol_path, title_id)
+            validate_helper_manifest(helper_document, helper, protocol_path, title_id, any_title)
         except (OSError, ValueError) as error:
             raise KitError(f"variant {variant_id} helper validation failed: {error}") from error
         parameter = _read_json(title_source / "sce_sys/param.json", "title param.json")
@@ -793,7 +844,9 @@ def package_kit(spec_path: str | Path, out: str | Path,
             "native_build_manifest": native_build_path,
             "wrapper_revision": raw["wrapper_revision"],
             "helper_revision": raw["helper_revision"],
+            "any_title": any_title,
         })
+    _validate_any_title_count(sum(item["any_title"] for item in prepared_variants), capabilities)
 
     destination = Path(out).resolve()
     if destination.exists():
@@ -831,6 +884,7 @@ def package_kit(spec_path: str | Path, out: str | Path,
                 "helper_manifest": f"titles/{variant['id']}/lapy-manifest.json",
                 "helper_protocol": f"titles/{variant['id']}/lapy_elevation_protocol.h",
                 "native_build_manifest": f"titles/{variant['id']}/native-title-build.json",
+                **({"any_title": True} if variant["any_title"] else {}),
             })
 
         entries = _file_entries(staging)
@@ -993,6 +1047,7 @@ def validate_kit(kit: str | Path, manifest_path: str | Path | None = None,
         raise KitError("template console drive mappings must include c: and z:")
     seen_ids: set[str] = set()
     seen_titles: set[str] = set()
+    any_titles = 0
     for variant in variants:
         if not isinstance(variant, dict):
             raise KitError("variant entry is not an object")
@@ -1020,10 +1075,14 @@ def validate_kit(kit: str | Path, manifest_path: str | Path | None = None,
         helper_manifest = _resolve_kit_path(root, variant.get("helper_manifest"))
         protocol = _resolve_kit_path(root, variant.get("helper_protocol"))
         native_build = _resolve_kit_path(root, variant.get("native_build_manifest"))
-        _validate_helper_pin(title / "lapy.elf", title_id, variant_id)
+        any_title = _variant_any_title(variant, variant_id)
+        any_titles += any_title
+        helper_document = _read_json(helper_manifest, "helper manifest")
+        _validate_helper_pin(title / "lapy.elf", _helper_pin_key(variant_id, title_id, any_title,
+                                                                 helper_document, native_build),
+                             variant_id)
         try:
-            validate_helper_manifest(_read_json(helper_manifest, "helper manifest"),
-                                     title / "lapy.elf", protocol, title_id)
+            validate_helper_manifest(helper_document, title / "lapy.elf", protocol, title_id, any_title)
         except (OSError, ValueError) as error:
             raise KitError(f"variant {variant_id} helper validation failed: {error}") from error
         parameter = _read_json(title / "sce_sys/param.json", "title param.json")
@@ -1036,6 +1095,7 @@ def validate_kit(kit: str | Path, manifest_path: str | Path | None = None,
         _required_executable(title / "lapy.elf", f"variant {variant_id} lapy.elf")
         for module in title.rglob("*.prx"):
             _required_executable(module, module.relative_to(root).as_posix())
+    _validate_any_title_count(any_titles, manifest["capabilities"])
     for module in runtime_root.rglob("*.prx"):
         _required_executable(module, module.relative_to(root).as_posix())
     exceptions: list[str] = []
