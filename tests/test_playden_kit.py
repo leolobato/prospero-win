@@ -30,6 +30,8 @@ from tools.package_playden_kit import (
 WRAPPER_REVISION = "54caac176e86c60c7c407972583b491f67838ed9"
 WINE_REVISION = "bea2be5800ae673f73bd900815628fdfd824650b"
 HELPER_REVISION = "a8f391b269aa2394f291cd1e670afd4744e35590"
+RULE_HELPER_REVISION = "66ab4f10f9a6c6a5a42d05f1d165230c13ae2ab7"
+TITLE_RULE = {"prefix": "FAKE78", "allow_list": "/data/playden/title-rule/allow-list"}
 HELPER_BASE_REVISION = "b48b7d7236eca25c7b9dfd6c040c763ae05dde80"
 FOUNDATION_REVISION = "9c0b994a048521af6fb84c73ded364504fe250e9"
 DXVK_DLLS = ("d3d8", "d3d9", "d3d10core", "d3d11", "dxgi")
@@ -244,6 +246,97 @@ class PlaydenKitTests(unittest.TestCase):
 
     def package(self) -> dict:
         return package_kit(self.fixture.spec, self.fixture.out)
+
+    def make_any_title(self, *, capability: bool = True) -> None:
+        """Turn the fixture's only variant into the one-shell-for-every-title kind."""
+        fixture = self.fixture
+        write(fixture.title / "sce_sys/param.json", json.dumps({"titleId": "FAKE78000"}))
+        build = json.loads((fixture.title / "native-title-build.json").read_text())
+        build.update(title_id="FAKE78000", any_title=True, title_rule=TITLE_RULE)
+        write(fixture.title / "native-title-build.json", json.dumps(build))
+        helper = json.loads(fixture.helper_manifest.read_text())
+        helper.update(target_title="FAKE78*", title_rule=TITLE_RULE,
+                      features=["root_layout_probe_retry", "title_rule"])
+        write(fixture.helper_manifest, json.dumps(helper))
+        spec = json.loads(fixture.spec.read_text())
+        spec["variants"][0].update(id="any-title", title_id="FAKE78000", any_title=True,
+                                   helper_revision=RULE_HELPER_REVISION)
+        spec["sources"]["helper"]["revision"] = RULE_HELPER_REVISION
+        if capability:
+            spec["capabilities"].append("title-any-id")
+        write(fixture.spec, json.dumps(spec))
+        REQUIRED_HELPER_SHA256["FAKE78*"] = digest(fixture.title / "lapy.elf")
+        del REQUIRED_HELPER_SHA256["FAKE78001"]
+
+    def test_packages_one_shell_for_every_title(self) -> None:
+        self.make_any_title()
+        manifest = self.package()
+        self.assertEqual(validate_kit(self.fixture.out), manifest)
+        self.assertEqual(manifest["variants"][0]["any_title"], True)
+        self.assertEqual(manifest["variants"][0]["title_id"], "FAKE78000")
+        self.assertIn("title-any-id", manifest["capabilities"])
+
+    def test_fixed_variants_carry_no_any_title_field(self) -> None:
+        manifest = self.package()
+        self.assertNotIn("any_title", manifest["variants"][0])
+
+    def test_any_title_needs_its_capability_and_the_capability_needs_it(self) -> None:
+        self.make_any_title(capability=False)
+        with self.assertRaisesRegex(KitError, "title-any-id"):
+            self.package()
+        spec = json.loads(self.fixture.spec.read_text())
+        spec["capabilities"].append("title-any-id")
+        spec["variants"][0]["any_title"] = "yes"
+        write(self.fixture.spec, json.dumps(spec))
+        with self.assertRaisesRegex(KitError, "any_title must be true or false"):
+            self.package()
+        self.assertFalse(self.fixture.out.exists())
+
+    def test_capability_without_an_any_title_variant_is_refused(self) -> None:
+        spec = json.loads(self.fixture.spec.read_text())
+        spec["capabilities"].append("title-any-id")
+        write(self.fixture.spec, json.dumps(spec))
+        with self.assertRaisesRegex(KitError, "title-any-id"):
+            self.package()
+
+    def test_any_title_needs_a_rule_helper_and_a_matching_shell(self) -> None:
+        self.make_any_title()
+        build_path = self.fixture.title / "native-title-build.json"
+        original = build_path.read_text()
+        for change in ({"any_title": False}, {"title_rule": {**TITLE_RULE, "prefix": "FAKE7"}}):
+            with self.subTest(change=change):
+                write(build_path, json.dumps({**json.loads(original), **change}))
+                with self.assertRaisesRegex(KitError, "any-title shell"):
+                    self.package()
+        write(build_path, original)
+        # An exact helper can't serve an any-title variant.
+        helper = json.loads(self.fixture.helper_manifest.read_text())
+        write(self.fixture.helper_manifest, json.dumps({**helper, "title_rule": None}))
+        with self.assertRaisesRegex(KitError, "any-title shell"):
+            self.package()
+        write(self.fixture.helper_manifest, json.dumps(helper))
+        # The rule helper's pin is its own.
+        REQUIRED_HELPER_SHA256["FAKE78*"] = "0" * 64
+        with self.assertRaisesRegex(KitError, "pinned helper digest"):
+            self.package()
+        self.assertFalse(self.fixture.out.exists())
+
+    def test_an_any_title_shell_is_refused_as_a_fixed_variant(self) -> None:
+        build_path = self.fixture.title / "native-title-build.json"
+        write(build_path, json.dumps({**json.loads(build_path.read_text()), "any_title": True}))
+        with self.assertRaisesRegex(KitError, "not marked any_title"):
+            self.package()
+
+    def test_standalone_validator_checks_the_any_title_variant(self) -> None:
+        self.make_any_title()
+        self.package()
+        manifest_path = self.fixture.out / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["capabilities"].remove("title-any-id")
+        manifest_path.chmod(0o644)
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(KitError, "title-any-id"):
+            validate_kit(self.fixture.out)
 
     def test_playden_recipe_identity_is_supported(self) -> None:
         self.fixture.recipe.write_text(json.dumps({
