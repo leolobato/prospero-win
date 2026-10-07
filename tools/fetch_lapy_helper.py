@@ -26,12 +26,26 @@ def verify_pinned_elf(elf: Path, expected_sha256: str) -> None:
 
 
 def validate_helper_manifest(manifest: dict, elf: Path, protocol: Path,
-                             target_title: str) -> None:
-    """Reject helpers that do not declare the safety behavior this title uses."""
+                             target_title: str, any_title: bool = False) -> None:
+    """Reject helpers that do not declare the safety behavior this title uses.
+
+    An any-title shell (one binary for every title a launcher makes) needs a
+    title-rule helper whose range holds the shell's template title."""
     actual_elf_sha256 = hashlib.sha256(elf.read_bytes()).hexdigest()
     actual_protocol_sha256 = hashlib.sha256(protocol.read_bytes()).hexdigest()
+    expected_title = target_title
+    if any_title:
+        rule = manifest.get("title_rule")
+        prefix = rule.get("prefix") if isinstance(rule, dict) else None
+        features = manifest.get("features")
+        if (not isinstance(prefix, str) or not re.fullmatch(r"[A-Z]{4}[0-9]{0,4}", prefix) or
+                not target_title.startswith(prefix) or not isinstance(features, list) or
+                "title_rule" not in features):
+            raise ValueError("an any-title shell needs a title-rule helper whose range "
+                             "holds its template title")
+        expected_title = prefix + "*"
     if (manifest.get("mode") != "elf-helper" or
-            manifest.get("target_title") != target_title or
+            manifest.get("target_title") != expected_title or
             manifest.get("elf_sha256") != actual_elf_sha256 or
             manifest.get("protocol_sha256") != actual_protocol_sha256):
         raise ValueError("Lapy release manifest, title or digest does not match")
