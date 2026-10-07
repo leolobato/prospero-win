@@ -28,9 +28,9 @@ from tools.package_playden_kit import (
 
 
 WRAPPER_REVISION = "54caac176e86c60c7c407972583b491f67838ed9"
-WINE_REVISION = "e16ec8f3a19dec4a1162e7554ab73ce41f83bdb9"
-HELPER_REVISION = "e9f2cfc2c3913e42fdf83d74291e270b041ff0d9"
-HELPER_BASE_REVISION = "611fa5f7ed46cdde7094b764168390ab5c4e89f8"
+WINE_REVISION = "bea2be5800ae673f73bd900815628fdfd824650b"
+HELPER_REVISION = "a8f391b269aa2394f291cd1e670afd4744e35590"
+HELPER_BASE_REVISION = "b48b7d7236eca25c7b9dfd6c040c763ae05dde80"
 FOUNDATION_REVISION = "9c0b994a048521af6fb84c73ded364504fe250e9"
 DXVK_DLLS = ("d3d8", "d3d9", "d3d10core", "d3d11", "dxgi")
 CORE_DLLS = ("ntdll", "kernel32", "kernelbase", "mmdevapi", "dinput8", "rsaenh")
