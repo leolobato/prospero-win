@@ -79,10 +79,10 @@ TEXT_PAYLOAD_SUFFIXES = {".cfg", ".conf", ".ini", ".json", ".reg", ".txt"}
 REQUIRED_SOURCES = ("wrapper", "wine", "helper", "foundation", "sdk", "dxvk")
 REQUIRED_PROVENANCE: dict[str, dict[str, str]] = {
     "wrapper": {"baseline_revision": "54caac176e86c60c7c407972583b491f67838ed9"},
-    "wine": {"revision": "e16ec8f3a19dec4a1162e7554ab73ce41f83bdb9"},
+    "wine": {"revision": "bea2be5800ae673f73bd900815628fdfd824650b"},
     "helper": {
-        "revision": "e9f2cfc2c3913e42fdf83d74291e270b041ff0d9",
-        "base_revision": "611fa5f7ed46cdde7094b764168390ab5c4e89f8",
+        "revision": "a8f391b269aa2394f291cd1e670afd4744e35590",
+        "base_revision": "b48b7d7236eca25c7b9dfd6c040c763ae05dde80",
     },
     "foundation": {"revision": "9c0b994a048521af6fb84c73ded364504fe250e9"},
     "sdk": {"version": "0.42"},
@@ -94,22 +94,21 @@ REQUIRED_PROVENANCE: dict[str, dict[str, str]] = {
 # Extend this source-owned allowlist only after reviewing the exact per-title
 # helper artifact.  Helper manifests cannot add or override trust anchors.
 REQUIRED_HELPER_SHA256: dict[str, str] = {
-    "FAKE78001": "5608915201204dfcd1846b01dd2a9e60d03aa390c69b1dc61f3b150566bf1935",
-    # Same reviewed e9f2cfc source, SDK v0.42 toolchain and build procedure;
-    # only TARGET_TITLE and its derived owned ID differ (the FAKE78001 build
-    # reproduces byte for byte with the same procedure).
-    "FAKE78002": "e2449875f8b22a8c595a0d40c02a57c706e0661054986a4d96076c763deaafb2",
-    # FAKE78003-FAKE78010: the same reviewed e9f2cfc source, SDK v0.42 toolchain
-    # and build_owned_daemon.py --elf-helper procedure, built 2026-10-07; only
-    # TARGET_TITLE differs. Not yet run on a console.
-    "FAKE78003": "451a5f223b3f2360f9df5bb7b2cae2df90eb9c2c98223f6784ea82f4fe2606c8",
-    "FAKE78004": "21ae2769aa1e2c77972c6bec0b4b27e62bff824c25f57640e52020efb9e8d02e",
-    "FAKE78005": "19293f8b3795e5b5a5e5bf45452c2ab4e1dc61477aac74f6208accfc777ee4b8",
-    "FAKE78006": "004f67349b8678bc7c6ffb5abc0530b190420a555b604e351e29a6cb4baa21d6",
-    "FAKE78007": "3f464c2ef7c83e5ada6f66b09b236520945fad146b77b81eac82f92537790043",
-    "FAKE78008": "bc4bd449639ac46dc8d2f7595990636512c1f23d896026bb3d5785ac78a35d68",
-    "FAKE78009": "4fd5e80a788901074fb699d4b472470816e5f9cb302bad148442c8eaae77e735",
-    "FAKE78010": "30cb8eddd908e42c682dd49885f7a8d2436043a806ad557c1268da78fe311c3d",
+    # Lapy a8f391b (upstream v0.3.2-experimental b48b7d7 plus the exact FAKE
+    # title and checkout-independent build commits), SDK v0.42 toolchain,
+    # build_owned_daemon.py --elf-helper; only TARGET_TITLE differs. The
+    # protocol header is unchanged (bb02c4aa...). Built 2026-10-07 for kit B;
+    # a second clone reproduces them byte for byte. Not yet run on a console.
+    "FAKE78001": "81f18287e3f0fdb1a395b70b32e3ecbe57aa4573a6e3c7d243f6fce089c0a88b",
+    "FAKE78002": "2e404961c7e4d7a02b1f45855804503ade7122cff37b3315414ab0ef3c8735fd",
+    "FAKE78003": "c0765b0349613d0093db11caa07e897dfae0a29fabf65212dc8f149b68373a81",
+    "FAKE78004": "bed32f064032dac0f19c20a15e20020e587b9ed8fe3415224fd6d4c58a3817d7",
+    "FAKE78005": "fb12dfef0025f2dab84d63d449178a4dfc8519b276924e547c6722fb8c2b4188",
+    "FAKE78006": "74156c8b837311133cfe2e73a4a853c13632ca158c6a394d34272f3c6ccd4828",
+    "FAKE78007": "092c3095ec121131b37090cc2bd313127a1e0aa2a31f3fefdef2e776db740d22",
+    "FAKE78008": "fe9ef47dabf5de4fc5b72f6fee9a71278486446845adcfe9995058fea22bbccb",
+    "FAKE78009": "559658cea0b11877b44af4d2091f982b75663cd9ce3e5b6f8c2bbc9c786ac4e1",
+    "FAKE78010": "c534953c24364266170e2985146c89b0fb6609ed8d6441f056191167e0dc721a",
 }
 
 
