@@ -24,6 +24,9 @@
 #   PW_WINE64_WAIT_WATCHDOG 1 turns on Wine's wait watchdog (patch 0680) in
 #                          every game: a snapshot of the server's waits every
 #                          two seconds, for diagnosing stalls (default 0)
+#   PW_TITLE_PROBE         1 builds a probe that records how the title can
+#                          learn its own ID into /app0/title-probe.txt and
+#                          exits (step-0 console probe, default 0)
 #   Lapy helper             PPSA99995 fetches the GitHub release pinned below
 #                          (lapy_release, lapy_elf_sha256); per-game titles
 #                          take local pinned inputs (PW_LAPY_HELPER_ELF and
@@ -46,6 +49,7 @@ wine64_script=${PW_WINE64_SCRIPT:-0}
 wine64_seconds=${PW_WINE64_SECONDS:-0}
 wine64_cycles=${PW_WINE64_SCRIPT_CYCLES:-2}
 wine64_watchdog=${PW_WINE64_WAIT_WATCHDOG:-0}
+title_probe=${PW_TITLE_PROBE:-0}
 title_id=${PW_TITLE_ID:-PPSA99995}
 lapy_helper_elf=${PW_LAPY_HELPER_ELF:-}
 lapy_helper_manifest=${PW_LAPY_HELPER_MANIFEST:-}
@@ -70,6 +74,8 @@ PY
 
 [[ $native_mode == wine64 ]] || {
     echo "PW_NATIVE_MODE must be wine64: the direct Win32 runtime was removed" >&2; exit 2; }
+[[ $title_probe == 0 || $title_probe == 1 ]] || {
+    echo "PW_TITLE_PROBE must be 0 or 1" >&2; exit 2; }
 [[ $wine64_watchdog == 0 || $wine64_watchdog == 1 ]] || {
     echo "PW_WINE64_WAIT_WATCHDOG must be 0 or 1" >&2; exit 2; }
 [[ $wine64_script == 0 || $wine64_script == 1 ]] && [[ $wine64_seconds =~ ^[0-9]+$ ]] &&
@@ -219,7 +225,8 @@ common=(-DPW_BUILD_ID=\""$build_id"\" -DPW_TITLE_ID=\""$title_id"\"
         -DMBEDTLS_CONFIG_FILE=\"pw_publication_config.h\"
         -DPW_MANAGED_DESCRIPTOR_REQUIRED="$managed_descriptor_required"
         -DPW_WINE64_SCRIPT="$wine64_script" -DPW_WINE64_SECONDS="$wine64_seconds"
-        -DPW_WINE64_SCRIPT_CYCLES="$wine64_cycles" -DPW_WINE64_WAIT_WATCHDOG="$wine64_watchdog")
+        -DPW_WINE64_SCRIPT_CYCLES="$wine64_cycles" -DPW_WINE64_WAIT_WATCHDOG="$wine64_watchdog"
+        -DPW_TITLE_PROBE="$title_probe")
 
 sources=(
     native/wine64_main.c native/pw_diagnostics.c native/pw_audio_ps5.c native/pw_pad_ps5.c native/pw_agc_ps5.c
