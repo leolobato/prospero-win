@@ -58,6 +58,39 @@ class HelperManifestTests(unittest.TestCase):
                 validate_helper_manifest({**manifest, "target_title": "PPSA00000"},
                                          elf, protocol, "PPSA99995")
 
+    def test_any_title_shell_requires_a_rule_helper_holding_its_template(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            elf = root / "lapy.elf"
+            protocol = root / "lapy_elevation_protocol.h"
+            elf.write_bytes(b"rule helper")
+            protocol.write_bytes(b"wire ABI")
+            import hashlib
+            manifest = {
+                "mode": "elf-helper",
+                "target_title": "FAKE78*",
+                "title_rule": {"prefix": "FAKE78", "allow_list": "/data/playden/title-rule/allow-list"},
+                "elf_sha256": hashlib.sha256(elf.read_bytes()).hexdigest(),
+                "protocol_sha256": hashlib.sha256(protocol.read_bytes()).hexdigest(),
+                "features": ["root_layout_probe_retry", "title_rule"],
+            }
+            validate_helper_manifest(manifest, elf, protocol, "FAKE78000", any_title=True)
+            # An exact build can't use a rule helper, and an any-title build needs one.
+            with self.assertRaisesRegex(ValueError, "manifest, title or digest"):
+                validate_helper_manifest(manifest, elf, protocol, "FAKE78000")
+            exact = {**manifest, "target_title": "FAKE78000", "features": ["root_layout_probe_retry"]}
+            del exact["title_rule"]
+            with self.assertRaisesRegex(ValueError, "title-rule helper"):
+                validate_helper_manifest(exact, elf, protocol, "FAKE78000", any_title=True)
+            with self.assertRaisesRegex(ValueError, "title-rule helper"):
+                validate_helper_manifest(manifest, elf, protocol, "PPSA99995", any_title=True)
+            with self.assertRaisesRegex(ValueError, "title-rule helper"):
+                validate_helper_manifest({**manifest, "features": ["root_layout_probe_retry"]},
+                                         elf, protocol, "FAKE78000", any_title=True)
+            with self.assertRaisesRegex(ValueError, "manifest, title or digest"):
+                validate_helper_manifest({**manifest, "target_title": "FAKE7*"},
+                                         elf, protocol, "FAKE78000", any_title=True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,7 +13,12 @@
 #                          laboratory's other projects share (default 0)
 #   PW_NATIVE_MODE         wine64, the only mode (accepted for older scripts)
 #   PW_TITLE_ID            four uppercase letters and five digits
-#                          (default PPSA99995)
+#                          (default PPSA99995); the shell asks the kernel
+#                          for its ID at startup and uses this as fallback
+#   PW_ANY_TITLE           1 builds one shell for every title a launcher
+#                          makes on the console: PW_TITLE_ID is then the
+#                          template ID in sce_sys/param.json, and the helper
+#                          must be a title-rule helper whose range holds it
 #   PW_LAPY_HELPER_ELF     local title-specific Lapy helper
 #   PW_LAPY_HELPER_MANIFEST matching manifest; required with the helper and
 #                          required for every non-default title
@@ -50,11 +55,12 @@ wine64_seconds=${PW_WINE64_SECONDS:-0}
 wine64_cycles=${PW_WINE64_SCRIPT_CYCLES:-2}
 wine64_watchdog=${PW_WINE64_WAIT_WATCHDOG:-0}
 title_probe=${PW_TITLE_PROBE:-0}
+any_title=${PW_ANY_TITLE:-0}
 title_id=${PW_TITLE_ID:-PPSA99995}
 lapy_helper_elf=${PW_LAPY_HELPER_ELF:-}
 lapy_helper_manifest=${PW_LAPY_HELPER_MANIFEST:-}
 managed_descriptor_required=0
-[[ $title_id == PPSA99995 ]] || managed_descriptor_required=1
+[[ $title_id == PPSA99995 && ${PW_ANY_TITLE:-0} == 0 ]] || managed_descriptor_required=1
 
 # Verify the independently reviewed inventory before compiling the provider.
 publication_provider_sha256=$(python3 - "$root" <<'PY'
@@ -74,6 +80,8 @@ PY
 
 [[ $native_mode == wine64 ]] || {
     echo "PW_NATIVE_MODE must be wine64: the direct Win32 runtime was removed" >&2; exit 2; }
+[[ $any_title == 0 || $any_title == 1 ]] || {
+    echo "PW_ANY_TITLE must be 0 or 1" >&2; exit 2; }
 [[ $title_probe == 0 || $title_probe == 1 ]] || {
     echo "PW_TITLE_PROBE must be 0 or 1" >&2; exit 2; }
 [[ $wine64_watchdog == 0 || $wine64_watchdog == 1 ]] || {
@@ -95,7 +103,7 @@ PY
         echo "PW_LAPY_HELPER_ELF and PW_LAPY_HELPER_MANIFEST must be set together" >&2
         exit 2
     }
-if [[ $title_id != PPSA99995 && -z $lapy_helper_elf ]]; then
+if [[ ($title_id != PPSA99995 || $any_title == 1) && -z $lapy_helper_elf ]]; then
     echo "per-game PW_TITLE_ID=$title_id requires PW_LAPY_HELPER_ELF and PW_LAPY_HELPER_MANIFEST" >&2
     exit 2
 fi
@@ -121,7 +129,7 @@ helper_magic=$(od -An -tx1 -N4 "$lapy_helper_elf" | tr -d ' \n')
     exit 2
 }
 if ! python3 - "$root" "$lapy_helper_elf" "$lapy_helper_manifest" \
-    "$title_id" "$root/native/lapy_elevation_protocol.h" <<'PY'
+    "$title_id" "$root/native/lapy_elevation_protocol.h" "$any_title" <<'PY'
 import json, pathlib, sys
 sys.path.insert(0, sys.argv[1])
 from tools.fetch_lapy_helper import validate_helper_manifest
@@ -129,7 +137,7 @@ elf = pathlib.Path(sys.argv[2])
 manifest = json.loads(pathlib.Path(sys.argv[3]).read_text())
 protocol = pathlib.Path(sys.argv[5])
 try:
-    validate_helper_manifest(manifest, elf, protocol, sys.argv[4])
+    validate_helper_manifest(manifest, elf, protocol, sys.argv[4], sys.argv[6] == "1")
 except ValueError as error:
     raise SystemExit(str(error))
 PY
@@ -292,7 +300,7 @@ done
     --magic 0x1D3D154F
 python3 - "$dist/eboot.bin" "$dist/native-title-build.json" "$title_id" \
     "$source_revision" "$source_dirty" "$managed_descriptor_required" \
-    "$publication_provider_sha256" <<'PY'
+    "$publication_provider_sha256" "$any_title" "$lapy_helper_manifest" <<'PY'
 import hashlib, json, pathlib, sys
 eboot, destination = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 manifest = {
@@ -308,6 +316,11 @@ if sys.argv[6] == "1":
         "managed_descriptor_required": True,
         "publication_provider_sha256": sys.argv[7],
     })
+if sys.argv[8] == "1":
+    # One shell for every title in the helper's range; the title ID is read
+    # at startup and title_id is only the template's.
+    manifest["any_title"] = True
+    manifest["title_rule"] = json.loads(pathlib.Path(sys.argv[9]).read_text())["title_rule"]
 destination.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 PY
 # The console installer copies icon0.png into /user/app/<title> and aborts
