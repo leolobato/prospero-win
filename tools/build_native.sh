@@ -234,7 +234,7 @@ sources=(
     native/pw_lapy_elevation.c
     native/pw_wine_display.c native/pw_wine_library.c native/pw_hid_ps5.c native/pw_wine_prefix.c
     src/pw_result.c src/pw_wine_start.c src/pw_wine_launch.c src/pw_game_profile.c src/pw_prefix_temp.c
-    src/pw_title_launch.c src/pw_title_session.c
+    src/pw_title_launch.c src/pw_title_id.c src/pw_title_session.c
     native/pw_title_publication_native.c native/pw_title_publication_ps5_lock.c
     src/pw_title_publication.c src/pw_publication_sha256.c
     third_party/mbedtls-publication/library/sha256.c

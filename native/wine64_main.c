@@ -31,6 +31,7 @@
 #include "../src/pw_launcher_render.h"
 #include "../src/pw_script_input.h"
 #include "../src/pw_title_launch.h"
+#include "../src/pw_title_id.h"
 #include "../src/pw_title_session.h"
 #include "../src/pw_wine_launch.h"
 #include "pw_data_mount.h"
@@ -73,14 +74,39 @@
 #define PW_MANAGED_DESCRIPTOR_REQUIRED 0
 #endif
 
+/* The ID this process runs as, resolved at startup (src/pw_title_id.h):
+ * one shell binary serves every title a launcher makes on the console, and
+ * PW_TITLE_ID is only the fallback. */
+static char title_id[PW_TITLE_ID_SIZE];
+
+/* As PS5-Lapy-JB-Daemon's helper reads it; the kernel may write more. */
+struct pw_app_info {
+    uint32_t app_id;
+    uint64_t unknown1;
+    char title_id[14];
+    char unknown2[0x3c + 0x400];
+};
+int sceKernelGetAppInfo(pid_t pid, struct pw_app_info *info);
+
+static int kernel_title_id(char *title, size_t size)
+{
+    struct pw_app_info info;
+
+    memset(&info, 0, sizeof(info));
+    if (sceKernelGetAppInfo(getpid(), &info) != 0) return -1;
+    info.title_id[sizeof(info.title_id) - 1] = '\0';
+    snprintf(title, size, "%s", info.title_id);
+    return 0;
+}
+
 /* Where the title's Wine runtime can be seen: /app0 inside the sandbox;
  * once /data is granted the process sees the real root, where /app0 does
  * not exist (measured), and the sandbox's view of app0 is used instead. */
 #define PW_WINE64_RUNTIME "/win/wine/lib/wine/x86_64-unix"
 /* Its 64-bit PE modules, among them the WoW64 CPU backends. */
 #define PW_WINE64_PE_RUNTIME "/win/wine/lib/wine/x86_64-windows"
-#define PW_SANDBOX_APP0 "/mnt/sandbox/" PW_TITLE_ID "_000/app0"
-static const char *const runtime_roots[] = { "/app0", PW_SANDBOX_APP0 };
+static char sandbox_app0[sizeof("/mnt/sandbox/_000/app0") + PW_TITLE_ID_SIZE];
+static const char *const runtime_roots[] = { "/app0", sandbox_app0 };
 /* The title's data: profiles/, input/, prefix/ and prefixes/<name>. */
 #define PW_WINE64_ROOT_DATA "/data/prospero-win"            /* when /data is granted */
 #define PW_WINE64_ROOT_SANDBOX "/download0/prospero-win"    /* sandbox fallback */
@@ -375,7 +401,7 @@ static int load_title_descriptor(char *error, size_t error_size)
     }
     close(fd);
     if (pw_title_publication_descriptor_parse((const uint8_t *)bytes, used,
-            PW_TITLE_ID, &title_descriptor, error, error_size) != 0)
+            title_id, &title_descriptor, error, error_size) != 0)
         return -1;
     title_launch = title_descriptor.launch;
     return 1;
@@ -716,7 +742,8 @@ static PwWineLaunch launch;
  * sandbox's view of the same eboot is tried next. Returns only on failure. */
 static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reason)
 {
-    static const char *const eboots[] = { "/app0/eboot.bin", PW_SANDBOX_APP0 "/eboot.bin" };
+    static char sandbox_eboot[sizeof(sandbox_app0) + sizeof("/eboot.bin")];
+    const char *const eboots[] = { "/app0/eboot.bin", sandbox_eboot };
     static char storage[2 * PW_WINE_LAUNCH_PATH_MAX + 64];
     char *next[PW_WINE_LAUNCH_ARGS];
 
@@ -729,6 +756,7 @@ static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reas
         PS5LOG_LOG("PW_WINE64 restart refused: arguments do not fit");
         return;
     }
+    snprintf(sandbox_eboot, sizeof(sandbox_eboot), "%s/eboot.bin", sandbox_app0);
     for (size_t i = 0; i < sizeof(eboots) / sizeof(eboots[0]); i++) {
         PS5LOG_LOG("PW_WINE64 restart to=%s cycle=%u reason=%s eboot=%s", app ? app->id : "launcher",
                    (unsigned)cycle, reason, eboots[i]);
@@ -1089,13 +1117,6 @@ static int start_thread(void (*entry)(void *), void *arg, size_t stack_bytes)
  * /app0/title-probe.txt (read back over FTP), then exit. */
 #include <dirent.h>
 
-struct pw_probe_app_info {   /* as PS5-Lapy-JB-Daemon's helper reads it, with room to spare */
-    uint32_t app_id;
-    uint64_t unknown1;
-    char title_id[14];
-    char unknown2[0x3c + 0x400];
-};
-int sceKernelGetAppInfo(pid_t pid, struct pw_probe_app_info *info);
 int sysctl(const int *name, unsigned length, void *old, size_t *old_length,
            const void *new_value, size_t new_length);
 
@@ -1116,7 +1137,7 @@ static void probe_list(FILE *out, const char *label, const char *path)
 
 static void probe_identity(FILE *out, const char *phase)
 {
-    struct pw_probe_app_info info;
+    struct pw_app_info info;
     struct stat st;
     char text[1024];
     int mib[4] = { 1, 14, 12, -1 };   /* kern.proc.pathname of this process */
@@ -1157,9 +1178,12 @@ static void probe_allow_list(FILE *out)
 {
     char list[256];
     struct stat st;
-    int in = open("/data/homebrew/" PW_TITLE_ID "/probe-allow-list", O_RDONLY), fd;
+    char source[64];
+    int in, fd;
     ssize_t got;
 
+    snprintf(source, sizeof(source), "/data/homebrew/%s/probe-allow-list", title_id);
+    in = open(source, O_RDONLY);
     if (in < 0) { fprintf(out, "allow-list source absent\n"); return; }
     got = read(in, list, sizeof(list));
     close(in);
@@ -1189,7 +1213,7 @@ static int title_probe(void)
 
     if (!out) return 1;
     setvbuf(out, NULL, _IONBF, 0);   /* every line lands even if a step crashes */
-    fprintf(out, "build=%s compiled_title=%s\n", PW_BUILD_ID, PW_TITLE_ID);
+    fprintf(out, "build=%s compiled_title=%s resolved_title=%s\n", PW_BUILD_ID, PW_TITLE_ID, title_id);
     probe_identity(out, "before");
     fflush(out);
     fprintf(out, "step=grant\n");
@@ -1203,7 +1227,9 @@ static int title_probe(void)
         struct stat st;
         int raised = seteuid(0), raise_errno = raised ? errno : 0, fd = -1, stat_rc = -1;
         if (raised == 0) {
-            fd = open("/data/homebrew/" PW_TITLE_ID "/root-probe.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            char path[64];
+            snprintf(path, sizeof(path), "/data/homebrew/%s/root-probe.txt", title_id);
+            fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd >= 0) { stat_rc = fstat(fd, &st); close(fd); }
             probe_allow_list(out);
             (void)seteuid(effective);
@@ -1281,7 +1307,10 @@ int main(int argc, char **argv)
     int status, video_status = PW_ERR_STATE, pad_status = PW_ERR_STATE, hid_status = PW_ERR_STATE;
     uint64_t close_requested = 0, combo_ticks = 0, started = now_ns();
     char title_error[192];
+    int title_from_kernel = pw_title_id_resolve(kernel_title_id, PW_TITLE_ID, title_id);
 
+    if (title_from_kernel < 0) return 1;
+    snprintf(sandbox_app0, sizeof(sandbox_app0), "/mnt/sandbox/%s_000/app0", title_id);
 #if PW_TITLE_PROBE
     return title_probe();
 #endif
@@ -1289,7 +1318,9 @@ int main(int argc, char **argv)
     if (atexit(close_title_publication) != 0) return 1;
     if (ps5log_load_config(ps5log_default_conf_paths, ps5log_default_conf_path_count,
                            &log_config, NULL) == 0)
-        ps5log_init(&log_config, PW_TITLE_ID, PW_APP_NAME, now_ns());
+        ps5log_init(&log_config, title_id, PW_APP_NAME, now_ns());
+    PS5LOG_LOG("PW_WINE64 title id=%s source=%s compiled=%s", title_id,
+               title_from_kernel ? "kernel" : "compiled", PW_TITLE_ID);
     status = load_title_descriptor(title_error, sizeof(title_error));
     if (status < 0) {
         PS5LOG_LOG("PW_WINE64 startup blocked reason=invalid-descriptor detail=%s", title_error);
