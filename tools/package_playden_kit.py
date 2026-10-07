@@ -101,6 +101,8 @@ REQUIRED_PROVENANCE: dict[str, dict[str, str]] = {
 ACCEPTED_HELPER_REVISIONS: dict[str, str] = {
     REQUIRED_PROVENANCE["helper"]["revision"]: REQUIRED_PROVENANCE["helper"]["base_revision"],
     "66ab4f10f9a6c6a5a42d05f1d165230c13ae2ab7": "b48b7d7236eca25c7b9dfd6c040c763ae05dde80",
+    # FW 13.60 fallback: same helper sources as 66ab4f1 after the UID-drop revert.
+    "9adc6b72ced860e4630d9c3c53271da094eea291": "b48b7d7236eca25c7b9dfd6c040c763ae05dde80",
 }
 # Extend this source-owned allowlist only after reviewing the exact per-title
 # helper artifact.  Helper manifests cannot add or override trust anchors.
