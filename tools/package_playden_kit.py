@@ -95,12 +95,13 @@ REQUIRED_PROVENANCE: dict[str, dict[str, str]] = {
         "archive_sha256": "17761876556afd55736cb895d184f5a1c55d43350f1b1e3b129f8d28706d7992",
     },
 }
-# Helper revisions a kit may name: the pinned one above, and a8f391b plus the
-# title-rule mode (feat/title-rule) for the any-title helper.
-ACCEPTED_HELPER_REVISIONS = frozenset({
-    REQUIRED_PROVENANCE["helper"]["revision"],
-    "66ab4f10f9a6c6a5a42d05f1d165230c13ae2ab7",
-})
+# Helper revisions a kit may name, with the base each is built on: the pinned
+# one above, and Lapy a8f391b plus the title-rule mode (feat/title-rule, on
+# upstream b48b7d7) for the any-title helper.
+ACCEPTED_HELPER_REVISIONS: dict[str, str] = {
+    REQUIRED_PROVENANCE["helper"]["revision"]: REQUIRED_PROVENANCE["helper"]["base_revision"],
+    "66ab4f10f9a6c6a5a42d05f1d165230c13ae2ab7": "b48b7d7236eca25c7b9dfd6c040c763ae05dde80",
+}
 # Extend this source-owned allowlist only after reviewing the exact per-title
 # helper artifact.  Helper manifests cannot add or override trust anchors.
 # "FAKE78*" pins the any-title helper (rule FAKE78, allow-list
@@ -687,7 +688,7 @@ def _validate_sources(spec: dict[str, Any]) -> dict[str, Any]:
             raise KitError(f"source provenance for {name} is not the pinned revision")
     if helper.get("revision") not in ACCEPTED_HELPER_REVISIONS:
         raise KitError("source provenance for helper is not the pinned revision")
-    if helper.get("base_revision") != REQUIRED_PROVENANCE["helper"]["base_revision"]:
+    if helper.get("base_revision") != ACCEPTED_HELPER_REVISIONS.get(helper.get("revision")):
         raise KitError("helper provenance does not match the exact tested base revision")
     sdk = sources["sdk"]
     dxvk = sources["dxvk"]
