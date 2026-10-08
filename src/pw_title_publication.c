@@ -429,6 +429,7 @@ int pw_title_publication_metadata_parse(
     uint8_t registry_seen[PW_TITLE_PUBLICATION_MAX_REGISTRY] = {0};
     uint8_t registry_dword_value[PW_TITLE_PUBLICATION_MAX_REGISTRY] = {0};
     uint32_t base_seen = 0;
+    int unowned_seen = 0;
     size_t offset = 0;
 
     if (!bytes || !metadata)
@@ -476,9 +477,9 @@ int pw_title_publication_metadata_parse(
                 if (status != PW_OK)
                     return status;
                 if (field == BASE_SCHEMA) {
-                    if (number != 2u)
+                    if (number != 2u && number != 3u)
                         return PW_ERR_UNSUPPORTED;
-                    candidate.schema_version = 2u;
+                    candidate.schema_version = (unsigned)number;
                 } else if (field == BASE_REVISION) {
                     candidate.settings_revision = number;
                 } else if (field == BASE_INPUT_COUNT) {
@@ -516,6 +517,19 @@ int pw_title_publication_metadata_parse(
                 status = copy_plain(target, capacity, value, value_length, 0);
             }
             break;
+        }
+        if (!handled && !strcmp(key, "game_root.unowned")) {
+            uint64_t number;
+            if (unowned_seen)
+                return PW_ERR_MALFORMED;
+            unowned_seen = 1;
+            handled = 1;
+            status = decimal(value, value_length, &number);
+            if (status != PW_OK)
+                return status;
+            if (number > 1u)
+                return PW_ERR_MALFORMED;
+            candidate.game_root_unowned = (unsigned)number;
         }
         if (!handled) {
             unsigned index;
@@ -611,6 +625,9 @@ int pw_title_publication_metadata_parse(
         offset += line_length + 1u;
     }
     if (base_seen != (1u << BASE_COUNT) - 1u)
+        return PW_ERR_MALFORMED;
+    /* Schema 3 always states game_root.unowned; schema 2 never has it. */
+    if (unowned_seen != (candidate.schema_version == 3u))
         return PW_ERR_MALFORMED;
     for (unsigned index = 0; index < PW_TITLE_PUBLICATION_MAX_INPUTS; ++index) {
         if (index < candidate.input_count) {
