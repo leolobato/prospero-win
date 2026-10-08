@@ -148,15 +148,17 @@ static int checked_directory(const PwTitlePublicationPlatform *platform,
     return 1;
 }
 
+/* unowned: the game folder's filesystem records no owner or permissions
+ * (exFAT), so any owner and mode are accepted; type and symlinks still count. */
 static int checked_approved_directory(const PwTitlePublicationPlatform *platform,
-                                      const char *console, FileIdentity *output)
+                                      const char *console, int unowned, FileIdentity *output)
 {
     char path[PW_TITLE_PUBLICATION_NATIVE_PATH * 2]; struct stat info; mode_t mode;
     if (mapped_path(platform, console, path, sizeof(path)) || !no_symlink_ancestors(path) ||
         lstat(path, &info) || !S_ISDIR(info.st_mode) || S_ISLNK(info.st_mode) ||
-        info.st_uid != (uid_t)platform->owner_uid) return 0;
+        (!unowned && info.st_uid != (uid_t)platform->owner_uid)) return 0;
     mode = info.st_mode & 07777;
-    if (mode != 0700 && mode != 0755) return 0;
+    if (!unowned && mode != 0700 && mode != 0755) return 0;
     if (output) *output = identity(&info);
     return 1;
 }
@@ -168,10 +170,14 @@ static int directory_unchanged(const PwTitlePublicationPlatform *platform,
     return checked_directory(platform, console, wanted, &after) && same_identity(before, after);
 }
 
+/* read_regular file policies: private files are 0600; legacy ones may be 0644;
+ * a file in an unowned game folder may have any owner and mode. */
+enum { READ_PRIVATE = 0, READ_LEGACY = 1, READ_GAME_UNOWNED = 2 };
+
 static int admitted_mode(mode_t actual, int legacy)
 {
     mode_t permission = actual & 07777;
-    return permission == 0600 || (legacy && permission == 0644);
+    return legacy == READ_GAME_UNOWNED || permission == 0600 || (legacy && permission == 0644);
 }
 
 static uint8_t *read_regular(const PwTitlePublicationPlatform *platform, const char *console,
@@ -181,7 +187,8 @@ static uint8_t *read_regular(const PwTitlePublicationPlatform *platform, const c
     uint8_t *bytes = NULL; size_t used = 0; int fd = -1;
     if (!length || mapped_path(platform, console, path, sizeof(path)) ||
         !no_symlink_ancestors(path) || lstat(path, &before) || !S_ISREG(before.st_mode) ||
-        S_ISLNK(before.st_mode) || before.st_uid != (uid_t)platform->owner_uid ||
+        S_ISLNK(before.st_mode) ||
+        (legacy_mode != READ_GAME_UNOWNED && before.st_uid != (uid_t)platform->owner_uid) ||
         before.st_nlink != 1 || !admitted_mode(before.st_mode, legacy_mode) ||
         before.st_size < 0 || (uint64_t)before.st_size > maximum) return NULL;
     fd = open(path, O_RDONLY | O_NOFOLLOW);
@@ -300,7 +307,7 @@ static int receipt_matches(const PwTitlePublication *r, const PwTitleLaunch *l)
 static int metadata_matches(const PwTitlePublicationMetadata *m,
                             const PwTitlePublication *r, const PwTitleLaunch *l)
 {
-    return m->schema_version == 2 && !strcmp(m->install_id, l->install_id) &&
+    return (m->schema_version == 2 || m->schema_version == 3) && !strcmp(m->install_id, l->install_id) &&
         !strcmp(m->title_id, l->title_id) && !strcmp(m->data_root, l->data_root) &&
         !strcmp(m->profile_id, l->default_profile_id) &&
         !strcmp(m->runtime_bundle_id, l->runtime_bundle_id) &&
@@ -688,11 +695,13 @@ static int verify_publication(const PwTitlePublicationDescriptor *before,
          (strncmp(working, game_root, strlen(game_root)) || working[strlen(game_root)] != '/')) ||
         strncmp(executable, game_root, strlen(game_root)) ||
         (executable[strlen(game_root)] != '/' && executable[strlen(game_root)] != 0) ||
-        !checked_approved_directory(platform, working, &working_before)) goto done;
+        !checked_approved_directory(platform, working, (int)metadata.game_root_unowned,
+                                    &working_before)) goto done;
     if (append_path(expected_dxvk, sizeof(expected_dxvk), working, "dxvk.conf") ||
         strcmp(expected_dxvk, metadata.dxvk_path)) goto done;
     if (metadata.dxvk_present) {
-        bytes = read_regular(platform, expected_dxvk, 1024 * 1024, 1, &length);
+        bytes = read_regular(platform, expected_dxvk, 1024 * 1024,
+                             metadata.game_root_unowned ? READ_GAME_UNOWNED : READ_LEGACY, &length);
         if (!bytes || digest_hex(bytes, length, digest) || strcmp(digest, metadata.dxvk_sha256)) goto done;
         free(bytes); bytes = NULL;
     } else {
@@ -706,7 +715,8 @@ static int verify_publication(const PwTitlePublicationDescriptor *before,
     if (!bytes || !registry_semantics(bytes, length, &metadata, &profile)) goto done;
     free(bytes); bytes = NULL;
     stage = 8;
-    if (!checked_approved_directory(platform, working, &working_after) ||
+    if (!checked_approved_directory(platform, working, (int)metadata.game_root_unowned,
+                                    &working_after) ||
         !same_identity(working_before, working_after) ||
         !private_tree_unchanged(platform, directories, directory_paths)) goto done;
     lease->lock_fd = borrowed_fd >= 0 ? -1 : lock_fd; lease->lock_device = lock_opened.device; lease->lock_inode = lock_opened.inode;
