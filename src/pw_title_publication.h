@@ -76,6 +76,10 @@ typedef struct PwTitlePublicationMetadata {
     char dxvk_path[513];
     unsigned dxvk_present;
     char dxvk_sha256[65];
+    /* Schema 3: the game folder is on a filesystem that records no owner or
+     * permissions (exFAT). Admission then skips owner/mode checks inside the
+     * game root and keeps the type, symlink and identity checks. */
+    unsigned game_root_unowned;
     unsigned registry_count;
     PwTitlePublicationRegistry registry[PW_TITLE_PUBLICATION_MAX_REGISTRY];
 } PwTitlePublicationMetadata;

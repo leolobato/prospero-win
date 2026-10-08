@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "../native/pw_title_publication_native.h"
+#include "../src/pw_title_publication.h"
 #include "../src/pw_publication_sha256.h"
 
 #include <assert.h>
@@ -241,7 +242,9 @@ static int admit(Fixture *f, PwTitlePublicationLease *lease)
 {
     char error[256];
     pw_title_publication_lease_init(lease);
+    error[0] = 0;
     int result = pw_title_publication_open(&f->before, &f->platform, lease, error, sizeof(error));
+    if (getenv("PW_TEST_TRACE") && result) fprintf(stderr, "admit: %d %s\n", result, error);
     return result;
 }
 
@@ -552,6 +555,55 @@ static void explicit_download_root_contract(void) {
         fixture_destroy(&f);
     }
 }
+
+static int metadata_parses(const char *text)
+{
+    PwTitlePublicationMetadata parsed;
+    return pw_title_publication_metadata_parse((const uint8_t *)text, strlen(text), &parsed) == PW_OK;
+}
+
+/* A game folder on a filesystem without owners or permissions (exFAT) is
+ * admitted only when schema 3 metadata says so; private files stay strict. */
+static void unowned_game_root_contract(void)
+{
+    Fixture f; PwTitlePublicationLease lease; int calls = 0;
+    char game[1200], dxvk[1200], profiles[1200], alias[1200], text[32768], variant[32768];
+    const char *metadata = "/data/playden/games/install-220/library/profiles/.playden-publication";
+    fixture_init(&f, &calls);
+    path(game, sizeof(game), &f, "/data/homebrew/FAKE78001/games/220");
+    path(dxvk, sizeof(dxvk), &f, "/data/homebrew/FAKE78001/games/220/dxvk.conf");
+    CHECK(chmod(game, 0777) == 0); CHECK(admit(&f, &lease) != 0);
+    CHECK(chmod(game, 0755) == 0); CHECK(chmod(dxvk, 0666) == 0); CHECK(admit(&f, &lease) != 0);
+
+    read_file(&f, metadata, text, sizeof(text));
+    strcpy(variant, text); replace_once(variant, sizeof(variant), "schema=2", "schema=3");
+    CHECK(!metadata_parses(variant));                       /* schema 3 states the field */
+    strcat(variant, "game_root.unowned=2\n"); CHECK(!metadata_parses(variant));
+    strcpy(variant, text); strcat(variant, "game_root.unowned=1\n");
+    CHECK(!metadata_parses(variant));                       /* schema 2 never has it */
+    replace_once(variant, sizeof(variant), "schema=2", "schema=3"); CHECK(metadata_parses(variant));
+    strcat(variant, "game_root.unowned=1\n"); CHECK(!metadata_parses(variant));  /* duplicate */
+
+    strcpy(variant, text); replace_once(variant, sizeof(variant), "schema=2", "schema=3");
+    strcat(variant, "game_root.unowned=0\n");
+    write_file(&f, metadata, variant, strlen(variant), 0600);
+    publish_modified_metadata(&f); CHECK(chmod(dxvk, 0666) == 0); CHECK(admit(&f, &lease) != 0);
+
+    replace_once(variant, sizeof(variant), "game_root.unowned=0", "game_root.unowned=1");
+    write_file(&f, metadata, variant, strlen(variant), 0600);
+    publish_modified_metadata(&f);
+    CHECK(chmod(game, 0777) == 0); CHECK(chmod(dxvk, 0666) == 0);
+    CHECK(admit(&f, &lease) == 0); pw_title_publication_close(&lease);
+    /* Still refused: a hard-linked dxvk.conf and a loosened private folder. */
+    CHECK(snprintf(alias, sizeof(alias), "%s.alias", dxvk) > 0);
+    CHECK(link(dxvk, alias) == 0); CHECK(admit(&f, &lease) != 0); CHECK(unlink(alias) == 0);
+    path(profiles, sizeof(profiles), &f, "/data/playden/games/install-220/library/profiles");
+    CHECK(chmod(profiles, 0755) == 0); CHECK(admit(&f, &lease) != 0); CHECK(chmod(profiles, 0700) == 0);
+    CHECK(admit(&f, &lease) == 0); pw_title_publication_close(&lease);
+    CHECK(chmod(game, 0755) == 0);
+    fixture_destroy(&f);
+}
+
 int main(void)
 {
     explicit_download_root_contract();
@@ -561,6 +613,7 @@ int main(void)
     filesystem_and_registry_contract();
     no_preset_contract();
     cross_process_lock_contract();
+    unowned_game_root_contract();
     puts("test_pw_title_publication_native: passed");
     return 0;
 }
