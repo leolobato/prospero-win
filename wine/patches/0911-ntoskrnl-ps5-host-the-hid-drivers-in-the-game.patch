@@ -1,0 +1,369 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Fri, 9 Oct 2026 22:30:00 +0200
+Subject: [PATCH] ntoskrnl: Host the controller's HID drivers in a PS5 title's
+ game.
+
+Wine runs drivers in winedevice.exe, which services.exe starts. A PS5
+title is one process and cannot start either (patch 0550), so the HID
+gamepad winebus makes for the title's controller (patch 0910) never
+exists there. The wineserver routes a device file's requests to
+whichever thread holds the device manager, so the driver loop can as
+well run in the game's own process.
+
+With WINE_NTOSKRNL_HOSTED set:
+- ntdll, once the process has attached its DLLs and before the game's
+  entry point, loads ntoskrnl.exe and calls the new
+  wine_ntoskrnl_host_start("winebus", 1000). Wine's own programs in
+  system32/syswow64 inherit the variable and are skipped, so only the
+  game hosts the drivers.
+- wine_ntoskrnl_host_start runs wine_ntoskrnl_main_loop on a thread,
+  loads winebus and waits up to the timeout for a gamepad's &XI_
+  interface to be enabled in this process, so that the game finds it
+  when it first looks (Windows.Gaming.Input enumerates once).
+- ZwLoadDriver reads a driver's service from its registry key instead
+  of the service manager, and service status updates are skipped. The
+  devices must already be installed in the registry: installing one
+  needs the service manager.
+- ntoskrnl's first-position exception handler (for privileged
+  instructions in real kernel drivers) and its loader hook (relocating
+  unaligned driver images) stay off: they would see the game's
+  exceptions and modules first.
+
+wine.inf also installs the 32-bit builds of the HID drivers in
+syswow64\drivers (hidclass, hidparse, winebus, winehid, winexinput):
+a 32-bit game loads them from there, and Wine's loader finds builtins
+without a file only while a prefix is created.
+---
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index a0992cf..8793666 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -4440,6 +4440,43 @@ static void release_address_space(void)
+ #endif
+ }
+ 
++/* A PS5 title's game cannot start winedevice. With WINE_NTOSKRNL_HOSTED
++ * set, ntoskrnl runs the controller's HID drivers (winebus and the ones it
++ * loads) on threads of this process, started before the game's entry
++ * point so that it finds the controller when it first looks. */
++static void start_hosted_drivers(void)
++{
++    static const ANSI_STRING host_startA = RTL_CONSTANT_STRING( "wine_ntoskrnl_host_start" );
++    UNICODE_STRING name = RTL_CONSTANT_STRING( L"WINE_NTOSKRNL_HOSTED" );
++    UNICODE_STRING dll = RTL_CONSTANT_STRING( L"ntoskrnl.exe" );
++    NTSTATUS (CDECL *host_start)( const WCHAR *driver, DWORD timeout_ms );
++    UNICODE_STRING value;
++    WCHAR buffer[8];
++    HMODULE module;
++    NTSTATUS status;
++
++    const UNICODE_STRING *image = &NtCurrentTeb()->Peb->ProcessParameters->ImagePathName;
++
++    value.Buffer = buffer;
++    value.Length = 0;
++    value.MaximumLength = sizeof(buffer);
++    if (RtlQueryEnvironmentVariable_U( NULL, &name, &value ) == STATUS_VARIABLE_NOT_FOUND) return;
++    /* Only the game: Wine's own programs (explorer, services) inherit the variable too. */
++    if (image->Buffer && (!wcsnicmp( image->Buffer, system_dir, wcslen(system_dir) ) ||
++                          !wcsnicmp( image->Buffer, L"C:\\windows\\syswow64\\", 20 ))) return;
++    if ((status = LdrLoadDll( NULL, 0, &dll, &module )))
++    {
++        ERR( "could not load ntoskrnl.exe, status %lx\n", status );
++        return;
++    }
++    if ((status = LdrGetProcedureAddress( module, &host_startA, 0, (void **)&host_start )))
++    {
++        ERR( "ntoskrnl.exe has no hosted mode, status %lx\n", status );
++        return;
++    }
++    if ((status = host_start( L"winebus", 1000 ))) ERR( "hosted drivers failed, status %lx\n", status );
++}
++
+ /******************************************************************
+  *		loader_init
+  *
+@@ -4449,6 +4486,7 @@ static void release_address_space(void)
+ void loader_init( CONTEXT *context, void **entry )
+ {
+     static int attach_done;
++    BOOL first_attach = FALSE;
+     NTSTATUS status;
+     ULONG_PTR cookie, port = 0;
+     WINE_MODREF *wm;
+@@ -4554,6 +4592,7 @@ void loader_init( CONTEXT *context, void **entry )
+     if (!attach_done)  /* first time around */
+     {
+         attach_done = 1;
++        first_attach = TRUE;
+         if ((status = alloc_thread_tls()) != STATUS_SUCCESS)
+         {
+             ERR( "TLS init  failed when loading %s, status %lx\n",
+@@ -4597,6 +4636,7 @@ void loader_init( CONTEXT *context, void **entry )
+     }
+ 
+     RtlLeaveCriticalSection( &loader_section );
++    if (first_attach) start_hosted_drivers();
+ }
+ 
+ 
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index ebfcee6..ed57ed9 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -55,6 +55,12 @@ KSERVICE_TABLE_DESCRIPTOR KeServiceDescriptorTable[4] = { { 0 } };
+ 
+ #define MAX_SERVICE_NAME 260
+ 
++/* Hosted: the drivers run on threads of an ordinary process, a PS5
++ * title's game, which cannot start winedevice or services.exe (see
++ * wine_ntoskrnl_host_start). Set from WINE_NTOSKRNL_HOSTED at load. */
++static BOOL hosted;
++static HANDLE host_ready, host_gamepad;
++
+ static TP_POOL *dpc_call_tp;
+ static TP_CALLBACK_ENVIRON dpc_call_tpe;
+ DECLARE_CRITICAL_SECTION(dpc_call_cs);
+@@ -893,6 +899,7 @@ static const dispatch_func dispatch_funcs[] =
+ static void set_service_status( SERVICE_STATUS_HANDLE handle, DWORD state, DWORD accepted )
+ {
+     SERVICE_STATUS status;
++    if (!handle) return;  /* hosted: no service manager */
+     status.dwServiceType             = SERVICE_WIN32;
+     status.dwCurrentState            = state;
+     status.dwControlsAccepted        = accepted;
+@@ -954,6 +961,7 @@ NTSTATUS CDECL wine_ntoskrnl_main_loop( HANDLE stop_event )
+     request_thread = GetCurrentThreadId();
+ 
+     pnp_manager_start();
++    if (host_ready) SetEvent( host_ready );
+ 
+     handles[0] = stop_event;
+     handles[1] = manager;
+@@ -3886,6 +3894,38 @@ NTSTATUS WINAPI IoAttachDevice(DEVICE_OBJECT *source, UNICODE_STRING *target, DE
+ }
+ 
+ 
++/* Hosted: a driver's service is its registry key; it must be a kernel driver. */
++static NTSTATUS open_hosted_driver( const UNICODE_STRING *service_name, SC_HANDLE *service )
++{
++    static const UNICODE_STRING typeW = RTL_CONSTANT_STRING( L"Type" );
++    OBJECT_ATTRIBUTES attr;
++    char buffer[offsetof( KEY_VALUE_PARTIAL_INFORMATION, Data[sizeof(DWORD)] )];
++    KEY_VALUE_PARTIAL_INFORMATION *info = (KEY_VALUE_PARTIAL_INFORMATION *)buffer;
++    NTSTATUS status;
++    HANDLE key;
++    DWORD type;
++    ULONG size;
++
++    *service = NULL;
++    InitializeObjectAttributes( &attr, (UNICODE_STRING *)service_name, OBJ_CASE_INSENSITIVE, 0, NULL );
++    if ((status = NtOpenKey( &key, KEY_QUERY_VALUE, &attr )))
++    {
++        WARN( "no service key for driver %s\n", debugstr_us(service_name) );
++        return STATUS_UNSUCCESSFUL;
++    }
++    status = NtQueryValueKey( key, &typeW, KeyValuePartialInformation, buffer, sizeof(buffer), &size );
++    NtClose( key );
++    if (status || info->Type != REG_DWORD || info->DataLength != sizeof(DWORD)) return STATUS_UNSUCCESSFUL;
++    memcpy( &type, info->Data, sizeof(type) );
++    if (type != SERVICE_KERNEL_DRIVER && type != SERVICE_FILE_SYSTEM_DRIVER)
++    {
++        WARN( "service %s is not a kernel driver\n", debugstr_us(service_name) );
++        return STATUS_UNSUCCESSFUL;
++    }
++    TRACE( "hosted driver %s\n", debugstr_us(service_name) );
++    return STATUS_SUCCESS;
++}
++
+ static NTSTATUS open_driver( const UNICODE_STRING *service_name, SC_HANDLE *service )
+ {
+     QUERY_SERVICE_CONFIGW *service_config = NULL;
+@@ -3893,6 +3933,8 @@ static NTSTATUS open_driver( const UNICODE_STRING *service_name, SC_HANDLE *serv
+     DWORD config_size = 0;
+     WCHAR *name;
+ 
++    if (hosted) return open_hosted_driver( service_name, service );
++
+     if (!(name = RtlAllocateHeap( GetProcessHeap(), 0, service_name->Length + sizeof(WCHAR) )))
+         return STATUS_NO_MEMORY;
+ 
+@@ -4298,7 +4340,7 @@ NTSTATUS WINAPI ZwLoadDriver( const UNICODE_STRING *service_name )
+ 
+     if (!get_drv_name( &drv_name, service_name ))
+     {
+-        CloseServiceHandle( (void *)service_handle );
++        if (service_handle) CloseServiceHandle( (void *)service_handle );
+         return STATUS_NO_MEMORY;
+     }
+ 
+@@ -4306,7 +4348,7 @@ NTSTATUS WINAPI ZwLoadDriver( const UNICODE_STRING *service_name )
+     {
+         TRACE( "driver %s already loaded\n", debugstr_us(&drv_name) );
+         RtlFreeUnicodeString( &drv_name );
+-        CloseServiceHandle( (void *)service_handle );
++        if (service_handle) CloseServiceHandle( (void *)service_handle );
+         return STATUS_IMAGE_ALREADY_LOADED;
+     }
+ 
+@@ -4332,10 +4374,77 @@ NTSTATUS WINAPI ZwLoadDriver( const UNICODE_STRING *service_name )
+ 
+ error:
+     set_service_status( service_handle, SERVICE_STOPPED, 0 );
+-    CloseServiceHandle( (void *)service_handle );
++    if (service_handle) CloseServiceHandle( (void *)service_handle );
+     return status;
+ }
+ 
++static DWORD WINAPI host_main_loop( void *stop_event )
++{
++    return wine_ntoskrnl_main_loop( stop_event );
++}
++
++/* The &XI_ gamepad interface winexinput.sys makes for a HID gamepad. */
++static const GUID GUID_DEVINTERFACE_WINEXINPUT = {0x6c53d5fd, 0x6480, 0x440f, {0xb6, 0x18, 0x47, 0x67, 0x50, 0xc5, 0xe1, 0xa6}};
++
++void hosted_interface_enabled( const GUID *interface_class )
++{
++    if (host_gamepad && IsEqualGUID( interface_class, &GUID_DEVINTERFACE_WINEXINPUT )) SetEvent( host_gamepad );
++}
++
++/***********************************************************************
++ *           wine_ntoskrnl_host_start   (Not a Windows API)
++ *
++ * Runs the driver loop on a thread of this process and loads one driver,
++ * for a process that cannot start winedevice (a PS5 title's game). Its
++ * devices must already be installed in the registry: there is no service
++ * manager to install them. Waits up to timeout_ms for a gamepad's &XI_
++ * interface, which the device's drivers enable on their own threads, so
++ * that the game finds it when it first looks. (The registry may still list
++ * it as present from the last run: only its enabling in this process counts.) Only with WINE_NTOSKRNL_HOSTED set,
++ * which also keeps ntoskrnl's exception handler and loader hook (for real
++ * kernel drivers) out of the game's way.
++ */
++NTSTATUS CDECL wine_ntoskrnl_host_start( const WCHAR *driver_name, DWORD timeout_ms )
++{
++    static HANDLE stop_event;
++    WCHAR path[MAX_PATH];
++    UNICODE_STRING name;
++    NTSTATUS status;
++    DWORD start;
++    HANDLE thread;
++
++    if (!hosted) return STATUS_NOT_SUPPORTED;
++    if (stop_event) return STATUS_IMAGE_ALREADY_LOADED;
++    if (wcslen( servicesW ) + wcslen( driver_name ) >= ARRAY_SIZE(path)) return STATUS_INVALID_PARAMETER;
++    if (!(stop_event = CreateEventW( NULL, TRUE, FALSE, NULL ))) return STATUS_NO_MEMORY;
++    if (!(host_ready = CreateEventW( NULL, TRUE, FALSE, NULL ))) return STATUS_NO_MEMORY;
++    if (!(host_gamepad = CreateEventW( NULL, TRUE, FALSE, NULL ))) return STATUS_NO_MEMORY;
++
++    GetSystemDirectoryW( path, MAX_PATH );
++    wcscat( path, L"\\drivers" );
++    AddDllDirectory( path );
++
++    if (!(thread = CreateThread( NULL, 0, host_main_loop, stop_event, 0, NULL ))) return STATUS_NO_MEMORY;
++    CloseHandle( thread );
++    WaitForSingleObject( host_ready, INFINITE );
++
++    wcscpy( path, servicesW );
++    wcscat( path, driver_name );
++    RtlInitUnicodeString( &name, path );
++    if ((status = ZwLoadDriver( &name )))
++    {
++        ERR( "failed to load %s, status %#lx\n", debugstr_w(driver_name), status );
++        return status;
++    }
++
++    start = GetTickCount();
++    if (WaitForSingleObject( host_gamepad, timeout_ms ))
++        WARN( "%s started, no gamepad after %lu ms\n", debugstr_w(driver_name), GetTickCount() - start );
++    else
++        TRACE( "%s started, gamepad after %lu ms\n", debugstr_w(driver_name), GetTickCount() - start );
++    return STATUS_SUCCESS;
++}
++
+ /***********************************************************************
+  *           ZwUnloadDriver (NTOSKRNL.EXE.@)
+  */
+@@ -4906,17 +5015,18 @@ BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
+     {
+     case DLL_PROCESS_ATTACH:
+         DisableThreadLibraryCalls( inst );
++        hosted = GetEnvironmentVariableW( L"WINE_NTOSKRNL_HOSTED", NULL, 0 ) > 0;
+ #if defined(__i386__) || defined(__x86_64__)
+-        handler = RtlAddVectoredExceptionHandler( TRUE, vectored_handler );
++        if (!hosted) handler = RtlAddVectoredExceptionHandler( TRUE, vectored_handler );
+ #endif
+         KeQueryTickCount( &count );  /* initialize the global KeTickCount */
+         NtBuildNumber = NtCurrentTeb()->Peb->OSBuildNumber;
+         ntoskrnl_heap = HeapCreate( HEAP_CREATE_ENABLE_EXECUTE, 0, 0 );
+         dpc_call_tls_index = TlsAlloc();
+-        LdrRegisterDllNotification( 0, ldr_notify_callback, NULL, &ldr_notify_cookie );
++        if (!hosted) LdrRegisterDllNotification( 0, ldr_notify_callback, NULL, &ldr_notify_cookie );
+         break;
+     case DLL_PROCESS_DETACH:
+-        LdrUnregisterDllNotification( ldr_notify_cookie );
++        if (ldr_notify_cookie) LdrUnregisterDllNotification( ldr_notify_cookie );
+ 
+         if (reserved) break;
+ 
+@@ -4924,7 +5034,7 @@ BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
+             CloseThreadpool(dpc_call_tp);
+ 
+         HeapDestroy( ntoskrnl_heap );
+-        RtlRemoveVectoredExceptionHandler( handler );
++        if (handler) RtlRemoveVectoredExceptionHandler( handler );
+         break;
+     }
+     return TRUE;
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index 824a3ec..b22da9c 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -1720,4 +1720,5 @@
+ # or 'wine_' (for user-visible functions) to avoid namespace conflicts.
+ 
+ @ cdecl wine_ntoskrnl_main_loop(long)
++@ cdecl wine_ntoskrnl_host_start(wstr long)
+ @ cdecl wine_enumerate_root_devices(wstr)
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl_private.h b/dlls/ntoskrnl.exe/ntoskrnl_private.h
+index 5e1d5e3..694948f 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl_private.h
++++ b/dlls/ntoskrnl.exe/ntoskrnl_private.h
+@@ -137,4 +137,7 @@ struct wine_device
+      */
+     unsigned int level;
+ };
++/* Hosted mode (wine_ntoskrnl_host_start): a device interface was enabled in this process. */
++void hosted_interface_enabled( const GUID *interface_class );
++
+ #endif
+diff --git a/dlls/ntoskrnl.exe/pnp.c b/dlls/ntoskrnl.exe/pnp.c
+index 8d9fb25..d4bc472 100644
+--- a/dlls/ntoskrnl.exe/pnp.c
++++ b/dlls/ntoskrnl.exe/pnp.c
+@@ -1278,6 +1278,7 @@ NTSTATUS WINAPI IoSetDeviceInterfaceState( UNICODE_STRING *name, BOOLEAN enable
+     }
+ 
+     iface->enabled = enable;
++    if (enable) hosted_interface_enabled( &iface->interface_class );
+ 
+     len = offsetof(DEV_BROADCAST_DEVICEINTERFACE_W, dbcc_name[namelen + 1]);
+ 
+diff --git a/loader/wine.inf.in b/loader/wine.inf.in
+index 965d3b2..54c138f 100644
+--- a/loader/wine.inf.in
++++ b/loader/wine.inf.in
+@@ -803,6 +803,12 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.42.344
+ 55,,wineps.drv
+ 66000,3,wineps.drv
+ 55,,winprint.dll
++; the controller's HID drivers, which a 32-bit PS5 title's game hosts itself (ntoskrnl hosted mode)
++12,,hidclass.sys
++12,,hidparse.sys
++12,,winebus.sys
++12,,winehid.sys
++12,,winexinput.sys
+ 12,,*.sys,-
+ 11,,*.msstyles,-
+ 11,,*

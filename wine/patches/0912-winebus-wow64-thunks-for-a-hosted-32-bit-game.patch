@@ -1,0 +1,139 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Fri, 9 Oct 2026 22:30:00 +0200
+Subject: [PATCH] winebus: Add WoW64 calls for a 32-bit game hosting it.
+
+winebus's Unix library had no WoW64 entry points: winedevice, which
+runs it, is 64-bit. A 32-bit PS5 game (Undertale, Sektori) hosts it
+itself (patch 0911), so its 32-bit winebus.sys calls the 64-bit
+winebus.so. Parameters without pointers pass as they are; the report
+descriptor and report calls convert their buffer, HID_XFER_PACKET and
+IO_STATUS_BLOCK pointers. The SDL, udev and IOHID buses report
+unsupported: only the PS5 bus runs in a game.
+---
+diff --git a/dlls/winebus.sys/unixlib.c b/dlls/winebus.sys/unixlib.c
+index 0110450..e773d1e 100644
+--- a/dlls/winebus.sys/unixlib.c
++++ b/dlls/winebus.sys/unixlib.c
+@@ -327,6 +327,121 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
+ 
+ C_ASSERT(ARRAYSIZE(__wine_unix_call_funcs) == unix_funcs_count);
+ 
++#ifdef _WIN64
++
++/* A 32-bit process can host winebus only for a PS5 title's controller
++ * (ntoskrnl's hosted mode, in a 32-bit game); the other buses are for
++ * winedevice, which is 64-bit. Pointer-free parameters are passed as is. */
++static NTSTATUS wow64_bus_unsupported(void *args)
++{
++    return STATUS_NOT_SUPPORTED;
++}
++
++struct device_descriptor_params32
++{
++    UINT64 device;
++    ULONG buffer;
++    UINT length;
++    ULONG out_length;
++};
++
++static NTSTATUS wow64_unix_device_get_report_descriptor(void *args)
++{
++    struct device_descriptor_params32 *params32 = args;
++    struct device_descriptor_params params =
++    {
++        .device = params32->device,
++        .buffer = ULongToPtr(params32->buffer),
++        .length = params32->length,
++        .out_length = ULongToPtr(params32->out_length),
++    };
++    return unix_device_get_report_descriptor(&params);
++}
++
++struct hid_xfer_packet32
++{
++    ULONG reportBuffer;
++    ULONG reportBufferLen;
++    UCHAR reportId;
++};
++
++struct io_status_block32
++{
++    NTSTATUS Status;
++    ULONG Information;
++};
++
++struct device_report_params32
++{
++    UINT64 device;
++    ULONG packet;
++    ULONG io;
++};
++
++static NTSTATUS wow64_device_report(NTSTATUS (*func)(void *), void *args)
++{
++    struct device_report_params32 *params32 = args;
++    struct hid_xfer_packet32 *packet32 = ULongToPtr(params32->packet);
++    struct io_status_block32 *io32 = ULongToPtr(params32->io);
++    HID_XFER_PACKET packet =
++    {
++        .reportBuffer = ULongToPtr(packet32->reportBuffer),
++        .reportBufferLen = packet32->reportBufferLen,
++        .reportId = packet32->reportId,
++    };
++    IO_STATUS_BLOCK io = {.Status = io32->Status, .Information = io32->Information};
++    struct device_report_params params = {.device = params32->device, .packet = &packet, .io = &io};
++    NTSTATUS status = func(&params);
++
++    packet32->reportBufferLen = packet.reportBufferLen;
++    io32->Status = io.Status;
++    io32->Information = io.Information;
++    return status;
++}
++
++static NTSTATUS wow64_unix_device_set_output_report(void *args)
++{
++    return wow64_device_report(unix_device_set_output_report, args);
++}
++
++static NTSTATUS wow64_unix_device_get_feature_report(void *args)
++{
++    return wow64_device_report(unix_device_get_feature_report, args);
++}
++
++static NTSTATUS wow64_unix_device_set_feature_report(void *args)
++{
++    return wow64_device_report(unix_device_set_feature_report, args);
++}
++
++const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
++{
++    wow64_bus_unsupported,
++    wow64_bus_unsupported,
++    wow64_bus_unsupported,
++    wow64_bus_unsupported,
++    wow64_bus_unsupported,
++    wow64_bus_unsupported,
++    wow64_bus_unsupported,
++    wow64_bus_unsupported,
++    wow64_bus_unsupported,
++    ps5_bus_init,
++    ps5_bus_wait,
++    ps5_bus_stop,
++    mouse_device_create,
++    keyboard_device_create,
++    unix_device_remove,
++    unix_device_start,
++    wow64_unix_device_get_report_descriptor,
++    wow64_unix_device_set_output_report,
++    wow64_unix_device_get_feature_report,
++    wow64_unix_device_set_feature_report,
++};
++
++C_ASSERT(ARRAYSIZE(__wine_unix_call_wow64_funcs) == unix_funcs_count);
++
++#endif /* _WIN64 */
++
+ void bus_event_cleanup(struct bus_event *event)
+ {
+     struct unix_device *iface = (struct unix_device *)(UINT_PTR)event->device;
