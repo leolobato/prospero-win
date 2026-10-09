@@ -39,7 +39,7 @@ def main():
         programs['pe64'] = ('x86_64-w64-mingw32-gcc', output / 'pw_hid_pad64.exe')
     for compiler, exe in programs.values():
         subprocess.run([compiler, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
-                        str(root / 'tests/lab/pw_hid_pad.c'), '-o', str(exe), '-ldinput8', '-ldxguid', '-lwinmm'],
+                        str(root / 'tests/lab/pw_hid_pad.c'), '-o', str(exe), '-ldinput8', '-ldxguid', '-lwinmm', '-lruntimeobject'],
                        check=True, timeout=60)
     sink = output / 'pw_hid_pad_sink.so'
     subprocess.run(['gcc', '-shared', '-fPIC', '-O2', '-Wall', '-Wextra', '-Werror',
@@ -58,13 +58,14 @@ def main():
                  WINEDLLOVERRIDES='mscoree,mshtml=', WINESERVER=wineserver)
     with_pad = dict(plain, LD_PRELOAD=str(sink), PW_PAD_FILE=str(pad), PW_RUMBLE_FILE=str(rumble))
     windows_pad = 'Z:' + str(pad).replace('/', '\\')
+    windows_rumble = 'Z:' + str(rumble).replace('/', '\\')
 
     subprocess.run([wineserver, '-k'], env=plain, check=False, timeout=60)
     failed = []
     if not args.hosted:
         # A fresh server whose winedevice has the pad.
         subprocess.run([wine, 'wineboot', '-u'], env=with_pad, check=True, timeout=300)
-        if subprocess.run([wine, str(programs['pe32'][1]), windows_pad], env=with_pad, timeout=120).returncode:
+        if subprocess.run([wine, str(programs['pe32'][1]), windows_pad, windows_rumble], env=with_pad, timeout=120).returncode:
             failed.append('winedevice')
     else:
         # As on the console: no services.exe (so no service manager and no winedevice), and the
@@ -77,7 +78,7 @@ def main():
             subprocess.run([wineserver, '-k'], env=plain, check=False, timeout=60)
             log = output / f'hosted-{name}.log'
             with open(log, 'w') as out:
-                code = subprocess.run([wine, str(exe), windows_pad], env=hosted, stdout=out, stderr=subprocess.STDOUT,
+                code = subprocess.run([wine, str(exe), windows_pad, windows_rumble], env=hosted, stdout=out, stderr=subprocess.STDOUT,
                                       timeout=120).returncode
             text = log.read_text(errors='replace')
             for line in text.splitlines():
