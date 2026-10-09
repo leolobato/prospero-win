@@ -99,7 +99,8 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # hooks and dispatch table capability checks come from the same source.
 # ntoskrnl.exe, winebus.sys and setupapi: the game hosts the controller's HID
 # drivers and installs them without a service manager (patches 0910-0913).
-# A module with no extension is a .dll.
+# A module with no extension is a .dll. wow64win (x86_64 only): a 32-bit
+# game's hidclass sends hardware input through it (patch 0914).
 PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan ntoskrnl.exe winebus.sys setupapi"
 # Everything optional but FreeType (built below) is off: the console has none
 # of these libraries, and a configure-time probe against the payload SDK must
@@ -329,7 +330,7 @@ rm -rf "$work/pe"
 for arch in i386 x86_64; do
     mkdir -p "$work/pe/$arch-windows"
     modules="$PE_MODULES"
-    [ "$arch" != x86_64 ] || modules="$modules wow64"
+    [ "$arch" != x86_64 ] || modules="$modules wow64 wow64win"
     for module in $modules; do
         file=$module
         case $module in *.*) ;; *) file=$module.dll ;; esac

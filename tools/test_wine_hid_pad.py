@@ -84,7 +84,10 @@ def main():
             for line in text.splitlines():
                 if line.startswith(('ok ', 'FAIL ')) or 'started, ' in line or 'hosted drivers failed' in line:
                     print(f'{name}: {line}')
-            if code or 'started, gamepad after' not in text:
+            # A HID report a 32-bit game's hidclass sends must arrive as WM_INPUT (patch 0914).
+            if 'unknown message type' in text:
+                print(f'{name}: FAIL hardware input arrived without its message (WoW64 NtUserSendHardwareInput)')
+            if code or 'started, gamepad after' not in text or 'unknown message type' in text:
                 failed.append(name)
     subprocess.run([wineserver, '-k'], env=plain, check=False, timeout=60)
     if failed:
