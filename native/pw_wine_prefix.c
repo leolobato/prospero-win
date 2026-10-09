@@ -67,17 +67,22 @@ static unsigned char *read_file(const char *path, size_t limit, size_t *size)
     return data;
 }
 
-int pw_wine_prefix_cpu_install(const char *prefix, const char *source, const char *name)
+/* Copies source to <prefix>/drive_c/windows/<folder>/<name> when that file
+ * is missing or differs; 1 copied, 0 same, -1 failed. With create, makes
+ * the folder first. */
+static int install_file(const char *prefix, const char *folder, int create, const char *source, const char *name)
 {
     enum { CPU_DLL_LIMIT = 16u << 20 };
     char path[1024], temporary[1056];
     unsigned char *wanted, *present;
     size_t wanted_size, present_size;
-    int result = -1;
+    int result = -1, base;
     FILE *file;
 
     if (!prefix || !source || !name || strchr(name, '/') ||
-        snprintf(path, sizeof(path), "%s/drive_c/windows/system32/%s", prefix, name) >= (int)sizeof(path) ||
+        (base = snprintf(path, sizeof(path), "%s/drive_c/windows/%s", prefix, folder)) < 0 ||
+        (size_t)base >= sizeof(path) || (create && make_folders(path, strlen(prefix))) ||
+        snprintf(path + base, sizeof(path) - (size_t)base, "/%s", name) >= (int)(sizeof(path) - (size_t)base) ||
         snprintf(temporary, sizeof(temporary), "%s.new", path) >= (int)sizeof(temporary) ||
         !(wanted = read_file(source, CPU_DLL_LIMIT, &wanted_size)))
         return -1;
@@ -93,6 +98,16 @@ int pw_wine_prefix_cpu_install(const char *prefix, const char *source, const cha
     }
     free(wanted);
     return result;
+}
+
+int pw_wine_prefix_cpu_install(const char *prefix, const char *source, const char *name)
+{
+    return install_file(prefix, "system32", 0, source, name);
+}
+
+int pw_wine_prefix_driver_install(const char *prefix, const char *source, const char *name)
+{
+    return install_file(prefix, "syswow64/drivers", 1, source, name);
 }
 
 

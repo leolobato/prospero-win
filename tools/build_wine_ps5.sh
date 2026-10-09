@@ -97,9 +97,10 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # xinput1_4. quartz: its renderers wait for a state change without the filter
 # lock (patch 0700). winevulkan: emit its PE thunks alongside the Unix side so command-stream
 # hooks and dispatch table capability checks come from the same source.
-# ntoskrnl.exe and winebus.sys: the game hosts the controller's HID drivers
-# (patches 0910-0912). A module with no extension is a .dll.
-PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan ntoskrnl.exe winebus.sys"
+# ntoskrnl.exe, winebus.sys and setupapi: the game hosts the controller's HID
+# drivers and installs them without a service manager (patches 0910-0913).
+# A module with no extension is a .dll.
+PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan ntoskrnl.exe winebus.sys setupapi"
 # Everything optional but FreeType (built below) is off: the console has none
 # of these libraries, and a configure-time probe against the payload SDK must
 # not pick up host headers.
