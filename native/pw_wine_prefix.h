@@ -18,6 +18,12 @@ int pw_wine_prefix_temp_create(const char *prefix, PwPrefixTemp *temp);
  * file, -1 on any failure (Wine then falls back to the prefix's own CPU). */
 int pw_wine_prefix_cpu_install(const char *prefix, const char *source, const char *name);
 
+/* A 32-bit game hosting the controller's HID drivers (Wine patches
+ * 0910-0913) loads them from the prefix's syswow64\drivers, which prefixes
+ * made before that lack: as pw_wine_prefix_cpu_install, for
+ * <prefix>/drive_c/windows/syswow64/drivers/<name>, making the folder. */
+int pw_wine_prefix_driver_install(const char *prefix, const char *source, const char *name);
+
 /* Install a packaged Mesa WGL/Zink architecture directory before Wine starts.
  * The prefix must already exist and have been initialized by Wine; this API
  * does not bootstrap a new prefix. Missing prefixes are refused safely.

@@ -1565,8 +1565,27 @@ int main(int argc, char **argv)
         /* xinput mode: the game also hosts the controller's HID drivers
          * (patches 0910-0912), so DirectInput, winmm and
          * Windows.Gaming.Input find the DualSense as an Xbox 360 controller. */
-        if (game_input.mode == PW_GAME_INPUT_XINPUT)
+        if (game_input.mode == PW_GAME_INPUT_XINPUT) {
+            static const char *const drivers[] = { "hidclass.sys", "hidparse.sys", "winebus.sys", "winehid.sys",
+                                                   "winexinput.sys" };
+            int installed = 0;
+
             extra[config.extra_env_count++] = (PwWineStartEnv){ "WINE_NTOSKRNL_HOSTED", "1" };
+            /* A 32-bit game loads them from syswow64\drivers, which older
+             * bottles lack. */
+            for (size_t d = 0; game->app.architecture == PW_APP_ARCH_PE32 && d < sizeof(drivers) / sizeof(drivers[0]);
+                 d++) {
+                int result = -1;
+                for (size_t i = 0; result < 0 && i < sizeof(runtime_roots) / sizeof(runtime_roots[0]); i++) {
+                    char source[256];
+                    snprintf(source, sizeof(source), "%s/win/wine/lib/wine/i386-windows/%s", runtime_roots[i],
+                             drivers[d]);
+                    result = pw_wine_prefix_driver_install(prefix, source, drivers[d]);
+                }
+                installed = installed < 0 || result < 0 ? -1 : installed + result;
+            }
+            PS5LOG_LOG("PW_WINE64 hid hosted=1 drivers_copied=%d", installed);
+        }
         /* [runtime]: opt-in runtime settings for this game. */
         {
             PwGameEnv runtime_env[PW_GAME_RUNTIME_ENV_MAX];

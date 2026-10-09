@@ -210,6 +210,20 @@ int main(void)
     assert(pw_wine_prefix_cpu_install(prefix, NULL, "wow64native.dll") == -1);
     assert(file_is(installed, "a longer native build"));
 
+    /* A 32-bit game's HID drivers: syswow64\drivers is made when missing. */
+    {
+        char driver[400], drivers[340];
+        snprintf(drivers, sizeof(drivers), "%s/drive_c/windows/syswow64/drivers", prefix);
+        snprintf(driver, sizeof(driver), "%s/winebus.sys", drivers);
+        write_file(source, "i386 winebus");
+        assert(pw_wine_prefix_driver_install(prefix, source, "winebus.sys") == 1);
+        assert(file_is(driver, "i386 winebus"));
+        assert(pw_wine_prefix_driver_install(prefix, source, "winebus.sys") == 0);
+        assert(pw_wine_prefix_driver_install(prefix, source, "../winebus.sys") == -1);
+        remove(driver); rmdir(drivers);
+        snprintf(drivers, sizeof(drivers), "%s/drive_c/windows/syswow64", prefix); rmdir(drivers);
+    }
+
     remove(installed); remove(source);
     rmdir(system32);
     {
@@ -219,6 +233,6 @@ int main(void)
     }
     rmdir(prefix); rmdir(root);
     printf("prefix CPU install passed: no system32 refused, first copy, unchanged, stale replaced "
-           "atomically, refusals keep the installed file\n");
+           "atomically, refusals keep the installed file; HID drivers made in syswow64\\drivers\n");
     return 0;
 }
