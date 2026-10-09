@@ -83,7 +83,7 @@ TEXT_PAYLOAD_SUFFIXES = {".cfg", ".conf", ".ini", ".json", ".reg", ".txt"}
 REQUIRED_SOURCES = ("wrapper", "wine", "helper", "foundation", "sdk", "dxvk")
 REQUIRED_PROVENANCE: dict[str, dict[str, str]] = {
     "wrapper": {"baseline_revision": "54caac176e86c60c7c407972583b491f67838ed9"},
-    "wine": {"revision": "dd5d7dcd32187aea55b86092bd3615449bfc1f30"},
+    "wine": {"revision": "ea5f9d8f65ebb8c548794782c8c7787ca3467619"},
     "helper": {
         "revision": "a8f391b269aa2394f291cd1e670afd4744e35590",
         "base_revision": "b48b7d7236eca25c7b9dfd6c040c763ae05dde80",
