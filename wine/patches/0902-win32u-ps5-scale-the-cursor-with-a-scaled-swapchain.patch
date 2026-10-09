@@ -1,0 +1,212 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Fri, 9 Oct 2026 17:40:00 +0200
+Subject: [PATCH] win32u: Keep the pointer on a scaled PS5 swapchain and stop
+ GDI frames flashing over it.
+
+A windowed Direct3D game through DXVK (Undertale, 640x480) presents a
+swapchain the size of its client area, which RADV's WSI shows scaled to
+fit the output (1440x1080 at (240, 0) of 1920x1080). The pointer stayed
+in desktop coordinates: it was bounded by the window's outer rectangle
+and shown at its unscaled place, so it moved inside a 640x480 box of a
+1440x1080 image. And every pointer move, cursor change or window move
+presented a GDI frame of the bare windows, which shows whenever the game
+has not flipped for 150 ms, so the window flashed behind the game.
+
+After each present, win32u now tells the user driver which window
+presented. While one did in the last second, the pointer stays in its
+client area, and the cursor goes to libvulkan.prx's
+pw_videoout_cursor_point as its place in that client area, which scales
+it with the image and subtracts the hotspot unscaled. GDI frames for
+pointer, cursor and window changes, and that window's own paint, are not
+presented then. Other windows' GDI content (a movie drawn with GDI) still
+shows; GDI content drawn in place of Vulkan frames shows up to a second
+late.
+---
+diff --git a/dlls/win32u/ps5drv.c b/dlls/win32u/ps5drv.c
+index 9c4ab5b..e488f5c 100644
+--- a/dlls/win32u/ps5drv.c
++++ b/dlls/win32u/ps5drv.c
+@@ -110,6 +110,13 @@ static RECT cursor_box;
+  * view is what the last frame showed, in screen coordinates. */
+ static BOOL view_windows;
+ static RECT view;
++/* The window whose Vulkan swapchain last presented, its client area in
++ * screen coordinates and when (NtGetTickCount). Its frames reach the screen
++ * without this driver, scaled to fit, so while it presents the pointer stays
++ * in that client area and this driver's own frames would only flash over it. */
++static HWND vulkan_window;
++static RECT vulkan_client;
++static ULONG vulkan_tick;
+ static BOOL display_published;
+ static DWORD input_threads[PS5_MAX_WINDOWS];
+ static UINT input_thread_count;
+@@ -195,6 +202,21 @@ static void present_screen(void)
+     present_frame( frame, width, height, width * 4 );
+ }
+ 
++/* screen_lock held: a Vulkan swapchain presented within the last second */
++static BOOL vulkan_presenting(void)
++{
++    return vulkan_window && NtGetTickCount() - vulkan_tick < 1000;
++}
++
++/* screen_lock held: shows this driver's frame for a change that is not new
++ * GDI content (the pointer, its image, a window's place), unless Vulkan
++ * frames are on screen. Their present takes the screen back within 150 ms
++ * anyway, so the frame would only flash the bare windows behind the game. */
++static void present_screen_for_change(void)
++{
++    if (!vulkan_presenting()) present_screen();
++}
++
+ /***********************************************************************
+  *           display
+  */
+@@ -290,7 +312,10 @@ static BOOL ps5_surface_flush( struct window_surface *surface, const RECT *rect,
+                                   (target.left - window->visible.left) * 4;
+                 memcpy( screen + y * screen_width + target.left, src, (target.right - target.left) * 4 );
+             }
+-            present_screen();
++            /* the presenting window's GDI paint is behind its own Vulkan frames;
++             * other windows' content (a movie drawn with GDI) still shows, and
++             * a second after the last Vulkan present the window's too */
++            if (!vulkan_presenting() || surface->hwnd != vulkan_window) present_screen();
+         }
+     }
+     pthread_mutex_unlock( &screen_lock );
+@@ -391,7 +416,7 @@ static void ps5_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint,
+         if (window->shown && (!shown || !EqualRect( &window->visible, &new_rects->visible )))
+         {
+             clear_screen_rect( &window->visible );
+-            present_screen();
++            present_screen_for_change();
+         }
+         /* a window just shown may have painted before it had this surface */
+         repaint = shown && !window->shown;
+@@ -412,8 +437,9 @@ static void ps5_DestroyWindow( HWND hwnd )
+         if (window->shown)
+         {
+             clear_screen_rect( &window->visible );
+-            present_screen();
++            present_screen_for_change();
+         }
++        if (hwnd == vulkan_window) vulkan_window = 0;
+         *window = windows[--window_count];
+     }
+     pthread_mutex_unlock( &screen_lock );
+@@ -508,7 +534,7 @@ static void move_cursor( HWND hwnd, INT dx, INT dy )
+     POINT pos;
+ 
+     pthread_mutex_lock( &screen_lock );
+-    shown = view;
++    shown = vulkan_presenting() ? vulkan_client : view;
+     pthread_mutex_unlock( &screen_lock );
+     /* win32u coalesces a driver's motion until a button or NOCOALESCE sends
+      * it; each move goes to the server now, so the position read back is it */
+@@ -527,7 +553,7 @@ static void move_cursor( HWND hwnd, INT dx, INT dy )
+     if (cursor.x != pos.x || cursor.y != pos.y)
+     {
+         cursor = pos;
+-        if (cursor_image) present_screen();     /* the pointer moved on screen */
++        if (cursor_image) present_screen_for_change();     /* the pointer moved on screen */
+     }
+     pthread_mutex_unlock( &screen_lock );
+ }
+@@ -713,7 +739,7 @@ static void ps5_SetCursor( HWND hwnd, HCURSOR handle )
+     cursor_height = height;
+     cursor_box = box;
+     if (image) cursor_hotspot = (POINT){info.xHotspot, info.yHotspot};
+-    if (old || image) present_screen();
++    if (old || image) present_screen_for_change();
+     pthread_mutex_unlock( &screen_lock );
+     free( old );
+     TRACE( "cursor %p: %ux%u\n", handle, width, height );
+@@ -742,25 +768,35 @@ void ps5drv_unlock_cursor(void)
+ /* Vulkan frames reach the screen through the GPU driver's own video output
+  * (patch 0460), which this driver does not compose, so after each present
+  * libvulkan.prx shows the cursor with VideoOut's hardware cursor
+- * (pw_videoout_cursor): the image, NULL when hidden, at its place on the
+- * desktop, which the output shows whole. */
+-void ps5drv_vulkan_cursor( void *vulkan_handle )
++ * (pw_videoout_cursor_point): the image, NULL when hidden, its hotspot, and
++ * the pointer's place in the presenting window's client area, which the
++ * swapchain's images show whole, scaled to fit the output. hwnd is that
++ * window, 0 when no swapchain presented. */
++void ps5drv_vulkan_cursor( void *vulkan_handle, HWND hwnd )
+ {
+-    static int (*show)( const UINT32 *, UINT, UINT, INT, INT, UINT, UINT );
++    static int (*show)( const UINT32 *, UINT, UINT, INT, INT, INT, INT, UINT, UINT );
+     static BOOL looked;
+-    const UINT32 *image;
+-    UINT width, height;
+-    POINT top_left;
++    struct window_rects rects;
++    BOOL placed = hwnd && get_window_rects( hwnd, COORDS_SCREEN, &rects, get_dpi_for_window( hwnd ) ) &&
++                  rects.client.right > rects.client.left && rects.client.bottom > rects.client.top;
+ 
+     if (!looked)
+     {
+         looked = TRUE;
+-        show = dlsym( vulkan_handle, "pw_videoout_cursor" );
++        show = dlsym( vulkan_handle, "pw_videoout_cursor_point" );
+     }
+-    if (!show) return;
+-    image = ps5drv_lock_cursor( &width, &height, &top_left );
+-    show( width && height ? image : NULL, width, height, top_left.x, top_left.y, screen_width, screen_height );
+-    ps5drv_unlock_cursor();
++    pthread_mutex_lock( &screen_lock );
++    if (placed)
++    {
++        vulkan_window = hwnd;
++        vulkan_client = rects.client;
++        vulkan_tick = NtGetTickCount();
++    }
++    if (show && placed)
++        show( cursor_width && cursor_height ? cursor_image : NULL, cursor_width, cursor_height,
++              cursor_hotspot.x, cursor_hotspot.y, cursor.x - rects.client.left, cursor.y - rects.client.top,
++              rects.client.right - rects.client.left, rects.client.bottom - rects.client.top );
++    pthread_mutex_unlock( &screen_lock );
+ }
+ #endif
+ 
+@@ -775,7 +811,7 @@ static BOOL ps5_SetCursorPos( INT x, INT y )
+     pthread_mutex_lock( &screen_lock );
+     cursor.x = x;
+     cursor.y = y;
+-    if (cursor_image) present_screen();
++    if (cursor_image) present_screen_for_change();
+     pthread_mutex_unlock( &screen_lock );
+     return TRUE;
+ }
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 7fadce0..f1bf64d 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -1960,6 +1960,7 @@ static VkResult win32u_vkQueuePresentKHR( VkQueue client_queue, const VkPresentI
+     struct vulkan_queue *queue = vulkan_queue_from_handle( client_queue );
+     VkSwapchainKHR swapchains_buffer[16], *swapchains = swapchains_buffer;
+     struct vulkan_device *device = queue->device;
++    HWND presented = 0;
+     const VkSwapchainKHR *client_swapchains;
+     VkResult res;
+ 
+@@ -2004,6 +2005,7 @@ static VkResult win32u_vkQueuePresentKHR( VkQueue client_queue, const VkPresentI
+         client_surface_present( surface->client );
+ 
+         if (swapchain_res < VK_SUCCESS) continue;
++        presented = surface->hwnd;
+         if (!get_surface_rect( surface->hwnd, &client_rect, get_dpi_for_window( surface->hwnd ) ))
+         {
+             WARN( "Swapchain window %p is invalid, returning VK_ERROR_OUT_OF_DATE_KHR\n", surface->hwnd );
+@@ -2025,8 +2027,8 @@ static VkResult win32u_vkQueuePresentKHR( VkQueue client_queue, const VkPresentI
+ 
+ #ifdef WINE_PS5_USER_DRIVER
+     {
+-        extern void ps5drv_vulkan_cursor( void *vulkan_handle );
+-        ps5drv_vulkan_cursor( vulkan_handle );
++        extern void ps5drv_vulkan_cursor( void *vulkan_handle, HWND hwnd );
++        ps5drv_vulkan_cursor( vulkan_handle, presented );
+     }
+ #endif
+ 

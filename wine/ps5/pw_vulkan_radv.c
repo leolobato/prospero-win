@@ -30,6 +30,8 @@ int pw_videoout_idle(void);
 int pw_videoout_show_tiled(const void *tiled, uint64_t bytes, uint32_t width, uint32_t height);
 int pw_videoout_cursor(const uint32_t *argb, uint32_t width, uint32_t height, int32_t x, int32_t y,
                        uint32_t space_width, uint32_t space_height);
+int pw_videoout_cursor_point(const uint32_t *argb, uint32_t width, uint32_t height, int32_t hotspot_x,
+                             int32_t hotspot_y, int32_t x, int32_t y, uint32_t space_width, uint32_t space_height);
 
 /* win32u asks the instance for vkGetDeviceProcAddr and then loads every
  * device entry point through it, so both lookups go through the profile's
@@ -128,19 +130,17 @@ static void cursor_hide_locked(int handle)
     cursor.enabled = 0;
 }
 
-/* Shows the application's cursor over a swapchain's frames: argb is its
- * width x height image in straight-alpha ARGB (B8G8R8A8 bytes), cut to 64x64,
- * with its top-left corner at (x, y) of a space_width x space_height desktop,
- * which the swapchain's frames show whole. NULL hides it. 0 shown or hidden, 1 no
- * output yet, <0 failed. */
-int pw_videoout_cursor(const uint32_t *argb, uint32_t width, uint32_t height, int32_t x, int32_t y,
-                       uint32_t space_width, uint32_t space_height)
+/* Shows argb (as pw_videoout_cursor takes it, NULL hides) with its top-left
+ * corner at (fx, fy) of the flipped framebuffer, or at the position
+ * pw_videoout_cursor computes from (x, y) of a space when framebuffer is 0. */
+static int cursor_show(const uint32_t *argb, uint32_t width, uint32_t height, int32_t x, int32_t y,
+                       uint32_t space_width, uint32_t space_height, int framebuffer, int64_t fx, int64_t fy)
 {
     int handle = __atomic_load_n(&videoout_handle, __ATOMIC_ACQUIRE), rc = 0;
     uint32_t image[CURSOR_PIXELS];
 
     if (handle < 0) return 1;
-    if (!argb || !width || !height || !space_width || !space_height) {
+    if (!argb || !width || !height || (!framebuffer && (!space_width || !space_height))) {
         cursor_lock();
         cursor_hide_locked(handle);
         cursor_unlock();
@@ -181,18 +181,53 @@ int pw_videoout_cursor(const uint32_t *argb, uint32_t width, uint32_t height, in
      * position moves by the image's offset there, scaled by the framebuffer
      * to the desktop. */
     if (cursor.enabled) {
-        VkRect2D rect;
-        VkExtent2D frame;
-        int64_t fx = x > 0 ? x : 0, fy = y > 0 ? y : 0;
+        if (!framebuffer) {
+            VkRect2D rect;
+            VkExtent2D frame;
 
-        if (wsi_videoout_present_rect(&rect, &frame) && frame.width && frame.height) {
-            fx = rect.offset.x + fx * frame.width / space_width;
-            fy = rect.offset.y + fy * frame.height / space_height;
+            fx = x > 0 ? x : 0;
+            fy = y > 0 ? y : 0;
+            if (wsi_videoout_present_rect(&rect, &frame) && frame.width && frame.height) {
+                fx = rect.offset.x + fx * frame.width / space_width;
+                fy = rect.offset.y + fy * frame.height / space_height;
+            }
         }
-        rc = sceVideoOutCursorSetPosition(handle, 0, (uint32_t)fx, (uint32_t)fy);
+        rc = sceVideoOutCursorSetPosition(handle, 0, (uint32_t)(fx > 0 ? fx : 0), (uint32_t)(fy > 0 ? fy : 0));
     }
     cursor_unlock();
     return rc == 0 ? 0 : -2;
+}
+
+/* Shows the application's cursor over a swapchain's frames: argb is its
+ * width x height image in straight-alpha ARGB (B8G8R8A8 bytes), cut to 64x64,
+ * with its top-left corner at (x, y) of a space_width x space_height desktop,
+ * which the swapchain's frames show whole. NULL hides it. 0 shown or hidden, 1 no
+ * output yet, <0 failed. */
+int pw_videoout_cursor(const uint32_t *argb, uint32_t width, uint32_t height, int32_t x, int32_t y,
+                       uint32_t space_width, uint32_t space_height)
+{
+    return cursor_show(argb, width, height, x, y, space_width, space_height, 0, 0, 0);
+}
+
+/* Like pw_videoout_cursor, for a swapchain that shows a window's client area:
+ * (x, y) is the pointer in a space_width x space_height client area, which
+ * the presenting swapchain's images show whole, scaled to the part of the
+ * framebuffer they fill (a 640x480 window shows as 1440x1080 at (240, 0) of
+ * 1920x1080). The pointer scales with the image; the 64x64 cursor image does
+ * not, so its hotspot is subtracted after scaling. */
+int pw_videoout_cursor_point(const uint32_t *argb, uint32_t width, uint32_t height, int32_t hotspot_x,
+                             int32_t hotspot_y, int32_t x, int32_t y, uint32_t space_width, uint32_t space_height)
+{
+    VkRect2D rect;
+    VkExtent2D frame;
+    int64_t fx = x, fy = y;
+
+    if (space_width && space_height && wsi_videoout_present_rect(&rect, &frame) && rect.extent.width &&
+        rect.extent.height) {
+        fx = rect.offset.x + (int64_t)x * rect.extent.width / space_width;
+        fy = rect.offset.y + (int64_t)y * rect.extent.height / space_height;
+    }
+    return cursor_show(argb, width, height, 0, 0, 0, 0, 1, fx - hotspot_x, fy - hotspot_y);
 }
 
 /* Shows a B8G8R8A8 frame already in VideoOut's tiling while no swapchain
