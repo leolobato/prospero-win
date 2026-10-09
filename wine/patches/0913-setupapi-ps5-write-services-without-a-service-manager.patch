@@ -1,0 +1,134 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Fri, 9 Oct 2026 23:10:00 +0200
+Subject: [PATCH] setupapi: Write a service's registry key when there is no
+ service manager.
+
+A PS5 title's game hosts the controller's HID drivers itself (patch
+0911). The first time it does, PnP installs the gamepad's devices,
+and installing a device installs its services (winehid, and xinput
+for winexinput) through the service manager, which a title cannot
+start: OpenSCManagerW fails with RPC_S_SERVER_UNAVAILABLE and so did
+the install, leaving the gamepad without drivers.
+
+When OpenSCManagerW fails, SetupInstallServicesFromInfSectionW now
+writes each AddService entry as the key services.exe would keep for
+it (Type, Start, ErrorControl, ImagePath, DisplayName, Group) and
+applies its AddReg and DelReg entries; the hosted ntoskrnl loads
+drivers from those keys. A DelService entry is skipped with a FIXME.
+With a service manager nothing changes.
+---
+diff --git a/dlls/setupapi/install.c b/dlls/setupapi/install.c
+index 8fcfc8b..ccf2e35 100644
+--- a/dlls/setupapi/install.c
++++ b/dlls/setupapi/install.c
+@@ -1322,10 +1322,44 @@ void WINAPI InstallHinfSectionA( HWND hwnd, HINSTANCE handle, LPCSTR cmdline, IN
+ }
+ 
+ 
++/* Without a service manager (a PS5 title's game, which cannot start services.exe), a service is
++ * written as the registry key services.exe would keep for it; drivers are then loaded from it
++ * (ntoskrnl's hosted mode). */
++static BOOL add_service_key( const WCHAR *name, const WCHAR *display_name, DWORD service_type, DWORD start_type,
++                             DWORD error_control, const WCHAR *binary_path, const WCHAR *load_order )
++{
++    HKEY services, key;
++    LSTATUS status;
++
++    if ((status = RegOpenKeyW( HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Services", &services )))
++        goto failed;
++    status = RegCreateKeyW( services, name, &key );
++    RegCloseKey( services );
++    if (status) goto failed;
++    RegSetValueExW( key, L"Type", 0, REG_DWORD, (BYTE *)&service_type, sizeof(service_type) );
++    RegSetValueExW( key, L"Start", 0, REG_DWORD, (BYTE *)&start_type, sizeof(start_type) );
++    RegSetValueExW( key, L"ErrorControl", 0, REG_DWORD, (BYTE *)&error_control, sizeof(error_control) );
++    RegSetValueExW( key, L"ImagePath", 0, REG_EXPAND_SZ, (BYTE *)binary_path,
++                    (wcslen( binary_path ) + 1) * sizeof(WCHAR) );
++    if (display_name)
++        RegSetValueExW( key, L"DisplayName", 0, REG_SZ, (BYTE *)display_name,
++                        (wcslen( display_name ) + 1) * sizeof(WCHAR) );
++    if (load_order)
++        RegSetValueExW( key, L"Group", 0, REG_SZ, (BYTE *)load_order, (wcslen( load_order ) + 1) * sizeof(WCHAR) );
++    RegCloseKey( key );
++    TRACE( "wrote service key %s\n", debugstr_w(name) );
++    return TRUE;
++
++failed:
++    SetLastError( status );
++    return FALSE;
++}
++
+ /***********************************************************************
+  *            add_service
+  *
+  * Create a new service. Helper for SetupInstallServicesFromInfSectionW.
++ * Without a service manager (scm NULL), the service's registry key.
+  */
+ static BOOL add_service( SC_HANDLE scm, HINF hinf, const WCHAR *name, const WCHAR *section, DWORD flags )
+ {
+@@ -1378,10 +1412,15 @@ static BOOL add_service( SC_HANDLE scm, HINF hinf, const WCHAR *name, const WCHA
+            debugstr_w(name), debugstr_w(display_name), service_type, start_type, error_control,
+            debugstr_w(binary_path), debugstr_w(load_order), debugstr_w(start_name), flags );
+ 
+-    service = CreateServiceW( scm, name, display_name, SERVICE_ALL_ACCESS,
+-                              service_type, start_type, error_control, binary_path,
+-                              load_order, NULL, NULL, start_name, NULL );
+-    if (service)
++    if (!scm)
++    {
++        if (!add_service_key( name, display_name, service_type, start_type, error_control, binary_path, load_order ))
++            goto done;
++        service = (SC_HANDLE)~(UINT_PTR)0;  /* not a handle: the key was written */
++    }
++    else if ((service = CreateServiceW( scm, name, display_name, SERVICE_ALL_ACCESS,
++                                        service_type, start_type, error_control, binary_path,
++                                        load_order, NULL, NULL, start_name, NULL )))
+     {
+         if (descr.lpDescription) ChangeServiceConfig2W( service, SERVICE_CONFIG_DESCRIPTION, &descr );
+     }
+@@ -1445,8 +1484,11 @@ static BOOL add_service( SC_HANDLE scm, HINF hinf, const WCHAR *name, const WCHA
+     }
+     iterate_section_fields( hinf, section, L"BitReg", bitreg_callback, NULL );
+ 
+-    if (flags & SPSVCINST_STARTSERVICE) StartServiceW( service, 0, NULL );
+-    CloseServiceHandle( service );
++    if (scm)
++    {
++        if (flags & SPSVCINST_STARTSERVICE) StartServiceW( service, 0, NULL );
++        CloseServiceHandle( service );
++    }
+ 
+ done:
+     if (!service) WARN( "failed err %lu\n", GetLastError() );
+@@ -1470,6 +1512,11 @@ static BOOL del_service( SC_HANDLE scm, HINF hinf, const WCHAR *name, DWORD flag
+     SC_HANDLE service;
+     SERVICE_STATUS status;
+ 
++    if (!scm)
++    {
++        FIXME( "no service manager to delete %s\n", debugstr_w(name) );
++        return TRUE;
++    }
+     if (!(service = OpenServiceW( scm, name, SERVICE_STOP | DELETE )))
+     {
+         if (GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST) return TRUE;
+@@ -1501,7 +1548,8 @@ BOOL WINAPI SetupInstallServicesFromInfSectionW( HINF hinf, PCWSTR section, DWOR
+         SetLastError( ERROR_SECTION_NOT_FOUND );
+         return FALSE;
+     }
+-    if (!(scm = OpenSCManagerW( NULL, NULL, SC_MANAGER_ALL_ACCESS ))) return FALSE;
++    if (!(scm = OpenSCManagerW( NULL, NULL, SC_MANAGER_ALL_ACCESS )))
++        WARN( "no service manager (error %lu): writing services to the registry\n", GetLastError() );
+ 
+     if (SetupFindFirstLineW( hinf, section, L"AddService", &context ))
+     {
+@@ -1529,7 +1577,7 @@ BOOL WINAPI SetupInstallServicesFromInfSectionW( HINF hinf, PCWSTR section, DWOR
+     }
+     if (ret) SetLastError( ERROR_SUCCESS );
+  done:
+-    CloseServiceHandle( scm );
++    if (scm) CloseServiceHandle( scm );
+     return ret;
+ }
+ 

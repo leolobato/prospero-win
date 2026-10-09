@@ -22,9 +22,9 @@ With WINE_NTOSKRNL_HOSTED set:
   interface to be enabled in this process, so that the game finds it
   when it first looks (Windows.Gaming.Input enumerates once).
 - ZwLoadDriver reads a driver's service from its registry key instead
-  of the service manager, and service status updates are skipped. The
-  devices must already be installed in the registry: installing one
-  needs the service manager.
+  of the service manager, and service status updates are skipped.
+  Installing a new device's services without the service manager is
+  patch 0913.
 - ntoskrnl's first-position exception handler (for privileged
   instructions in real kernel drivers) and its loader hook (relocating
   unaligned driver images) stay off: they would see the game's
