@@ -868,6 +868,18 @@ class PlaydenKitTests(unittest.TestCase):
         with self.assertRaisesRegex(KitError, "host personal path.*embedded.bin"):
             package_kit(self.fixture.spec, self.fixture.out, development_build_paths=True)
 
+    def test_development_kit_exempts_the_title_mesa_zink_binaries(self) -> None:
+        module = self.fixture.title / "win/mesa-zink/i386-windows/libgallium_wgl.dll"
+        write(module, b"MZ\x90\x00/home/runner/work/llvm-mingw/libcxxabi/src/cxa_personality.cpp\x00")
+        result = package_kit(self.fixture.spec, self.fixture.out, development_build_paths=True)
+        self.assertTrue(any(path.endswith("libgallium_wgl.dll") for path in result["development_exceptions"]))
+        with self.assertRaisesRegex(KitError, "host personal path.*libgallium_wgl.dll"):
+            validate_kit(self.fixture.out)
+        shutil.rmtree(self.fixture.out)
+        write(self.fixture.title / "win/mesa-zink/notes.txt", "built in /home/alice/mesa\n")
+        with self.assertRaisesRegex(KitError, "host personal path.*notes.txt"):
+            package_kit(self.fixture.spec, self.fixture.out, development_build_paths=True)
+
     def test_rejects_wrong_or_ambiguous_windows_user_registry_binding(self) -> None:
         path = self.fixture.prefix / "user.reg"
         pristine = path.read_text()
