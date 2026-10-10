@@ -17,13 +17,23 @@ with hid_device_add_gamepad's layout, so the HID stack gives it the
 &IG_ gamepad interface and winexinput its &XI_ partner. The bus thread
 reads the pad every 4 ms and sends a report when it changed; a
 disconnected pad reads neutral. Rumble reaches the title through the
-haptics report. With the PS5 bus running, winebus makes no virtual
+haptics report, and stops at the report's cutoff (1 s by default)
+unless renewed, as with SDL's timed rumble. With the PS5 bus running, winebus makes no virtual
 mouse or keyboard and starts no other bus: a title's keyboard and
 mouse reach Wine through the user driver.
 
 XInput still reads the title directly and does not use this device,
 so XInput games see one controller.
 ---
+ dlls/winebus.sys/Makefile.in    |   1 +
+ dlls/winebus.sys/bus_ps5.c      | 349 ++++++++++++++++++++++++++++++++
+ dlls/winebus.sys/main.c         |  22 ++
+ dlls/winebus.sys/unix_private.h |   4 +
+ dlls/winebus.sys/unixlib.c      |   3 +
+ dlls/winebus.sys/unixlib.h      |   3 +
+ 6 files changed, 382 insertions(+)
+ create mode 100644 dlls/winebus.sys/bus_ps5.c
+
 diff --git a/dlls/winebus.sys/Makefile.in b/dlls/winebus.sys/Makefile.in
 index c2823e1..4c31d61 100644
 --- a/dlls/winebus.sys/Makefile.in
@@ -38,10 +48,10 @@ index c2823e1..4c31d61 100644
  	hid.c \
 diff --git a/dlls/winebus.sys/bus_ps5.c b/dlls/winebus.sys/bus_ps5.c
 new file mode 100644
-index 0000000..5f0abba
+index 0000000..10c7735
 --- /dev/null
 +++ b/dlls/winebus.sys/bus_ps5.c
-@@ -0,0 +1,320 @@
+@@ -0,0 +1,349 @@
 +/*
 + * The PS5 title's controller, as a HID gamepad
 + *
@@ -123,6 +133,7 @@ index 0000000..5f0abba
 +    BOOL started;
 +    BOOL have_state;
 +    struct title_pad_state last;
++    UINT64 rumble_until;  /* CLOCK_MONOTONIC ns when the rumble stops; 0: until told */
 +};
 +
 +static struct ps5_device *ps5_pad;
@@ -130,6 +141,14 @@ index 0000000..5f0abba
 +static inline struct ps5_device *impl_from_unix_device(struct unix_device *iface)
 +{
 +    return CONTAINING_RECORD(iface, struct ps5_device, unix_device);
++}
++
++static UINT64 monotonic_ns(void)
++{
++    struct timespec now;
++
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    return (UINT64)now.tv_sec * 1000000000 + now.tv_nsec;
 +}
 +
 +static void ps5_device_destroy(struct unix_device *iface)
@@ -153,28 +172,42 @@ index 0000000..5f0abba
 +
 +    pthread_mutex_lock(&ps5_cs);
 +    impl->started = FALSE;
++    impl->rumble_until = 0;
 +    if (ps5_pad == impl) ps5_pad = NULL;
-+    pthread_mutex_unlock(&ps5_cs);
 +    if (title_rumble) title_rumble(0, 0);
++    pthread_mutex_unlock(&ps5_cs);
 +}
 +
 +static NTSTATUS ps5_device_haptics_start(struct unix_device *iface, UINT duration_ms,
 +                                         USHORT rumble_intensity, USHORT buzz_intensity,
 +                                         USHORT left_intensity, USHORT right_intensity)
 +{
++    struct ps5_device *impl = impl_from_unix_device(iface);
++
 +    TRACE("iface %p, duration_ms %u, rumble_intensity %u, buzz_intensity %u.\n",
 +          iface, duration_ms, rumble_intensity, buzz_intensity);
 +
-+    /* The low-frequency motor is on the left, as on an Xbox controller. */
++    /* The low-frequency motor is on the left, as on an Xbox controller. The
++     * title's motors keep their levels, so the bus loop stops them when the
++     * duration (the HID report's cutoff) runs out; 0 has none, as in SDL. */
 +    if (!title_rumble) return STATUS_NOT_SUPPORTED;
++    pthread_mutex_lock(&ps5_cs);
++    impl->rumble_until = duration_ms && (rumble_intensity || buzz_intensity)
++                         ? monotonic_ns() + (UINT64)duration_ms * 1000000 : 0;
 +    title_rumble(rumble_intensity, buzz_intensity);
++    pthread_mutex_unlock(&ps5_cs);
 +    return STATUS_SUCCESS;
 +}
 +
 +static NTSTATUS ps5_device_haptics_stop(struct unix_device *iface)
 +{
++    struct ps5_device *impl = impl_from_unix_device(iface);
++
 +    if (!title_rumble) return STATUS_NOT_SUPPORTED;
++    pthread_mutex_lock(&ps5_cs);
++    impl->rumble_until = 0;
 +    title_rumble(0, 0);
++    pthread_mutex_unlock(&ps5_cs);
 +    return STATUS_SUCCESS;
 +}
 +
@@ -254,7 +287,8 @@ index 0000000..5f0abba
 +        hid_device_set_button(iface, ps5_buttons[i].button, !!(buttons & ps5_buttons[i].mask));
 +}
 +
-+/* Reads the pad and queues a report when it changed. Called with ps5_cs. */
++/* Stops a rumble whose duration ran out, reads the pad and queues a report
++ * when it changed. Called with ps5_cs. */
 +static void ps5_poll(void)
 +{
 +    struct ps5_device *impl = ps5_pad;
@@ -263,6 +297,11 @@ index 0000000..5f0abba
 +
 +    if (!impl || !impl->started) return;
 +    iface = &impl->unix_device;
++    if (impl->rumble_until && monotonic_ns() >= impl->rumble_until)
++    {
++        impl->rumble_until = 0;
++        title_rumble(0, 0);
++    }
 +    if (!title_pad(&state)) memset(&state, 0, sizeof(state));
 +    if (impl->have_state && !memcmp(&state, &impl->last, sizeof(state))) return;
 +    impl->last = state;

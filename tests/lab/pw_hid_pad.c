@@ -13,7 +13,8 @@
  * - a disconnected pad reads as a neutral one;
  * - Raw Input lists the HID gamepad;
  * - Windows.Gaming.Input (modern Unity) lists one gamepad and reads it, and
- *   its vibration reaches the title's rumble.
+ *   its vibration reaches the title's rumble and stops at the haptics
+ *   cutoff.
  * Exit status 0 only when every check passed. */
 #define DIRECTINPUT_VERSION 0x0800
 #define COBJMACROS
@@ -219,8 +220,11 @@ static void check_wgi(void)
     rumble=last_rumble_left();
     snprintf(seen,sizeof(seen),"hr %#lx, left motor %ld",hr,rumble);
     check(SUCCEEDED(hr) && rumble>60000,"Windows.Gaming.Input vibration reaches the title's rumble",seen);
-    vibration.LeftMotor=vibration.RightMotor=0;
-    IGamepad_put_Vibration(gamepad,vibration);
+    /* The HID haptics report's cutoff (1 s by default) stops a vibration nobody renews. */
+    Sleep(1300);
+    rumble=last_rumble_left();
+    snprintf(seen,sizeof(seen),"left motor %ld",rumble);
+    check(rumble==0,"the title's rumble stops at the haptics cutoff",seen);
 
 done:
     if(gamepad)IGamepad_Release(gamepad);

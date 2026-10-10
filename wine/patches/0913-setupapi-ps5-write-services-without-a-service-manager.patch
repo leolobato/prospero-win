@@ -11,44 +11,65 @@ for winexinput) through the service manager, which a title cannot
 start: OpenSCManagerW fails with RPC_S_SERVER_UNAVAILABLE and so did
 the install, leaving the gamepad without drivers.
 
-When OpenSCManagerW fails, SetupInstallServicesFromInfSectionW now
+When OpenSCManagerW fails in a process that hosts its drivers
+(WINE_NTOSKRNL_HOSTED), SetupInstallServicesFromInfSectionW now
 writes each AddService entry as the key services.exe would keep for
-it (Type, Start, ErrorControl, ImagePath, DisplayName, Group) and
-applies its AddReg and DelReg entries; the hosted ntoskrnl loads
-drivers from those keys. A DelService entry is skipped with a FIXME.
-With a service manager nothing changes.
+it (Type, Start, ErrorControl, ImagePath, DisplayName, Group),
+keeping an existing key's values that the NOCLOBBER flags protect,
+and applies its AddReg and DelReg entries; the hosted ntoskrnl loads
+drivers from those keys. A DelService entry deletes the key. A
+failed registry write fails the install. Anywhere else, and with a
+service manager, nothing changes.
 ---
+ dlls/setupapi/install.c | 96 +++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 87 insertions(+), 9 deletions(-)
+
 diff --git a/dlls/setupapi/install.c b/dlls/setupapi/install.c
-index 8fcfc8b..ccf2e35 100644
+index 8fcfc8b..9311b08 100644
 --- a/dlls/setupapi/install.c
 +++ b/dlls/setupapi/install.c
-@@ -1322,10 +1322,44 @@ void WINAPI InstallHinfSectionA( HWND hwnd, HINSTANCE handle, LPCSTR cmdline, IN
+@@ -1322,15 +1322,64 @@ void WINAPI InstallHinfSectionA( HWND hwnd, HINSTANCE handle, LPCSTR cmdline, IN
  }
  
  
-+/* Without a service manager (a PS5 title's game, which cannot start services.exe), a service is
-+ * written as the registry key services.exe would keep for it; drivers are then loaded from it
-+ * (ntoskrnl's hosted mode). */
++/* Only a process that hosts its own drivers (ntoskrnl's hosted mode: a PS5 title's game, which
++ * cannot start services.exe) installs services without a service manager. */
++static BOOL hosted_drivers(void)
++{
++    return GetEnvironmentVariableW( L"WINE_NTOSKRNL_HOSTED", NULL, 0 ) > 0;
++}
++
++/* Without a service manager, a service is written as the registry key services.exe would keep
++ * for it, honoring the NOCLOBBER flags for one already there; the hosted drivers are loaded from it. */
 +static BOOL add_service_key( const WCHAR *name, const WCHAR *display_name, DWORD service_type, DWORD start_type,
-+                             DWORD error_control, const WCHAR *binary_path, const WCHAR *load_order )
++                             DWORD error_control, const WCHAR *binary_path, const WCHAR *load_order, DWORD flags )
 +{
 +    HKEY services, key;
 +    LSTATUS status;
++    DWORD disposition;
++    BOOL existed;
 +
 +    if ((status = RegOpenKeyW( HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Services", &services )))
 +        goto failed;
-+    status = RegCreateKeyW( services, name, &key );
++    status = RegCreateKeyExW( services, name, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &key, &disposition );
 +    RegCloseKey( services );
 +    if (status) goto failed;
-+    RegSetValueExW( key, L"Type", 0, REG_DWORD, (BYTE *)&service_type, sizeof(service_type) );
-+    RegSetValueExW( key, L"Start", 0, REG_DWORD, (BYTE *)&start_type, sizeof(start_type) );
-+    RegSetValueExW( key, L"ErrorControl", 0, REG_DWORD, (BYTE *)&error_control, sizeof(error_control) );
-+    RegSetValueExW( key, L"ImagePath", 0, REG_EXPAND_SZ, (BYTE *)binary_path,
-+                    (wcslen( binary_path ) + 1) * sizeof(WCHAR) );
-+    if (display_name)
++    existed = disposition == REG_OPENED_EXISTING_KEY;
++    if ((status = RegSetValueExW( key, L"Type", 0, REG_DWORD, (BYTE *)&service_type, sizeof(service_type) )) ||
++        (status = RegSetValueExW( key, L"ImagePath", 0, REG_EXPAND_SZ, (BYTE *)binary_path,
++                                  (wcslen( binary_path ) + 1) * sizeof(WCHAR) )))
++    {
++        RegCloseKey( key );
++        goto failed;
++    }
++    if (!existed || !(flags & SPSVCINST_NOCLOBBER_STARTTYPE))
++        RegSetValueExW( key, L"Start", 0, REG_DWORD, (BYTE *)&start_type, sizeof(start_type) );
++    if (!existed || !(flags & SPSVCINST_NOCLOBBER_ERRORCONTROL))
++        RegSetValueExW( key, L"ErrorControl", 0, REG_DWORD, (BYTE *)&error_control, sizeof(error_control) );
++    if (display_name && (!existed || !(flags & SPSVCINST_NOCLOBBER_DISPLAYNAME)))
 +        RegSetValueExW( key, L"DisplayName", 0, REG_SZ, (BYTE *)display_name,
 +                        (wcslen( display_name ) + 1) * sizeof(WCHAR) );
-+    if (load_order)
++    if (load_order && (!existed || !(flags & SPSVCINST_NOCLOBBER_LOADORDERGROUP)))
 +        RegSetValueExW( key, L"Group", 0, REG_SZ, (BYTE *)load_order, (wcslen( load_order ) + 1) * sizeof(WCHAR) );
 +    RegCloseKey( key );
 +    TRACE( "wrote service key %s\n", debugstr_w(name) );
@@ -67,7 +88,13 @@ index 8fcfc8b..ccf2e35 100644
   */
  static BOOL add_service( SC_HANDLE scm, HINF hinf, const WCHAR *name, const WCHAR *section, DWORD flags )
  {
-@@ -1378,10 +1412,15 @@ static BOOL add_service( SC_HANDLE scm, HINF hinf, const WCHAR *name, const WCHA
+     struct registry_callback_info info;
+-    SC_HANDLE service;
++    SC_HANDLE service = 0;
+     INFCONTEXT context;
+     SERVICE_DESCRIPTIONW descr;
+     WCHAR *display_name, *start_name, *load_order, *binary_path;
+@@ -1378,10 +1427,15 @@ static BOOL add_service( SC_HANDLE scm, HINF hinf, const WCHAR *name, const WCHA
             debugstr_w(name), debugstr_w(display_name), service_type, start_type, error_control,
             debugstr_w(binary_path), debugstr_w(load_order), debugstr_w(start_name), flags );
  
@@ -77,7 +104,7 @@ index 8fcfc8b..ccf2e35 100644
 -    if (service)
 +    if (!scm)
 +    {
-+        if (!add_service_key( name, display_name, service_type, start_type, error_control, binary_path, load_order ))
++        if (!add_service_key( name, display_name, service_type, start_type, error_control, binary_path, load_order, flags ))
 +            goto done;
 +        service = (SC_HANDLE)~(UINT_PTR)0;  /* not a handle: the key was written */
 +    }
@@ -87,7 +114,7 @@ index 8fcfc8b..ccf2e35 100644
      {
          if (descr.lpDescription) ChangeServiceConfig2W( service, SERVICE_CONFIG_DESCRIPTION, &descr );
      }
-@@ -1445,8 +1484,11 @@ static BOOL add_service( SC_HANDLE scm, HINF hinf, const WCHAR *name, const WCHA
+@@ -1445,8 +1499,11 @@ static BOOL add_service( SC_HANDLE scm, HINF hinf, const WCHAR *name, const WCHA
      }
      iterate_section_fields( hinf, section, L"BitReg", bitreg_callback, NULL );
  
@@ -101,29 +128,44 @@ index 8fcfc8b..ccf2e35 100644
  
  done:
      if (!service) WARN( "failed err %lu\n", GetLastError() );
-@@ -1470,6 +1512,11 @@ static BOOL del_service( SC_HANDLE scm, HINF hinf, const WCHAR *name, DWORD flag
+@@ -1470,6 +1527,23 @@ static BOOL del_service( SC_HANDLE scm, HINF hinf, const WCHAR *name, DWORD flag
      SC_HANDLE service;
      SERVICE_STATUS status;
  
 +    if (!scm)
 +    {
-+        FIXME( "no service manager to delete %s\n", debugstr_w(name) );
-+        return TRUE;
++        HKEY services;
++        LSTATUS status;
++
++        if ((status = RegOpenKeyW( HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Services", &services )))
++        {
++            SetLastError( status );
++            return FALSE;
++        }
++        TRACE( "deleting the key of %s\n", debugstr_w(name) );
++        status = RegDeleteTreeW( services, name );
++        RegCloseKey( services );
++        if (status == ERROR_FILE_NOT_FOUND) return TRUE;
++        SetLastError( status );
++        return !status;
 +    }
      if (!(service = OpenServiceW( scm, name, SERVICE_STOP | DELETE )))
      {
          if (GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST) return TRUE;
-@@ -1501,7 +1548,8 @@ BOOL WINAPI SetupInstallServicesFromInfSectionW( HINF hinf, PCWSTR section, DWOR
+@@ -1501,7 +1575,11 @@ BOOL WINAPI SetupInstallServicesFromInfSectionW( HINF hinf, PCWSTR section, DWOR
          SetLastError( ERROR_SECTION_NOT_FOUND );
          return FALSE;
      }
 -    if (!(scm = OpenSCManagerW( NULL, NULL, SC_MANAGER_ALL_ACCESS ))) return FALSE;
 +    if (!(scm = OpenSCManagerW( NULL, NULL, SC_MANAGER_ALL_ACCESS )))
++    {
++        if (!hosted_drivers()) return FALSE;
 +        WARN( "no service manager (error %lu): writing services to the registry\n", GetLastError() );
++    }
  
      if (SetupFindFirstLineW( hinf, section, L"AddService", &context ))
      {
-@@ -1529,7 +1577,7 @@ BOOL WINAPI SetupInstallServicesFromInfSectionW( HINF hinf, PCWSTR section, DWOR
+@@ -1529,7 +1607,7 @@ BOOL WINAPI SetupInstallServicesFromInfSectionW( HINF hinf, PCWSTR section, DWOR
      }
      if (ret) SetLastError( ERROR_SUCCESS );
   done:
