@@ -19,7 +19,7 @@ int pw_wine_prefix_temp_create(const char *prefix, PwPrefixTemp *temp);
 int pw_wine_prefix_cpu_install(const char *prefix, const char *source, const char *name);
 
 /* A 32-bit game hosting the controller's HID drivers (Wine patches
- * 0910-0913) loads them from the prefix's syswow64\drivers, which prefixes
+ * 0951-0954) loads them from the prefix's syswow64\drivers, which prefixes
  * made before that lack: as pw_wine_prefix_cpu_install, for
  * <prefix>/drive_c/windows/syswow64/drivers/<name>, making the folder. */
 int pw_wine_prefix_driver_install(const char *prefix, const char *source, const char *name);

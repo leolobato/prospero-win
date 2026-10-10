@@ -1445,7 +1445,7 @@ int main(int argc, char **argv)
         if (game_input.mode == PW_GAME_INPUT_XINPUT)
             extra[config.extra_env_count++] = (PwWineStartEnv){ "SDL_JOYSTICK_RAWINPUT", "0" };
         /* xinput mode: the game also hosts the controller's HID drivers
-         * (patches 0910-0912), so DirectInput, winmm and
+         * (patches 0951-0953), so DirectInput, winmm and
          * Windows.Gaming.Input find the DualSense as an Xbox 360 controller. */
         if (game_input.mode == PW_GAME_INPUT_XINPUT) {
             static const char *const drivers[] = { "hidclass.sys", "hidparse.sys", "winebus.sys", "winehid.sys",

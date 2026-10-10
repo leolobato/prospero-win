@@ -98,9 +98,9 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # lock (patch 0700). winevulkan: emit its PE thunks alongside the Unix side so command-stream
 # hooks and dispatch table capability checks come from the same source.
 # ntoskrnl.exe, winebus.sys and setupapi: the game hosts the controller's HID
-# drivers and installs them without a service manager (patches 0910-0913).
+# drivers and installs them without a service manager (patches 0951-0954).
 # A module with no extension is a .dll. wow64win (x86_64 only): a 32-bit
-# game's hidclass sends hardware input through it (patch 0914).
+# game's hidclass sends hardware input through it (patch 0955).
 PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan ntoskrnl.exe winebus.sys setupapi"
 # Everything optional but FreeType (built below) is off: the console has none
 # of these libraries, and a configure-time probe against the payload SDK must
@@ -517,7 +517,7 @@ if [ "$prx_status" = 0 ]; then
         -c "$tree/dlls/xinput1_3/unixlib.c" -o "$prx/obj/xinput_unixlib.o" ||
         fail "cannot compile xinput's unixlib.c"
     link_prx xinput1_3 - "$prx/obj/xinput_unixlib.o $prx/obj/xinput_desc.o" "$prx/ntdll.shared.elf"
-    # winebus's Unix side (patches 0910-0912): its PS5 bus reads the title's
+    # winebus's Unix side (patches 0951-0953): its PS5 bus reads the title's
     # controller through ntdll's dlsym, for the HID drivers the game hosts.
     link_prx winebus dlls/winebus.sys/winebus.so "$prx/obj/winebus_desc.o" "$prx/ntdll.shared.elf"
     # Wine's Vulkan Unix side: it calls into ntdll and into win32u's Vulkan

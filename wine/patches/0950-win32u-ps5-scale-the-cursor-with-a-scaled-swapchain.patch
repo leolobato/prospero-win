@@ -24,10 +24,10 @@ shows; GDI content drawn in place of Vulkan frames shows up to a second
 late.
 ---
 diff --git a/dlls/win32u/ps5drv.c b/dlls/win32u/ps5drv.c
-index 9c4ab5b..e488f5c 100644
+index 59d7599..9c2be85 100644
 --- a/dlls/win32u/ps5drv.c
 +++ b/dlls/win32u/ps5drv.c
-@@ -110,6 +110,13 @@ static RECT cursor_box;
+@@ -107,6 +107,13 @@ static RECT cursor_box;
   * view is what the last frame showed, in screen coordinates. */
  static BOOL view_windows;
  static RECT view;
@@ -41,7 +41,7 @@ index 9c4ab5b..e488f5c 100644
  static BOOL display_published;
  static DWORD input_threads[PS5_MAX_WINDOWS];
  static UINT input_thread_count;
-@@ -195,6 +202,21 @@ static void present_screen(void)
+@@ -192,6 +199,21 @@ static void present_screen(void)
      present_frame( frame, width, height, width * 4 );
  }
  
@@ -63,7 +63,7 @@ index 9c4ab5b..e488f5c 100644
  /***********************************************************************
   *           display
   */
-@@ -290,7 +312,10 @@ static BOOL ps5_surface_flush( struct window_surface *surface, const RECT *rect,
+@@ -287,7 +309,10 @@ static BOOL ps5_surface_flush( struct window_surface *surface, const RECT *rect,
                                    (target.left - window->visible.left) * 4;
                  memcpy( screen + y * screen_width + target.left, src, (target.right - target.left) * 4 );
              }
@@ -75,7 +75,7 @@ index 9c4ab5b..e488f5c 100644
          }
      }
      pthread_mutex_unlock( &screen_lock );
-@@ -391,7 +416,7 @@ static void ps5_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint,
+@@ -388,7 +413,7 @@ static void ps5_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint,
          if (window->shown && (!shown || !EqualRect( &window->visible, &new_rects->visible )))
          {
              clear_screen_rect( &window->visible );
@@ -84,7 +84,7 @@ index 9c4ab5b..e488f5c 100644
          }
          /* a window just shown may have painted before it had this surface */
          repaint = shown && !window->shown;
-@@ -412,8 +437,9 @@ static void ps5_DestroyWindow( HWND hwnd )
+@@ -409,8 +434,9 @@ static void ps5_DestroyWindow( HWND hwnd )
          if (window->shown)
          {
              clear_screen_rect( &window->visible );
@@ -95,7 +95,7 @@ index 9c4ab5b..e488f5c 100644
          *window = windows[--window_count];
      }
      pthread_mutex_unlock( &screen_lock );
-@@ -508,7 +534,7 @@ static void move_cursor( HWND hwnd, INT dx, INT dy )
+@@ -505,7 +531,7 @@ static void move_cursor( HWND hwnd, INT dx, INT dy )
      POINT pos;
  
      pthread_mutex_lock( &screen_lock );
@@ -104,7 +104,7 @@ index 9c4ab5b..e488f5c 100644
      pthread_mutex_unlock( &screen_lock );
      /* win32u coalesces a driver's motion until a button or NOCOALESCE sends
       * it; each move goes to the server now, so the position read back is it */
-@@ -527,7 +553,7 @@ static void move_cursor( HWND hwnd, INT dx, INT dy )
+@@ -524,7 +550,7 @@ static void move_cursor( HWND hwnd, INT dx, INT dy )
      if (cursor.x != pos.x || cursor.y != pos.y)
      {
          cursor = pos;
@@ -113,7 +113,7 @@ index 9c4ab5b..e488f5c 100644
      }
      pthread_mutex_unlock( &screen_lock );
  }
-@@ -713,7 +739,7 @@ static void ps5_SetCursor( HWND hwnd, HCURSOR handle )
+@@ -722,7 +748,7 @@ static void ps5_SetCursor( HWND hwnd, HCURSOR handle )
      cursor_height = height;
      cursor_box = box;
      if (image) cursor_hotspot = (POINT){info.xHotspot, info.yHotspot};
@@ -122,7 +122,7 @@ index 9c4ab5b..e488f5c 100644
      pthread_mutex_unlock( &screen_lock );
      free( old );
      TRACE( "cursor %p: %ux%u\n", handle, width, height );
-@@ -742,25 +768,35 @@ void ps5drv_unlock_cursor(void)
+@@ -732,22 +758,34 @@ static void ps5_SetCursor( HWND hwnd, HCURSOR handle )
  /* Vulkan frames reach the screen through the GPU driver's own video output
   * (patch 0460), which this driver does not compose, so after each present
   * libvulkan.prx shows the cursor with VideoOut's hardware cursor
@@ -138,9 +138,6 @@ index 9c4ab5b..e488f5c 100644
 -    static int (*show)( const UINT32 *, UINT, UINT, INT, INT, UINT, UINT );
 +    static int (*show)( const UINT32 *, UINT, UINT, INT, INT, INT, INT, UINT, UINT );
      static BOOL looked;
--    const UINT32 *image;
--    UINT width, height;
--    POINT top_left;
 +    struct window_rects rects;
 +    BOOL placed = hwnd && get_window_rects( hwnd, COORDS_SCREEN, &rects, get_dpi_for_window( hwnd ) ) &&
 +                  rects.client.right > rects.client.left && rects.client.bottom > rects.client.top;
@@ -152,10 +149,9 @@ index 9c4ab5b..e488f5c 100644
 +        show = dlsym( vulkan_handle, "pw_videoout_cursor_point" );
      }
 -    if (!show) return;
--    image = ps5drv_lock_cursor( &width, &height, &top_left );
--    show( width && height ? image : NULL, width, height, top_left.x, top_left.y, screen_width, screen_height );
--    ps5drv_unlock_cursor();
-+    pthread_mutex_lock( &screen_lock );
+     pthread_mutex_lock( &screen_lock );
+-    show( cursor_width && cursor_height ? cursor_image : NULL, cursor_width, cursor_height,
+-          cursor.x - cursor_hotspot.x, cursor.y - cursor_hotspot.y, screen_width, screen_height );
 +    if (placed)
 +    {
 +        vulkan_window = hwnd;
@@ -166,11 +162,10 @@ index 9c4ab5b..e488f5c 100644
 +        show( cursor_width && cursor_height ? cursor_image : NULL, cursor_width, cursor_height,
 +              cursor_hotspot.x, cursor_hotspot.y, cursor.x - rects.client.left, cursor.y - rects.client.top,
 +              rects.client.right - rects.client.left, rects.client.bottom - rects.client.top );
-+    pthread_mutex_unlock( &screen_lock );
+     pthread_mutex_unlock( &screen_lock );
  }
  #endif
- 
-@@ -775,7 +811,7 @@ static BOOL ps5_SetCursorPos( INT x, INT y )
+@@ -763,7 +801,7 @@ static BOOL ps5_SetCursorPos( INT x, INT y )
      pthread_mutex_lock( &screen_lock );
      cursor.x = x;
      cursor.y = y;

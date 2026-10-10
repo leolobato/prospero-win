@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Host test of the PS5 title's controller as a HID gamepad (Wine patches
-0910-0912), as DirectInput and winmm find it.
+0951-0953), as DirectInput and winmm find it.
 
 Builds tests/lab/pw_hid_pad_sink.c (the title's pad calls, served from a
 text file) and tests/lab/pw_hid_pad.c (a program that sets the pad through
@@ -84,7 +84,7 @@ def main():
             for line in text.splitlines():
                 if line.startswith(('ok ', 'FAIL ')) or 'started, ' in line or 'hosted drivers failed' in line:
                     print(f'{name}: {line}')
-            # A HID report a 32-bit game's hidclass sends must arrive as WM_INPUT (patch 0914).
+            # A HID report a 32-bit game's hidclass sends must arrive as WM_INPUT (patch 0955).
             if 'unknown message type' in text:
                 print(f'{name}: FAIL hardware input arrived without its message (WoW64 NtUserSendHardwareInput)')
             if code or 'started, gamepad after' not in text or 'unknown message type' in text:

@@ -566,3 +566,9 @@ wine/patches/0878-crypt32-ps5-root-certificates-beside-the-runtime.patch
 wine/ps5/pw_gnutls_libc.c
 wine/patches/0877-secur32-log-gnutls-errors-and-the-clock-on-handshake-failure.patch
 tests/test_build_tls_ps5.py
+wine/patches/0950-win32u-ps5-scale-the-cursor-with-a-scaled-swapchain.patch
+wine/patches/0951-winebus-ps5-title-controller-as-hid-gamepad.patch
+wine/patches/0952-ntoskrnl-ps5-host-the-hid-drivers-in-the-game.patch
+wine/patches/0953-winebus-wow64-thunks-for-a-hosted-32-bit-game.patch
+wine/patches/0954-setupapi-ps5-write-services-without-a-service-manager.patch
+wine/patches/0955-wow64win-convert-the-input-of-send-hardware-input.patch
