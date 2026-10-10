@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sat, 10 Oct 2026 23:45:00 +0200
+Subject: [PATCH] ntdll: Track directories received from the server on PS5.
+
+A PS5 title has no kernel *at() calls, so ntdll's openat() and fstatat()
+resolve against the path each descriptor was opened by (wine/ps5/
+pw_wine_cwd.h). A directory descriptor received from the in-process
+server was opened in the server's module, so ntdll has no path for it:
+every name opened relative to a directory handle (NtCreateFile with
+ObjectAttributes.RootDirectory) failed with EBADF, which is
+STATUS_INVALID_HANDLE. .NET's recursive enumeration opens each
+subdirectory that way, so Caves of Qud could not read its data
+(DirectoryInfo.GetFiles with SearchOption.AllDirectories threw
+"IOException: Invalid handle").
+
+On PS5, when ntdll receives a directory descriptor from the server,
+record the name the server opened it by. On the console, every such
+open failed with c0000008, on /data and on an exFAT drive alike.
+---
+ dlls/ntdll/unix/server.c | 45 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 45 insertions(+)
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 830564f..a5f24e3 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1570,6 +1570,48 @@ static int remove_fd_from_cache( HANDLE handle )
+ }
+ 
+ 
++#ifdef __PROSPERO__
++extern void pw_cwd_track( int fd, const char *absolute );
++
++/***********************************************************************
++ *           track_received_directory
++ *
++ * A PS5 title has no kernel *at() calls, so openat() and fstatat() resolve
++ * against the path each descriptor was opened by (wine/ps5/pw_wine_cwd.h).
++ * A directory received from the in-process server was opened in the
++ * server's module, so ntdll has no path for it, and every name looked up
++ * relative to a directory handle failed with EBADF (STATUS_INVALID_HANDLE).
++ * Record the name the server opened it by.
++ */
++static void track_received_directory( HANDLE handle, int fd )
++{
++    data_size_t size = 1024;
++    unsigned int ret;
++    char *name;
++
++    for (;;)
++    {
++        if (!(name = malloc( size + 1 ))) return;
++        SERVER_START_REQ( get_handle_unix_name )
++        {
++            req->handle = wine_server_obj_handle( handle );
++            wine_server_set_reply( req, name, size );
++            ret = wine_server_call( req );
++            size = reply->name_len;
++        }
++        SERVER_END_REQ;
++        if (!ret)
++        {
++            name[size] = 0;
++            pw_cwd_track( fd, name );
++        }
++        free( name );
++        if (ret != STATUS_BUFFER_OVERFLOW) return;
++    }
++}
++#endif
++
++
+ /***********************************************************************
+  *           server_get_unix_fd
+  *
+@@ -1605,6 +1647,9 @@ int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
+                 if ((fd = wine_server_receive_fd( &fd_handle )) != -1)
+                 {
+                     assert( wine_server_ptr_handle(fd_handle) == handle );
++#ifdef __PROSPERO__
++                    if (reply->type == FD_TYPE_DIR) track_received_directory( handle, fd );
++#endif
+                     *needs_close = (!reply->cacheable ||
+                                     !add_fd_to_cache( handle, fd, reply->type,
+                                                       reply->access, reply->options ));
+-- 
+2.43.0
