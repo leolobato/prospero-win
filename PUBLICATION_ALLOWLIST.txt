@@ -633,3 +633,9 @@ wine/patches/0973-ntdll-ps5-title-menu-snapshot.patch
 wine/patches/0974-ntdll-fault-on-protected-pages-that-share-a-host-page.patch
 wine/patches/0982-ntdll-ps5-high-area-as-large-as-the-kernel-grants.patch
 tests/test_wine_mouse_wheel.py
+wine/patches/0950-win32u-ps5-scale-the-cursor-with-a-scaled-swapchain.patch
+wine/patches/0951-winebus-ps5-title-controller-as-hid-gamepad.patch
+wine/patches/0952-ntoskrnl-ps5-host-the-hid-drivers-in-the-game.patch
+wine/patches/0953-winebus-wow64-thunks-for-a-hosted-32-bit-game.patch
+wine/patches/0954-setupapi-ps5-write-services-without-a-service-manager.patch
+wine/patches/0955-wow64win-convert-the-input-of-send-hardware-input.patch

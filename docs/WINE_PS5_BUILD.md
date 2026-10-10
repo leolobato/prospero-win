@@ -488,7 +488,7 @@ instead of starting explorer. The driver:
   the same pointer, as mouse look expects. The driver reads the position back
   to draw the cursor. Where a frame shows only part of the screen (one
   window, or a smaller display mode), the pointer stops at what is shown.
-  While a Vulkan swapchain presents (patch 0902), it stops at the presenting
+  While a Vulkan swapchain presents (patch 0950), it stops at the presenting
   window's client area instead, which the swapchain's images show whole; the
   hardware cursor (`pw_videoout_cursor_point`) scales the pointer's place in
   that area with the image, so a 640x480 window shown as 1440x1080 has its

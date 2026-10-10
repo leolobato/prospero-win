@@ -101,9 +101,9 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # wrote past its buffer (patch 0972).
 # kernelbase: no debugger start in a title (patch 0971).
 # ntoskrnl.exe, winebus.sys and setupapi: the game hosts the controller's HID
-# drivers and installs them without a service manager (patches 0910-0913).
+# drivers and installs them without a service manager (patches 0951-0954).
 # A module with no extension is a .dll. wow64win (x86_64 only): a 32-bit
-# game's hidclass sends hardware input through it (patch 0914).
+# game's hidclass sends hardware input through it (patch 0955).
 PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan kernelbase ntoskrnl.exe winebus.sys setupapi"
 PE_MODULES="$PE_MODULES xaudio2_0 xaudio2_1 xaudio2_2 xaudio2_3 xaudio2_4 xaudio2_5 xaudio2_6 xaudio2_7 xaudio2_8 xaudio2_9 xactengine2_0 xactengine2_4 xactengine2_7 xactengine2_9 xactengine3_0 xactengine3_1 xactengine3_2 xactengine3_3 xactengine3_4 xactengine3_5 xactengine3_6 xactengine3_7"
 # Everything optional but FreeType (built below) is off: the console has none
@@ -524,7 +524,7 @@ if [ "$prx_status" = 0 ]; then
         -c "$tree/dlls/xinput1_3/unixlib.c" -o "$prx/obj/xinput_unixlib.o" ||
         fail "cannot compile xinput's unixlib.c"
     link_prx xinput1_3 - "$prx/obj/xinput_unixlib.o $prx/obj/xinput_desc.o" "$prx/ntdll.shared.elf"
-    # winebus's Unix side (patches 0910-0912): its PS5 bus reads the title's
+    # winebus's Unix side (patches 0951-0953): its PS5 bus reads the title's
     # controller through ntdll's dlsym, for the HID drivers the game hosts.
     link_prx winebus dlls/winebus.sys/winebus.so "$prx/obj/winebus_desc.o" "$prx/ntdll.shared.elf"
     # Wine's Vulkan Unix side: it calls into ntdll and into win32u's Vulkan
