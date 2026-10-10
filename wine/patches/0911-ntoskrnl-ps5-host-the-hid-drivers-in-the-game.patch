@@ -21,6 +21,8 @@ With WINE_NTOSKRNL_HOSTED set:
   loads winebus and waits up to the timeout for a gamepad's &XI_
   interface to be enabled in this process, so that the game finds it
   when it first looks (Windows.Gaming.Input enumerates once).
+- A start that fails (a missing driver, say) stops the loop again,
+  unloading what it loaded, so that a later call can retry.
 - ZwLoadDriver reads a driver's service from its registry key instead
   of the service manager, and service status updates are skipped.
   Installing a new device's services without the service manager is
@@ -35,6 +37,14 @@ syswow64\drivers (hidclass, hidparse, winebus, winehid, winexinput):
 a 32-bit game loads them from there, and Wine's loader finds builtins
 without a file only while a prefix is created.
 ---
+ dlls/ntdll/loader.c                  |  40 ++++++++
+ dlls/ntoskrnl.exe/ntoskrnl.c         | 143 +++++++++++++++++++++++++--
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec  |   1 +
+ dlls/ntoskrnl.exe/ntoskrnl_private.h |   3 +
+ dlls/ntoskrnl.exe/pnp.c              |   1 +
+ loader/wine.inf.in                   |   6 ++
+ 6 files changed, 187 insertions(+), 7 deletions(-)
+
 diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
 index a0992cf..8793666 100644
 --- a/dlls/ntdll/loader.c
@@ -108,7 +118,7 @@ index a0992cf..8793666 100644
  
  
 diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
-index ebfcee6..ed57ed9 100644
+index ebfcee6..677ff9c 100644
 --- a/dlls/ntoskrnl.exe/ntoskrnl.c
 +++ b/dlls/ntoskrnl.exe/ntoskrnl.c
 @@ -55,6 +55,12 @@ KSERVICE_TABLE_DESCRIPTOR KeServiceDescriptorTable[4] = { { 0 } };
@@ -206,15 +216,15 @@ index ebfcee6..ed57ed9 100644
          return STATUS_IMAGE_ALREADY_LOADED;
      }
  
-@@ -4332,10 +4374,77 @@ NTSTATUS WINAPI ZwLoadDriver( const UNICODE_STRING *service_name )
+@@ -4332,7 +4374,93 @@ NTSTATUS WINAPI ZwLoadDriver( const UNICODE_STRING *service_name )
  
  error:
      set_service_status( service_handle, SERVICE_STOPPED, 0 );
 -    CloseServiceHandle( (void *)service_handle );
 +    if (service_handle) CloseServiceHandle( (void *)service_handle );
-     return status;
- }
- 
++    return status;
++}
++
 +static DWORD WINAPI host_main_loop( void *stop_event )
 +{
 +    return wine_ntoskrnl_main_loop( stop_event );
@@ -243,26 +253,27 @@ index ebfcee6..ed57ed9 100644
 + */
 +NTSTATUS CDECL wine_ntoskrnl_host_start( const WCHAR *driver_name, DWORD timeout_ms )
 +{
-+    static HANDLE stop_event;
++    static LONG state;  /* 0: not started, 1: starting, 2: started */
++    HANDLE stop_event = NULL, thread = NULL;
 +    WCHAR path[MAX_PATH];
 +    UNICODE_STRING name;
 +    NTSTATUS status;
 +    DWORD start;
-+    HANDLE thread;
 +
 +    if (!hosted) return STATUS_NOT_SUPPORTED;
-+    if (stop_event) return STATUS_IMAGE_ALREADY_LOADED;
 +    if (wcslen( servicesW ) + wcslen( driver_name ) >= ARRAY_SIZE(path)) return STATUS_INVALID_PARAMETER;
-+    if (!(stop_event = CreateEventW( NULL, TRUE, FALSE, NULL ))) return STATUS_NO_MEMORY;
-+    if (!(host_ready = CreateEventW( NULL, TRUE, FALSE, NULL ))) return STATUS_NO_MEMORY;
-+    if (!(host_gamepad = CreateEventW( NULL, TRUE, FALSE, NULL ))) return STATUS_NO_MEMORY;
++    if (InterlockedCompareExchange( &state, 1, 0 )) return STATUS_IMAGE_ALREADY_LOADED;
++
++    status = STATUS_NO_MEMORY;
++    if (!(stop_event = CreateEventW( NULL, TRUE, FALSE, NULL ))) goto failed;
++    if (!(host_ready = CreateEventW( NULL, TRUE, FALSE, NULL ))) goto failed;
++    if (!(host_gamepad = CreateEventW( NULL, TRUE, FALSE, NULL ))) goto failed;
 +
 +    GetSystemDirectoryW( path, MAX_PATH );
 +    wcscat( path, L"\\drivers" );
 +    AddDllDirectory( path );
 +
-+    if (!(thread = CreateThread( NULL, 0, host_main_loop, stop_event, 0, NULL ))) return STATUS_NO_MEMORY;
-+    CloseHandle( thread );
++    if (!(thread = CreateThread( NULL, 0, host_main_loop, stop_event, 0, NULL ))) goto failed;
 +    WaitForSingleObject( host_ready, INFINITE );
 +
 +    wcscpy( path, servicesW );
@@ -271,7 +282,7 @@ index ebfcee6..ed57ed9 100644
 +    if ((status = ZwLoadDriver( &name )))
 +    {
 +        ERR( "failed to load %s, status %#lx\n", debugstr_w(driver_name), status );
-+        return status;
++        goto failed;
 +    }
 +
 +    start = GetTickCount();
@@ -279,13 +290,28 @@ index ebfcee6..ed57ed9 100644
 +        WARN( "%s started, no gamepad after %lu ms\n", debugstr_w(driver_name), GetTickCount() - start );
 +    else
 +        TRACE( "%s started, gamepad after %lu ms\n", debugstr_w(driver_name), GetTickCount() - start );
++    /* The loop runs for the rest of the process: its stop event is never set. */
++    CloseHandle( thread );
++    InterlockedExchange( &state, 2 );
 +    return STATUS_SUCCESS;
-+}
 +
- /***********************************************************************
-  *           ZwUnloadDriver (NTOSKRNL.EXE.@)
-  */
-@@ -4906,17 +5015,18 @@ BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
++failed:
++    /* Stop the loop (which unloads what it loaded) so that a later call can start again. */
++    if (thread)
++    {
++        SetEvent( stop_event );
++        WaitForSingleObject( thread, INFINITE );
++        CloseHandle( thread );
++    }
++    if (host_gamepad) CloseHandle( host_gamepad );
++    if (host_ready) CloseHandle( host_ready );
++    if (stop_event) CloseHandle( stop_event );
++    host_gamepad = host_ready = NULL;
++    InterlockedExchange( &state, 0 );
+     return status;
+ }
+ 
+@@ -4906,17 +5034,18 @@ BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
      {
      case DLL_PROCESS_ATTACH:
          DisableThreadLibraryCalls( inst );
@@ -307,7 +333,7 @@ index ebfcee6..ed57ed9 100644
  
          if (reserved) break;
  
-@@ -4924,7 +5034,7 @@ BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
+@@ -4924,7 +5053,7 @@ BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
              CloseThreadpool(dpc_call_tp);
  
          HeapDestroy( ntoskrnl_heap );
