@@ -50,6 +50,8 @@ SPEC_SCHEMA = "playden-prospero-kit-spec/1"
 MANIFEST_SCHEMA = "playden-prospero-kit/1"
 PUBLICATION_GUARD = "playden-publication-guard-v1"
 ANY_TITLE_CAPABILITY = "title-any-id"
+# An any-title shell may carry Mesa WGL/Zink here; the title installs it into an OpenGL game's prefix.
+MESA_ZINK_DIR = "win/mesa-zink"
 # Independent pin for the reviewed scalar provider provenance, not a kit claim.
 PUBLICATION_PROVIDER_SHA256 = "f14d5e3ecb31951e3cf5bfdc41972181a9be1d96ed0dc7cb3aeebb8e4aab844a"
 TITLE_RE = re.compile(r"FAKE78\d{3}\Z")
@@ -810,7 +812,10 @@ def package_kit(spec_path: str | Path, out: str | Path,
         if raw.get("helper_revision") != sources["helper"]["revision"]:
             raise KitError(f"variant {variant_id} helper revision does not match provenance")
         title_source = _source_path(spec_path, raw.get("path"), f"variant {variant_id}")
-        _validate_no_personal_state(title_source, f"variant {variant_id}")
+        # Mesa's WGL/Zink DLLs carry the compiler vendor's build paths (llvm-mingw's libc++abi).
+        _validate_no_personal_state(title_source, f"variant {variant_id}",
+                                    (title_source / MESA_ZINK_DIR,) if development_build_paths else (),
+                                    runtime_exceptions)
         helper_manifest_path = _source_path(
             spec_path, raw.get("helper_manifest"), f"variant {variant_id} helper manifest")
         protocol_path = _source_path(
@@ -1102,7 +1107,8 @@ def validate_kit(kit: str | Path, manifest_path: str | Path | None = None,
     for module in runtime_root.rglob("*.prx"):
         _required_executable(module, module.relative_to(root).as_posix())
     exceptions: list[str] = []
-    _validate_no_personal_state(root, "kit", (runtime_root, prefix) if development_build_paths else (),
+    mesa_roots = tuple(title / MESA_ZINK_DIR for title in sorted((root / "titles").glob("*")))
+    _validate_no_personal_state(root, "kit", (runtime_root, prefix, *mesa_roots) if development_build_paths else (),
                                 exceptions)
     if exceptions:
         manifest = dict(manifest)
