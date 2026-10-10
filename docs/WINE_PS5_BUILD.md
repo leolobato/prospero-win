@@ -122,6 +122,7 @@ before evaluating a candidate built from that cache.
 | 0899 | `include`: list the PS5 sync headers (0810, 0820, 0885, 0887) in `include/Makefile.in`, which makedep needs to resolve them; configure failed without it |
 | 0902 | `win32u`: the PS5 driver sends the arrows, Insert, Delete, Home, End, Page Up, Page Down, right Ctrl and Alt, the Windows and menu keys and keypad `/` with `KEYEVENTF_EXTENDEDKEY`; their scan codes are the keypad's without it, so DirectInput reported the keypad's 8 for the up arrow and a game's arrow-key bindings never fired |
 | 0903 | `ntdll`: a signal frame keeps the FS base it was taken with when the thread resumes where it was; the host's is set only where the handler sends a context to Wine's 64-bit code (the exception dispatcher, a different 64-bit context). The native WoW64 CPU sets the guest FS just before it switches to 32-bit code, and a signal in that window used to send the thread into its 32-bit code with the host FS (GTA San Andreas' DXVK workers crashing at startup in `RtlEnterCriticalSection`) |
+| 0956 | `gdi32`: `SetPixelFormat` on a window that already has a pixel format succeeds when it is the same one and fails otherwise, as on Windows, before reaching the loaded `opengl32`. Mesa's WGL (the Zink path's native `opengl32`) refuses every second call, and Godot 4 sets its main window's format twice, so its OpenGL renderer stopped at "Failed to create an OpenGL window" (Slay the Spire 2) |
 
 ## Allocator
 

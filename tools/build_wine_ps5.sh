@@ -100,8 +100,9 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # ntoskrnl.exe, winebus.sys and setupapi: the game hosts the controller's HID
 # drivers and installs them without a service manager (patches 0951-0954).
 # A module with no extension is a .dll. wow64win (x86_64 only): a 32-bit
-# game's hidclass sends hardware input through it (patch 0955).
-PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan ntoskrnl.exe winebus.sys setupapi"
+# game's hidclass sends hardware input through it (patch 0955). gdi32: a
+# window keeps its pixel format with a native opengl32 (patch 0956).
+PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan ntoskrnl.exe winebus.sys setupapi gdi32"
 # Everything optional but FreeType (built below) is off: the console has none
 # of these libraries, and a configure-time probe against the payload SDK must
 # not pick up host headers.
