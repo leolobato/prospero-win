@@ -390,8 +390,9 @@ def _mono_runtime_path(kit_id: str) -> str:
 
 
 def _validate_mono(mono_root: Path, prefix: Path, kit_id: str) -> None:
-    """Wine Mono's runtime DLLs for both architectures, its class library, and the
-    template's registry value that points Wine's mscoree at it."""
+    """Wine Mono's runtime DLLs for both architectures, its class library, the
+    template's registry value that points Wine's mscoree at it, and the .NET
+    Framework entries and stubs Wine Mono's support MSI would write into the bottle."""
     for relative, machine, magic, architecture in (
             ("bin/libmono-2.0-x86.dll", PE_MACHINE_I386, PE_MAGIC_PE32, "PE32"),
             ("bin/libmono-2.0-x86_64.dll", PE_MACHINE_AMD64, PE_MAGIC_PE32_PLUS, "PE32+")):
@@ -410,6 +411,25 @@ def _validate_mono(mono_root: Path, prefix: Path, kit_id: str) -> None:
     expected = _mono_runtime_path(kit_id).replace("\\", "\\\\")
     if _registry_string(_section(user_registry, r"Software\\Wine\\Mono"), "RuntimePath") != expected:
         raise KitError(f"template user.reg must set Wine Mono's RuntimePath to {_mono_runtime_path(kit_id)}")
+    # What Wine Mono's support MSI writes when Wine installs it into a prefix: mscoree's
+    # LoadLibraryShim and GetRuntimeDirectory read the .NET Framework InstallRoot (each
+    # view its own) and load from <InstallRoot><version>\\ under C:\\windows\\Microsoft.NET.
+    try:
+        system_registry = (prefix / "system.reg").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise KitError(f"cannot read template system.reg: {error}") from error
+    views = ((r"Software\\Microsoft\\.NETFramework", "Framework64"),
+             (r"Software\\Wow6432Node\\Microsoft\\.NETFramework", "Framework"))
+    for key, framework in views:
+        expected = rf"C:\\windows\\Microsoft.NET\\{framework}\\"
+        if _registry_string(_section(system_registry, key), "InstallRoot") != expected:
+            raise KitError(f"template system.reg must set {key.replace(chr(92) * 2, chr(92))} InstallRoot to "
+                           f"{expected.replace(chr(92) * 2, chr(92))}")
+    for _, framework in views:
+        for version in ("v2.0.50727", "v4.0.30319"):
+            stub = prefix / "drive_c/windows/Microsoft.NET" / framework / version / "mscorlib.dll"
+            if stub.is_symlink() or not stub.is_file():
+                raise KitError(f"template is missing {stub.relative_to(prefix).as_posix()}")
 
 
 def _pe_identity(path: Path, label: str) -> dict[str, int]:
