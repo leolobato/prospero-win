@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -316,7 +317,7 @@ static void test_path_walk_rejects_intermediate_symlink(void)
 {
     char root[] = "/tmp/pw-title-walk-XXXXXX";
     char outside[] = "/tmp/pw-title-walk-out-XXXXXX";
-    char real_root[512], real_outside[512];
+    char real_root[PATH_MAX], real_outside[PATH_MAX]; /* realpath() writes up to PATH_MAX */
     char library[512], prefixes[512], link[512], file[512];
     int fd;
 
