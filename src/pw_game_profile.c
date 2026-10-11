@@ -242,7 +242,8 @@ static int display_field(PwGameDisplay *display, uint32_t *seen, const uint8_t *
     return PW_ERR_UNSUPPORTED;
 }
 
-enum { SECTION_NONE, SECTION_APPLICATION, SECTION_DISPLAY, SECTION_INPUT, SECTION_DEBUG, SECTION_RUNTIME };
+enum { SECTION_NONE, SECTION_APPLICATION, SECTION_DISPLAY, SECTION_INPUT, SECTION_DEBUG, SECTION_RUNTIME,
+       SECTION_ENVIRONMENT };
 
 /* One line: its trimmed extent and where the next begins. */
 static size_t next_line(const uint8_t *bytes, size_t length, size_t cursor,
@@ -266,7 +267,8 @@ static int section_of(const uint8_t *begin, const uint8_t *end)
            is(begin, (size_t)(end - begin), "display") ? SECTION_DISPLAY :
            is(begin, (size_t)(end - begin), "input") ? SECTION_INPUT :
            is(begin, (size_t)(end - begin), "debug") ? SECTION_DEBUG :
-           is(begin, (size_t)(end - begin), "runtime") ? SECTION_RUNTIME : -1;
+           is(begin, (size_t)(end - begin), "runtime") ? SECTION_RUNTIME :
+           is(begin, (size_t)(end - begin), "environment") ? SECTION_ENVIRONMENT : -1;
 }
 
 /* [debug] winedebug = Wine's channel list (e.g. +seh,warn+module,-all):
@@ -328,6 +330,44 @@ static int debug_env_field(PwGameProfile *profile, const uint8_t *value, size_t 
     entry->name[name_length] = 0;
     memcpy(entry->value, equals + 1, data_length);
     entry->value[data_length] = 0;
+    return PW_OK;
+}
+
+/* [environment] NAME = value (src/pw_game_profile.h): the same rules as
+ * Playden's IsProsperoEnvironmentEntry, so a profile it writes is never
+ * refused here. Names are upper-case identifiers of the graphics, input and
+ * CPU-topology families; anything that steers Wine, the loader or the prefix
+ * (WINE*, LD_*, PATH, HOME) stays out, and so do the variables the title
+ * derives from [display] and [input]. Values are printable ASCII without
+ * quotes. Case matters, as in the environment itself. */
+static int environment_field(PwGameProfile *profile, const uint8_t *key, size_t key_length,
+                             const uint8_t *value, size_t value_length)
+{
+    static const char *const families[] = { "DXVK_", "MESA_", "RADV_", "SDL_" };
+    PwGameEnvironmentEntry *entry;
+    int allowed = same(key, key_length, "WINE_CPU_TOPOLOGY");
+
+    if (profile->environment_count >= PW_GAME_ENVIRONMENT_MAX || key_length >= PW_GAME_ENVIRONMENT_NAME ||
+        !value_length || value_length >= PW_GAME_ENVIRONMENT_VALUE)
+        return PW_ERR_MALFORMED;
+    for (size_t i = 0; i < key_length; i++) {
+        uint8_t c = key[i];
+        if (!((c >= 'A' && c <= 'Z') || c == '_' || (i && c >= '0' && c <= '9'))) return PW_ERR_MALFORMED;
+    }
+    /* a family name alone (DXVK_) is not a variable */
+    for (size_t i = 0; i < sizeof(families) / sizeof(families[0]); i++)
+        allowed |= starts(key, key_length, families[i]) && key_length > strlen(families[i]);
+    if (!allowed || same(key, key_length, "DXVK_HUD") || same(key, key_length, "SDL_JOYSTICK_RAWINPUT"))
+        return PW_ERR_UNSUPPORTED;
+    for (size_t i = 0; i < value_length; i++)
+        if (value[i] < 0x20 || value[i] > 0x7e || value[i] == '"' || value[i] == '\'') return PW_ERR_MALFORMED;
+    for (size_t i = 0; i < profile->environment_count; i++)
+        if (same(key, key_length, profile->environment[i].name)) return PW_ERR_MALFORMED;
+    entry = &profile->environment[profile->environment_count++];
+    memcpy(entry->name, key, key_length);
+    entry->name[key_length] = 0;
+    memcpy(entry->value, value, value_length);
+    entry->value[value_length] = 0;
     return PW_OK;
 }
 
@@ -413,7 +453,9 @@ static int parse_sections(const uint8_t *bytes, size_t length, PwGameProfile *pr
         value = equals + 1;
         trim(&value, &end);
         if (begin == key_end) return PW_ERR_MALFORMED;
-        int status = section == SECTION_DEBUG ?
+        int status = section == SECTION_ENVIRONMENT ?
+            environment_field(profile, begin, (size_t)(key_end - begin), value, (size_t)(end - value)) :
+            section == SECTION_DEBUG ?
             debug_field(profile, begin, (size_t)(key_end - begin), value, (size_t)(end - value)) :
             section == SECTION_RUNTIME ?
             runtime_field(&profile->runtime, &runtime_seen, begin, (size_t)(key_end - begin),
@@ -447,6 +489,14 @@ size_t pw_game_debug_env(const PwGameProfile *profile, PwGameEnv *env)
     for (size_t i = 0; i < profile->debug_env_count; i++)
         env[i] = (PwGameEnv){ profile->debug_env[i].name, profile->debug_env[i].value };
     return profile->debug_env_count;
+}
+
+size_t pw_game_environment_env(const PwGameProfile *profile, PwGameEnv *env)
+{
+    if (!profile || !env) return 0;
+    for (size_t i = 0; i < profile->environment_count; i++)
+        env[i] = (PwGameEnv){ profile->environment[i].name, profile->environment[i].value };
+    return profile->environment_count;
 }
 
 int pw_game_cpu_native(const PwGameProfile *profile)
@@ -535,6 +585,12 @@ int pw_game_profile_parse(const uint8_t *bytes, size_t length, PwGameProfile *pr
     /* and framegen sets PW_FRAMEGEN and PW_FRAMEGEN_HUD. */
     for (size_t i = 0; parsed.display.framegen && i < parsed.debug_env_count; i++)
         if (!strncmp(parsed.debug_env[i].name, "PW_FRAMEGEN", 11)) return PW_ERR_UNSUPPORTED;
+    for (size_t i = 0; parsed.display.framegen && i < parsed.environment_count; i++)
+        if (!strncmp(parsed.environment[i].name, "PW_FRAMEGEN", 11)) return PW_ERR_UNSUPPORTED;
+    /* A variable is set by one section only: [debug] env or [environment]. */
+    for (size_t i = 0; i < parsed.environment_count; i++)
+        for (size_t j = 0; j < parsed.debug_env_count; j++)
+            if (!strcmp(parsed.environment[i].name, parsed.debug_env[j].name)) return PW_ERR_MALFORMED;
     *profile = parsed;
     return PW_OK;
 }
