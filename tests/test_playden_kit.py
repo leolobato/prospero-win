@@ -285,14 +285,29 @@ class PlaydenKitTests(unittest.TestCase):
         write(user, user.read_text() + "\n[Software\\\\Wine\\\\Mono]\n"
               '"RuntimePath"="Z:\\\\data\\\\playden\\\\kits\\\\hl2-fw1360-v1\\\\mono\\\\wine-mono-11.3.0"\n')
 
+    def add_dotnet_framework(self, *, stubs: bool = True) -> None:
+        """What Wine Mono's support MSI writes: InstallRoot in both views and the mscorlib stubs."""
+        system = self.fixture.prefix / "system.reg"
+        write(system, system.read_text() +
+              "\n[Software\\\\Microsoft\\\\.NETFramework]\n"
+              '"InstallRoot"="C:\\\\windows\\\\Microsoft.NET\\\\Framework64\\\\"\n'
+              "\n[Software\\\\Wow6432Node\\\\Microsoft\\\\.NETFramework]\n"
+              '"InstallRoot"="C:\\\\windows\\\\Microsoft.NET\\\\Framework\\\\"\n')
+        if stubs:
+            for framework in ("Framework", "Framework64"):
+                for version in ("v2.0.50727", "v4.0.30319"):
+                    write(self.fixture.prefix / "drive_c/windows/Microsoft.NET" / framework / version / "mscorlib.dll",
+                          pe("pe32", b"stub"))
+
     def add_wine_mono(self, *, capability: bool = True, registry: bool = True) -> Path:
-        """Give the fixture Wine Mono, its provenance, and the template's RuntimePath."""
+        """Give the fixture Wine Mono, its provenance, the template's RuntimePath and .NET Framework entries."""
         mono = self.fixture.root / "inputs/wine-mono-11.3.0"
         write(mono / "bin/libmono-2.0-x86.dll", pe("pe32", b"mono32"))
         write(mono / "bin/libmono-2.0-x86_64.dll", pe("pe64", b"mono64"))
         write(mono / "lib/mono/4.5/mscorlib.dll", pe("pe32", b"corlib"))
         if registry:
             self.add_mono_runtime_path()
+            self.add_dotnet_framework()
         spec = json.loads(self.fixture.spec.read_text())
         spec["mono"] = {"version": "11.3.0", "path": str(mono)}
         spec["sources"]["mono"] = {"version": "11.3.0", "url": "https://example/wine-mono",
@@ -339,6 +354,7 @@ class PlaydenKitTests(unittest.TestCase):
         with self.assertRaisesRegex(KitError, "RuntimePath"):
             self.package()
         self.add_mono_runtime_path()
+        self.add_dotnet_framework()
         write(mono / "bin/libmono-2.0-x86_64.dll", pe("pe32", b"wrong"))
         with self.assertRaisesRegex(KitError, r"libmono-2.0-x86_64.dll must be PE32\+"):
             self.package()
@@ -347,6 +363,30 @@ class PlaydenKitTests(unittest.TestCase):
         with self.assertRaisesRegex(KitError, "missing bin/libmono-2.0-x86_64.dll"):
             self.package()
         self.assertFalse(self.fixture.out.exists())
+
+    def test_wine_mono_needs_the_dotnet_framework_entries_its_installer_writes(self) -> None:
+        self.add_wine_mono(registry=False)
+        self.add_mono_runtime_path()
+        with self.assertRaisesRegex(KitError, r"Microsoft\\.NETFramework InstallRoot to C:\\windows\\Microsoft.NET\\Framework64"):
+            self.package()
+        system = self.fixture.prefix / "system.reg"
+        write(system, system.read_text() + "\n[Software\\\\Microsoft\\\\.NETFramework]\n"
+              '"InstallRoot"="C:\\\\windows\\\\Microsoft.NET\\\\Framework64\\\\"\n')
+        with self.assertRaisesRegex(KitError, r"Wow6432Node\\Microsoft\\.NETFramework InstallRoot"):
+            self.package()
+        write(system, system.read_text() + "\n[Software\\\\Wow6432Node\\\\Microsoft\\\\.NETFramework]\n"
+              '"InstallRoot"="C:\\\\windows\\\\Microsoft.NET\\\\Framework\\\\"\n')
+        with self.assertRaisesRegex(KitError, "missing drive_c/windows/Microsoft.NET/Framework64/v2.0.50727/mscorlib.dll"):
+            self.package()
+        self.assertFalse(self.fixture.out.exists())
+        for framework in ("Framework", "Framework64"):
+            for version in ("v2.0.50727", "v4.0.30319"):
+                write(self.fixture.prefix / "drive_c/windows/Microsoft.NET" / framework / version / "mscorlib.dll",
+                      pe("pe32", b"stub"))
+        manifest = self.package()
+        self.assertEqual(validate_kit(self.fixture.out), manifest)
+        self.assertIn("template/bottle/drive_c/windows/Microsoft.NET/Framework/v4.0.30319/mscorlib.dll",
+                      [entry["path"] for entry in manifest["files"]])
 
     def test_standalone_validator_checks_wine_mono(self) -> None:
         self.add_wine_mono()
