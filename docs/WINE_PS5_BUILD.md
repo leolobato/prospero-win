@@ -124,6 +124,7 @@ before evaluating a candidate built from that cache.
 | 0903 | `ntdll`: a signal frame keeps the FS base it was taken with when the thread resumes where it was; the host's is set only where the handler sends a context to Wine's 64-bit code (the exception dispatcher, a different 64-bit context). The native WoW64 CPU sets the guest FS just before it switches to 32-bit code, and a signal in that window used to send the thread into its 32-bit code with the host FS (GTA San Andreas' DXVK workers crashing at startup in `RtlEnterCriticalSection`) |
 | 0956 | `gdi32`: `SetPixelFormat` on a window that already has a pixel format succeeds when it is the same one and fails otherwise, as on Windows, before reaching the loaded `opengl32`. Mesa's WGL (the Zink path's native `opengl32`) refuses every second call, and Godot 4 sets its main window's format twice, so its OpenGL renderer stopped at "Failed to create an OpenGL window" (Slay the Spire 2) |
 | 0957 | `kernelbase`: `GetComputerNameExW` reads the NetBIOS name from `ComputerName\ComputerName` when the volatile `ActiveComputerName` key is missing. Only wineboot creates that key, and a title cannot run wineboot, so `GetComputerNameW` failed, dxdiagn's `IDxDiagProvider::Initialize` returned `E_FAIL` and GUN stopped at its DirectX check |
+| 0958 | `ntdll`: `WINE_CPU_TOPOLOGY` (Proton's `<count>:<cpu>,...`) lowers `NumberOfProcessors` to its count, between 1 and the CPUs patch 0881 reports; the CPU list is not used. Playden's CPU cores setting writes it in a profile's `[environment]`, for games that fail or run worse with many cores. stderr says what was taken (`wine: WINE_CPU_TOPOLOGY=4:0,1,2,3, 4 of 13 processors`) |
 
 ## Allocator
 
@@ -1012,8 +1013,8 @@ The title runs one game per process (`src/pw_wine_launch.h`):
     names them (`PW_WINE64 debug_env=`).
     Titles built before the limit went up to five accept four lines.
   - `[environment]` adds up to eight `NAME = value` lines to that game's
-    Wine environment, e.g. `WINE_CPU_TOPOLOGY = 4:0,1,2,3` or
-    `DXVK_FRAME_RATE = 60`. Names
+    Wine environment, e.g. `WINE_CPU_TOPOLOGY = 4:0,1,2,3` (Wine patch
+    0958: the game sees four processors) or `DXVK_FRAME_RATE = 60`. Names
     start with `DXVK_`, `MESA_`, `RADV_` or `SDL_`, or are
     `WINE_CPU_TOPOLOGY`; case matters. Refused: anything that steers Wine,
     the loader or the prefix, `DXVK_HUD` and `SDL_JOYSTICK_RAWINPUT` (the

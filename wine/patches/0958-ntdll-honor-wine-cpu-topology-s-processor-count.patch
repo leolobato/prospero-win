@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sun, 11 Oct 2026 22:00:00 +0200
+Subject: [PATCH] ntdll: Honor WINE_CPU_TOPOLOGY's processor count.
+
+Proton reads WINE_CPU_TOPOLOGY ("<count>:<cpu>,<cpu>,...") to tell a game
+it has fewer processors, which some games need to start or run well;
+upstream Wine does not read it. Take its count when it is between 1 and
+the processors the process has (patch 0881), and report it as
+NumberOfProcessors. The CPU list is not used: the console gives a title
+no affinity control. Say what was taken, or why it was ignored, on
+stderr, which the title keeps in the session log.
+---
+ dlls/ntdll/unix/system.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
+index a8b5939..253cff5 100644
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -1786,6 +1786,26 @@ static long ps5_process_cpus( long online )
+ }
+ #endif
+ 
++/* WINE_CPU_TOPOLOGY, in Proton's form "<count>:<cpu>,<cpu>,...": a game that
++ * fails or runs worse with many processors is told it has <count>. Only the
++ * count is used, and it can only lower the number; anything else is ignored. */
++static long cpu_topology_override( long num )
++{
++    const char *env = getenv( "WINE_CPU_TOPOLOGY" );
++    char *end;
++    long count;
++
++    if (!env || !*env) return num;
++    count = strtol( env, &end, 10 );
++    if (end == env || (*end && *end != ':') || count < 1 || count > num)
++    {
++        MESSAGE( "wine: WINE_CPU_TOPOLOGY=%s ignored, %ld processors\n", env, num );
++        return num;
++    }
++    MESSAGE( "wine: WINE_CPU_TOPOLOGY=%s, %ld of %ld processors\n", env, count, num );
++    return count;
++}
++
+ void init_cpu_info(void)
+ {
+     long num;
+@@ -1814,6 +1834,7 @@ void init_cpu_info(void)
+     num = 1;
+     FIXME("Detecting the number of processors is not supported.\n");
+ #endif
++    num = cpu_topology_override( num );
+     peb->NumberOfProcessors = num;
+     init_cpu_model();
+     get_random( &process_cookie, sizeof(process_cookie) );
+-- 
+2.43.0
+
