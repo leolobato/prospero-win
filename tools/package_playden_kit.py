@@ -52,6 +52,14 @@ PUBLICATION_GUARD = "playden-publication-guard-v1"
 ANY_TITLE_CAPABILITY = "title-any-id"
 # An any-title shell may carry Mesa WGL/Zink here; the title installs it into an OpenGL game's prefix.
 MESA_ZINK_DIR = "win/mesa-zink"
+# A kit with this capability carries Wine Mono at mono/wine-mono-<version>, and its
+# template's user.reg points Wine's mscoree there (HKCU\\Software\\Wine\\Mono
+# RuntimePath) through z:, so .NET programs run without a copy in every bottle.
+MONO_CAPABILITY = "wine-mono"
+# The Wine Mono release the pinned Wine asks for (dlls/mscoree WINE_MONO_VERSION).
+MONO_VERSION = "11.3.0"
+# Playden keeps each kit at <CONSOLE_KITS_ROOT>/<kit_id> on the console.
+CONSOLE_KITS_ROOT = "/data/playden/kits"
 # Independent pin for the reviewed scalar provider provenance, not a kit claim.
 PUBLICATION_PROVIDER_SHA256 = "f14d5e3ecb31951e3cf5bfdc41972181a9be1d96ed0dc7cb3aeebb8e4aab844a"
 TITLE_RE = re.compile(r"FAKE78\d{3}\Z")
@@ -95,6 +103,11 @@ REQUIRED_PROVENANCE: dict[str, dict[str, str]] = {
     "dxvk": {
         "version": DXVK_VERSION,
         "archive_sha256": "17761876556afd55736cb895d184f5a1c55d43350f1b1e3b129f8d28706d7992",
+    },
+    # wine-mono-11.3.0-x86.tar.xz from dl.winehq.org; only with MONO_CAPABILITY.
+    "mono": {
+        "version": MONO_VERSION,
+        "archive_sha256": "54a1b0111c3fe4b785eae688af94d27e64995707ad648b6fee8000381b80d298",
     },
 }
 # Helper revisions a kit may name, with the base each is built on: the pinned
@@ -365,6 +378,38 @@ def _validate_registry(prefix: Path, recipe: dict[str, Any]) -> None:
         drivers = _section(user_registry, r"Software\\Wine\\Drivers")
         if _registry_string(drivers, "Audio") != "ps5":
             raise KitError("recipe requires the Wine Audio default to be ps5")
+
+
+def _mono_path() -> str:
+    return f"mono/wine-mono-{MONO_VERSION}"
+
+
+def _mono_runtime_path(kit_id: str) -> str:
+    """The Windows path of the kit's Wine Mono on the console, as Wine sees it through z:."""
+    return "Z:" + f"{CONSOLE_KITS_ROOT}/{kit_id}/{_mono_path()}".replace("/", "\\")
+
+
+def _validate_mono(mono_root: Path, prefix: Path, kit_id: str) -> None:
+    """Wine Mono's runtime DLLs for both architectures, its class library, and the
+    template's registry value that points Wine's mscoree at it."""
+    for relative, machine, magic, architecture in (
+            ("bin/libmono-2.0-x86.dll", PE_MACHINE_I386, PE_MAGIC_PE32, "PE32"),
+            ("bin/libmono-2.0-x86_64.dll", PE_MACHINE_AMD64, PE_MAGIC_PE32_PLUS, "PE32+")):
+        path = mono_root / relative
+        if path.is_symlink() or not path.is_file():
+            raise KitError(f"Wine Mono is missing {relative}")
+        identity = _pe_identity(path, f"Wine Mono {relative}")
+        if identity["machine"] != machine or identity["magic"] != magic:
+            raise KitError(f"Wine Mono {relative} must be {architecture}")
+    if not (mono_root / "lib/mono/4.5/mscorlib.dll").is_file():
+        raise KitError("Wine Mono is missing lib/mono/4.5/mscorlib.dll")
+    try:
+        user_registry = (prefix / "user.reg").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise KitError(f"cannot read template user.reg: {error}") from error
+    expected = _mono_runtime_path(kit_id).replace("\\", "\\\\")
+    if _registry_string(_section(user_registry, r"Software\\Wine\\Mono"), "RuntimePath") != expected:
+        raise KitError(f"template user.reg must set Wine Mono's RuntimePath to {_mono_runtime_path(kit_id)}")
 
 
 def _pe_identity(path: Path, label: str) -> dict[str, int]:
@@ -704,6 +749,15 @@ def _validate_sources(spec: dict[str, Any]) -> dict[str, Any]:
             dxvk.get("archive_sha256") != REQUIRED_PROVENANCE["dxvk"]["archive_sha256"] or
             not dxvk.get("url")):
         raise KitError(f"source provenance must pin DXVK {DXVK_VERSION} with archive hash")
+    mono = sources.get("mono")
+    if (MONO_CAPABILITY in spec.get("capabilities", [])) != (mono is not None):
+        raise KitError(f"Wine Mono provenance and the {MONO_CAPABILITY} capability go together")
+    if mono is not None and (
+            not isinstance(mono, dict) or
+            mono.get("version") != REQUIRED_PROVENANCE["mono"]["version"] or
+            mono.get("archive_sha256") != REQUIRED_PROVENANCE["mono"]["archive_sha256"] or
+            not mono.get("url")):
+        raise KitError(f"source provenance must pin Wine Mono {MONO_VERSION} with archive hash")
     return json.loads(json.dumps(sources))
 
 
@@ -792,6 +846,19 @@ def package_kit(spec_path: str | Path, out: str | Path,
     _validate_no_personal_state(runtime_source, "runtime",
                                 (runtime_source,) if development_build_paths else (),
                                 runtime_exceptions)
+    mono = spec.get("mono")
+    mono_source: Path | None = None
+    if MONO_CAPABILITY in capabilities:
+        if not isinstance(mono, dict) or mono.get("version") != MONO_VERSION:
+            raise KitError(f"the {MONO_CAPABILITY} capability needs Wine Mono {MONO_VERSION}")
+        mono_source = _source_path(spec_path, mono.get("path"), "Wine Mono")
+        _validate_mono(mono_source, prefix_source, kit_id)
+        # Wine Mono's WPF graphics DLLs carry llvm-mingw's build paths, as Mesa's do.
+        _validate_no_personal_state(mono_source, "Wine Mono",
+                                    (mono_source,) if development_build_paths else (),
+                                    runtime_exceptions)
+    elif mono is not None:
+        raise KitError(f"Wine Mono needs the {MONO_CAPABILITY} capability")
 
     prepared_variants: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -870,6 +937,8 @@ def package_kit(spec_path: str | Path, out: str | Path,
         normalized_inventory.chmod(0o644)
         template_destination = staging / "template/bottle"
         _copy_console_prefix(prefix_source, template_destination)
+        if mono_source is not None:
+            _copy_plain_tree(mono_source, staging / _mono_path(), "Wine Mono")
         recipe_destination = staging / "recipes" / f"{recipe_id}.json"
         recipe_destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(recipe_source, recipe_destination)
@@ -919,6 +988,7 @@ def package_kit(spec_path: str | Path, out: str | Path,
             },
             "variants": variant_manifest,
             "dxvk": json.loads(json.dumps(spec["dxvk"])),
+            **({"mono": {"version": MONO_VERSION, "path": _mono_path()}} if mono_source else {}),
             "sources": sources,
             "capabilities": sorted(set(capabilities)),
             "files": entries,
@@ -1053,6 +1123,14 @@ def validate_kit(kit: str | Path, manifest_path: str | Path | None = None,
     mappings = drive_links.read_text(encoding="utf-8")
     if "c:\t../drive_c\n" not in mappings or "z:\t/\n" not in mappings:
         raise KitError("template console drive mappings must include c: and z:")
+    mono_roots: tuple[Path, ...] = ()
+    if MONO_CAPABILITY in manifest["capabilities"]:
+        if manifest.get("mono") != {"version": MONO_VERSION, "path": _mono_path()}:
+            raise KitError("Wine Mono identity is not canonical")
+        mono_roots = (_resolve_kit_path(root, _mono_path()),)
+        _validate_mono(mono_roots[0], prefix, manifest["kit_id"])
+    elif "mono" in manifest or any(path.startswith("mono/") for path in declared):
+        raise KitError(f"Wine Mono needs the {MONO_CAPABILITY} capability")
     seen_ids: set[str] = set()
     seen_titles: set[str] = set()
     any_titles = 0
@@ -1108,7 +1186,8 @@ def validate_kit(kit: str | Path, manifest_path: str | Path | None = None,
         _required_executable(module, module.relative_to(root).as_posix())
     exceptions: list[str] = []
     mesa_roots = tuple(title / MESA_ZINK_DIR for title in sorted((root / "titles").glob("*")))
-    _validate_no_personal_state(root, "kit", (runtime_root, prefix, *mesa_roots) if development_build_paths else (),
+    _validate_no_personal_state(root, "kit", (runtime_root, prefix, *mesa_roots, *mono_roots)
+                                if development_build_paths else (),
                                 exceptions)
     if exceptions:
         manifest = dict(manifest)
