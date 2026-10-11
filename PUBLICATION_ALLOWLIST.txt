@@ -641,3 +641,4 @@ wine/patches/0954-setupapi-ps5-write-services-without-a-service-manager.patch
 wine/patches/0955-wow64win-convert-the-input-of-send-hardware-input.patch
 wine/patches/0956-gdi32-keep-a-window-s-pixel-format-with-a-native-opengl32.patch
 wine/patches/0957-kernelbase-fall-back-to-the-stored-computer-name.patch
+wine/patches/0958-ntdll-honor-wine-cpu-topology-s-processor-count.patch
