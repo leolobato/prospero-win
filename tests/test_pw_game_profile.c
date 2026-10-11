@@ -38,7 +38,7 @@ static void test_graphics_env(void)
             assert(count <= PW_GAME_GRAPHICS_ENV_MAX);
             /* Fixed6, desktop/override/XInput3, graphics, runtime, clock and CPU. */
             assert(6 + 3 + count + pw_game_cpu_env(&p, cpu) + pw_game_runtime_env(&p.runtime, runtime) +
-                   PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX <= PW_WINE_START_MAX_ENV);
+                   PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX + PW_GAME_ENVIRONMENT_MAX <= PW_WINE_START_MAX_ENV);
             /* refresh and opengl_thread no longer set anything */
             if (graphics == PW_APP_GRAPHICS_ZINK) {
                 assert(count == (size_t)(2 + fps));
@@ -497,7 +497,74 @@ static void test_debug_env(void)
     /* The title's environment has room for every profile variable at once. */
     assert(PW_GAME_DEBUG_ENV_MAX == 5);
     assert(7 + 3 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_RUNTIME_ENV_MAX +
-           PW_GAME_CPU_ENV_MAX + PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX <= PW_WINE_START_MAX_ENV);
+           PW_GAME_CPU_ENV_MAX + PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX + PW_GAME_ENVIRONMENT_MAX <=
+           PW_WINE_START_MAX_ENV);
+}
+
+/* [environment]: more variables for the game, by Playden's rules
+ * (IsProsperoEnvironmentEntry), in file order. */
+static void test_environment(void)
+{
+    PwGameProfile p;
+    PwGameEnv env[PW_GAME_ENVIRONMENT_MAX];
+
+    assert(parse(APP, &p) == PW_OK && p.environment_count == 0 && pw_game_environment_env(&p, env) == 0);
+    assert(pw_game_environment_env(NULL, env) == 0 && pw_game_environment_env(&p, NULL) == 0);
+    /* Playden's CPU cores row writes this one */
+    assert(parse(APP "[environment]\nWINE_CPU_TOPOLOGY = 4:0,1,2,3\nDXVK_FRAME_RATE = 60\n"
+                 "SDL_HINT_X = a b=c\nRADV_PERFTEST = gpl\nMESA_SHADER_CACHE_DIR = Z:/cache\n", &p) == PW_OK);
+    assert(pw_game_environment_env(&p, env) == 5);
+    assert(!strcmp(env[0].name, "WINE_CPU_TOPOLOGY") && !strcmp(env[0].value, "4:0,1,2,3"));
+    assert(!strcmp(env[1].name, "DXVK_FRAME_RATE") && !strcmp(env[1].value, "60"));
+    assert(!strcmp(env[2].name, "SDL_HINT_X") && !strcmp(env[2].value, "a b=c"));
+    assert(!strcmp(env[4].name, "MESA_SHADER_CACHE_DIR"));
+    /* anywhere after [application], beside the other sections */
+    assert(parse(APP "[environment]\nDXVK_FRAME_RATE = 30\n[display]\nshow_fps = false\n"
+                 "[debug]\nenv = PW_NATIVE_PROFILE=1\n", &p) == PW_OK);
+    assert(p.environment_count == 1 && p.debug_env_count == 1 && !p.display.show_fps);
+    /* eight fit */
+    assert(parse(APP "[environment]\nDXVK_A = 1\nDXVK_B = 1\nDXVK_C = 1\nDXVK_D = 1\nDXVK_E = 1\n"
+                 "DXVK_F = 1\nDXVK_G = 1\nDXVK_H = 1\n", &p) == PW_OK);
+    assert(pw_game_environment_env(&p, env) == PW_GAME_ENVIRONMENT_MAX);
+    {
+        static const char *refused[] = {
+            "WINEPREFIX = C:\\x\n",                /* steers Wine or the loader */
+            "WINEDLLOVERRIDES = d3d9=n\n", "WINEDEBUG = +all\n", "WINE_PS5_SCHED = 1\n",
+            "LD_PRELOAD = x\n", "LD_LIBRARY_PATH = /x\n", "PATH = /x\n", "HOME = /tmp\n",
+            "PW_VK_BATCH = 0\n", "GALLIUM_DRIVER = llvmpipe\n", /* [debug] env's families */
+            "DXVK_HUD = full\n", "SDL_JOYSTICK_RAWINPUT = 1\n", /* the title sets them */
+            "DXVK_ = 1\n", "SDL_ = 1\n",                     /* a family alone */
+            "dxvk_frame_rate = 60\n", "DXVK-X = 1\n", "1DXVK = 1\n", "DXVK X = 1\n",
+            "DXVK_FRAME_RATE =\n", "= 1\n", "DXVK_FRAME_RATE\n",
+            "DXVK_CONFIG = \"x\"\n", "DXVK_CONFIG = 'x'\n", "DXVK_CONFIG = a\tb\n",
+            "DXVK_FRAME_RATE = 60\nDXVK_FRAME_RATE = 30\n",
+            "DXVK_A = 1\nDXVK_B = 1\nDXVK_C = 1\nDXVK_D = 1\nDXVK_E = 1\nDXVK_F = 1\nDXVK_G = 1\nDXVK_H = 1\n"
+            "DXVK_I = 1\n",
+            "DXVK_A = 1\n[environment]\n",
+            "DXVK_" "01234567890123456789012345678901234567890123456789012345678 = 1\n",
+            "DXVK_X = " "0123456789012345678901234567890123456789012345678901234567890123456789"
+            "012345678901234567890123456789012345678901234567890123456789\n",
+        };
+        for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+            char text[2048];
+            snprintf(text, sizeof(text), APP "[environment]\n%s", refused[i]);
+            assert(parse(text, &p) != PW_OK);
+        }
+    }
+    /* the longest name and value fit */
+    assert(parse(APP "[environment]\nDXVK_" "0123456789012345678901234567890123456789012345678901234567 = "
+                 "0123456789012345678901234567890123456789012345678901234567890123456789"
+                 "012345678901234567890123456789012345678901234567890123456\n", &p) == PW_OK);
+    assert(strlen(p.environment[0].name) == 63 && strlen(p.environment[0].value) == 127);
+    /* one variable, one section */
+    assert(parse(APP "[debug]\nenv = DXVK_LOG_LEVEL=info\n[environment]\nDXVK_LOG_LEVEL = none\n", &p) ==
+           PW_ERR_MALFORMED);
+    /* a preset file holds [input] only */
+    {
+        PwGameInput input;
+        pw_game_input_init(&input);
+        assert(preset("[input]\ncross = space\n[environment]\nDXVK_A = 1\n", &input) != PW_OK);
+    }
 }
 
 int main(void)
@@ -508,10 +575,11 @@ int main(void)
     test_runtime();
     test_cpu();
     test_debug_env();
+    test_environment();
     test_refusals();
     test_presets();
     test_default_mode();
     printf("game profile passed: application plus display and input, every binding kind, "
-           "runtime settings and their environment, the CPU backend choice, debug env variables, refusals, shared presets overridden by the profile\n");
+           "runtime settings and their environment, the CPU backend choice, debug env and [environment] variables, refusals, shared presets overridden by the profile\n");
     return 0;
 }

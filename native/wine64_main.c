@@ -1249,7 +1249,7 @@ int main(int argc, char **argv)
     static char radv_cache[PW_WINE_LIBRARY_PATH + 16];
     enum { WINE64_FIXED_ENV_COUNT = 7,
            WINE64_PROFILE_ENV_CAPACITY = 4 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_RUNTIME_ENV_MAX + PW_GAME_CPU_ENV_MAX +
-                                         PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX };
+                                         PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX + PW_GAME_ENVIRONMENT_MAX };
     static PwWineStartEnv extra[WINE64_FIXED_ENV_COUNT + WINE64_PROFILE_ENV_CAPACITY] = {
         { "WINEDEBUG", PW_WINE64_DEBUG },
         /* the i386 exe runs in this process through WoW64; otherwise Wine
@@ -1535,6 +1535,19 @@ int main(int argc, char **argv)
                 strcat(names, debug_env[i].name);
             }
             if (debug_count) PS5LOG_LOG("PW_WINE64 debug_env=%s", names);
+        }
+        /* [environment]: the profile's own variables, after everything the
+         * title sets, so they win; the parser refuses the ones the title must
+         * decide (src/pw_game_profile.h). Each is logged with its value, so a
+         * session log shows what the game ran with. */
+        {
+            PwGameEnv environment[PW_GAME_ENVIRONMENT_MAX];
+            size_t environment_count = pw_game_environment_env(game, environment);
+
+            for (size_t i = 0; i < environment_count; i++) {
+                extra[config.extra_env_count++] = (PwWineStartEnv){ environment[i].name, environment[i].value };
+                PS5LOG_LOG("PW_WINE64 environment %s=%s", environment[i].name, environment[i].value);
+            }
         }
         /* refresh and opengl_thread set the PS5 OpenGL SDK's output rate and
          * glthread; Zink, which replaced it, has neither, so they are ignored. */

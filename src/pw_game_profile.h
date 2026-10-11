@@ -36,6 +36,17 @@
  *                               ; or GALLIUM_HUD while show_fps is on);
  *                               ; values: letters, digits and _ + - , . = : /
  *
+ *   [environment]
+ *   WINE_CPU_TOPOLOGY = 4:0,1,2,3   ; more variables for this game's Wine
+ *   DXVK_FRAME_RATE = 60            ; environment, at most 8: names start with
+ *                                   ; DXVK_, MESA_, RADV_ or SDL_, or are
+ *                                   ; WINE_CPU_TOPOLOGY; case matters. Refused:
+ *                                   ; names the title sets itself (DXVK_HUD,
+ *                                   ; SDL_JOYSTICK_RAWINPUT) and names a [debug]
+ *                                   ; env line sets. They come after the title's
+ *                                   ; own, so MESA_SHADER_CACHE_DIR overrides it.
+ *                                   ; Values: printable ASCII without quotes
+ *
  *   [runtime]
  *   thread_scheduling = true    ; Windows threads take turns and get their
  *                               ; priorities (WINE_PS5_SCHED=1); true/false
@@ -70,6 +81,7 @@ enum {
     PW_GAME_MOUSE_SPEED_DEFAULT = 1200, PW_GAME_MOUSE_SPEED_MAX = 20000,
     PW_GAME_WINEDEBUG_CAPACITY = 128,
     PW_GAME_DEBUG_ENV_MAX = 5, PW_GAME_DEBUG_ENV_NAME = 48, PW_GAME_DEBUG_ENV_VALUE = 96,
+    PW_GAME_ENVIRONMENT_MAX = 8, PW_GAME_ENVIRONMENT_NAME = 64, PW_GAME_ENVIRONMENT_VALUE = 128,
 };
 
 typedef enum PwGameScaling { PW_GAME_SCALING_FIT = 0, PW_GAME_SCALING_INTEGER,
@@ -127,6 +139,11 @@ typedef struct PwGameDebugEnv {
     char name[PW_GAME_DEBUG_ENV_NAME];
     char value[PW_GAME_DEBUG_ENV_VALUE];
 } PwGameDebugEnv;
+/* [environment] NAME = value: one more variable for this game. */
+typedef struct PwGameEnvironmentEntry {
+    char name[PW_GAME_ENVIRONMENT_NAME];
+    char value[PW_GAME_ENVIRONMENT_VALUE];
+} PwGameEnvironmentEntry;
 enum { PW_GAME_RUNTIME_ENV_MAX = 2, PW_GAME_CPU_ENV_MAX = 2, PW_GAME_GRAPHICS_ENV_MAX = 3,
        PW_GAME_CLOCK_ENV_MAX = 2 };
 
@@ -138,12 +155,15 @@ typedef struct PwGameProfile {
     char winedebug[PW_GAME_WINEDEBUG_CAPACITY];
     PwGameDebugEnv debug_env[PW_GAME_DEBUG_ENV_MAX];    /* [debug] env lines */
     size_t debug_env_count;
+    /* [environment] lines, in file order */
+    PwGameEnvironmentEntry environment[PW_GAME_ENVIRONMENT_MAX];
+    size_t environment_count;
     PwGameRuntime runtime;      /* [runtime], everything off by default */
 } PwGameProfile;
 
 /* Parse a whole profile. [application] must come first; [display],
- * [input], [debug] and [runtime] are optional, once each. PW_OK or a
- * PW_ERR_* status. */
+ * [input], [debug], [runtime] and [environment] are optional, once each.
+ * PW_OK or a PW_ERR_* status. */
 int pw_game_profile_parse(const uint8_t *bytes, size_t length, PwGameProfile *profile);
 /* The variables runtime sets in Wine's environment, into env, which has
  * room for PW_GAME_RUNTIME_ENV_MAX; how many. fast_clock is not among them:
@@ -169,6 +189,10 @@ size_t pw_game_graphics_env(const PwGameProfile *profile, PwGameEnv *env);
 /* The [debug] env variables, into env, which has room for
  * PW_GAME_DEBUG_ENV_MAX; how many. The strings live in profile. */
 size_t pw_game_debug_env(const PwGameProfile *profile, PwGameEnv *env);
+/* The [environment] variables, into env, which has room for
+ * PW_GAME_ENVIRONMENT_MAX; how many, in file order. The strings live in
+ * profile. The title sets them after its own variables. */
+size_t pw_game_environment_env(const PwGameProfile *profile, PwGameEnv *env);
 /* An input with nothing bound, keyboard mode, no pointer. */
 void pw_game_input_init(PwGameInput *input);
 /* Parse an input preset file (one [input] section, no preset= line) into

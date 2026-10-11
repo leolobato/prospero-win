@@ -1011,6 +1011,17 @@ The title runs one game per process (`src/pw_wine_launch.h`):
     `show_fps` is on (set `show_fps = false` to choose the HUD). The log
     names them (`PW_WINE64 debug_env=`).
     Titles built before the limit went up to five accept four lines.
+  - `[environment]` adds up to eight `NAME = value` lines to that game's
+    Wine environment, e.g. `WINE_CPU_TOPOLOGY = 4:0,1,2,3` or
+    `DXVK_FRAME_RATE = 60`. Names
+    start with `DXVK_`, `MESA_`, `RADV_` or `SDL_`, or are
+    `WINE_CPU_TOPOLOGY`; case matters. Refused: anything that steers Wine,
+    the loader or the prefix, `DXVK_HUD` and `SDL_JOYSTICK_RAWINPUT` (the
+    title sets them), a name a `[debug] env` line also sets, and quotes in
+    values. They are set after the title's own variables, and the log
+    names each one with its value (`PW_WINE64 environment NAME=value`).
+    These are the rules of Playden's `IsProsperoEnvironmentEntry`. Titles
+    built before this section refuse a profile that has it.
   - `[runtime]` sets runtime behavior for that game only:
     - `thread_scheduling = true` sets `WINE_PS5_SCHED=1` (Wine patch 0882):
       the game's threads take turns on the CPUs, and threads the game raises
