@@ -34,6 +34,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 RULE = re.compile(
     r"\$\(eval \$\(call test_rule,([^,]+),([^,]*),([^)]*)\)\)")
+# A test whose build needs its own flags or a second compiler is written out
+# as a plain `$(BUILD)/name: prerequisites` rule instead of `test_rule`; the
+# same form also adds header prerequisites to a `test_rule` binary.
+EXPLICIT_RULE = re.compile(
+    r"^\$\(BUILD\)/([A-Za-z0-9_]+):((?:[^\n]*\\\n)*[^\n]*)$", re.M)
 RECIPE = re.compile(r"^test: .*?\n\n", re.S | re.M)
 PYTHON_SUITE = re.compile(r"python3 (tests/test_[A-Za-z0-9_]+\.py)")
 
@@ -57,6 +62,11 @@ def parse_makefile() -> tuple[list[tuple[str, list[str]]], list[str], str]:
     text = (ROOT / "Makefile").read_text(encoding="utf-8")
     rules = [(name.strip(), sources.split())
              for name, sources, _flags in RULE.findall(text)]
+    declared = {name for name, _sources in rules}
+    rules += [(name, [word for word in prerequisites.replace("\\\n", " ").split()
+                      if word not in ("|", "\\")])
+              for name, prerequisites in EXPLICIT_RULE.findall(text)
+              if name not in declared]
     tests = make_variable(text, "TESTS").split(":=", 1)[1]
     tests = tests.replace("\\\n", " ").split()
     recipe = RECIPE.search(text)
