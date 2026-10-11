@@ -17,6 +17,8 @@ SCRIPT = ROOT / "tools" / "build_native.sh"
 DEFAULT_TITLE_ID = "PPSA99995"
 CUSTOM_TITLE_ID = "FAKE78001"
 FOUNDATION_PIN = "9c0b994a048521af6fb84c73ded364504fe250e9"
+# The reviewed publication provider inventory build_native.sh verifies.
+PUBLICATION_PROVIDER_PIN = "f14d5e3ecb31951e3cf5bfdc41972181a9be1d96ed0dc7cb3aeebb8e4aab844a"
 
 
 def write(path: Path, data: bytes | str = "x", executable: bool = False) -> None:
@@ -149,6 +151,10 @@ def main() -> int:
             "source_revision": FOUNDATION_PIN,
             "source_dirty": False,
             "eboot_sha256": hashlib.sha256((dist / "eboot.bin").read_bytes()).hexdigest(),
+            # Any title but the default one requires a managed descriptor.
+            "managed_publication_guard": "playden-publication-guard-v1",
+            "managed_descriptor_required": True,
+            "publication_provider_sha256": PUBLICATION_PROVIDER_PIN,
         }
         compile_commands = compile_log.read_text()
         assert '-DPW_TITLE_ID="FAKE78001"' in compile_commands, compile_commands
