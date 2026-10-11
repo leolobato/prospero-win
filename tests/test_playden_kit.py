@@ -280,6 +280,85 @@ class PlaydenKitTests(unittest.TestCase):
         manifest = self.package()
         self.assertNotIn("any_title", manifest["variants"][0])
 
+    def add_mono_runtime_path(self) -> None:
+        user = self.fixture.prefix / "user.reg"
+        write(user, user.read_text() + "\n[Software\\\\Wine\\\\Mono]\n"
+              '"RuntimePath"="Z:\\\\data\\\\playden\\\\kits\\\\hl2-fw1360-v1\\\\mono\\\\wine-mono-11.3.0"\n')
+
+    def add_wine_mono(self, *, capability: bool = True, registry: bool = True) -> Path:
+        """Give the fixture Wine Mono, its provenance, and the template's RuntimePath."""
+        mono = self.fixture.root / "inputs/wine-mono-11.3.0"
+        write(mono / "bin/libmono-2.0-x86.dll", pe("pe32", b"mono32"))
+        write(mono / "bin/libmono-2.0-x86_64.dll", pe("pe64", b"mono64"))
+        write(mono / "lib/mono/4.5/mscorlib.dll", pe("pe32", b"corlib"))
+        if registry:
+            self.add_mono_runtime_path()
+        spec = json.loads(self.fixture.spec.read_text())
+        spec["mono"] = {"version": "11.3.0", "path": str(mono)}
+        spec["sources"]["mono"] = {"version": "11.3.0", "url": "https://example/wine-mono",
+                                   "archive_sha256": REQUIRED_PROVENANCE["mono"]["archive_sha256"]}
+        if capability:
+            spec["capabilities"].append("wine-mono")
+        write(self.fixture.spec, json.dumps(spec))
+        return mono
+
+    def test_packages_wine_mono_once_at_the_kit_root(self) -> None:
+        self.add_wine_mono()
+        manifest = self.package()
+        self.assertEqual(validate_kit(self.fixture.out), manifest)
+        self.assertEqual(manifest["mono"], {"version": "11.3.0", "path": "mono/wine-mono-11.3.0"})
+        self.assertIn("wine-mono", manifest["capabilities"])
+        paths = [entry["path"] for entry in manifest["files"]]
+        self.assertIn("mono/wine-mono-11.3.0/bin/libmono-2.0-x86.dll", paths)
+        self.assertFalse(any(path.startswith("template/") and "mono-2.0" in path for path in paths))
+
+    def test_a_kit_without_wine_mono_names_none(self) -> None:
+        manifest = self.package()
+        self.assertNotIn("mono", manifest)
+        self.assertNotIn("wine-mono", manifest["capabilities"])
+
+    def test_wine_mono_capability_provenance_and_files_go_together(self) -> None:
+        self.add_wine_mono(capability=False)
+        with self.assertRaisesRegex(KitError, "wine-mono"):
+            self.package()
+        spec = json.loads(self.fixture.spec.read_text())
+        spec["capabilities"].append("wine-mono")
+        del spec["mono"]
+        write(self.fixture.spec, json.dumps(spec))
+        with self.assertRaisesRegex(KitError, "needs Wine Mono 11.3.0"):
+            self.package()
+        spec["mono"] = {"version": "11.3.0", "path": str(self.fixture.root / "inputs/wine-mono-11.3.0")}
+        spec["sources"]["mono"]["archive_sha256"] = "0" * 64
+        write(self.fixture.spec, json.dumps(spec))
+        with self.assertRaisesRegex(KitError, "pin Wine Mono"):
+            self.package()
+        self.assertFalse(self.fixture.out.exists())
+
+    def test_wine_mono_needs_both_architectures_and_the_template_runtime_path(self) -> None:
+        mono = self.add_wine_mono(registry=False)
+        with self.assertRaisesRegex(KitError, "RuntimePath"):
+            self.package()
+        self.add_mono_runtime_path()
+        write(mono / "bin/libmono-2.0-x86_64.dll", pe("pe32", b"wrong"))
+        with self.assertRaisesRegex(KitError, r"libmono-2.0-x86_64.dll must be PE32\+"):
+            self.package()
+        (mono / "bin/libmono-2.0-x86_64.dll").unlink()
+        os.symlink("libmono-2.0-x86.dll", mono / "bin/libmono-2.0-x86_64.dll")
+        with self.assertRaisesRegex(KitError, "missing bin/libmono-2.0-x86_64.dll"):
+            self.package()
+        self.assertFalse(self.fixture.out.exists())
+
+    def test_standalone_validator_checks_wine_mono(self) -> None:
+        self.add_wine_mono()
+        self.package()
+        manifest_path = self.fixture.out / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["capabilities"].remove("wine-mono")
+        del manifest["sources"]["mono"]
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(KitError, "wine-mono"):
+            validate_kit(self.fixture.out)
+
     def test_any_title_needs_its_capability_and_the_capability_needs_it(self) -> None:
         self.make_any_title(capability=False)
         with self.assertRaisesRegex(KitError, "title-any-id"):
