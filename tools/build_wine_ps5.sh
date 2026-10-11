@@ -102,7 +102,8 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # A module with no extension is a .dll. wow64win (x86_64 only): a 32-bit
 # game's hidclass sends hardware input through it (patch 0955). gdi32: a
 # window keeps its pixel format with a native opengl32 (patch 0956).
-PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan ntoskrnl.exe winebus.sys setupapi gdi32"
+# kernelbase: the computer name without wineboot's volatile key (patch 0957).
+PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan ntoskrnl.exe winebus.sys setupapi gdi32 kernelbase"
 # Everything optional but FreeType (built below) is off: the console has none
 # of these libraries, and a configure-time probe against the payload SDK must
 # not pick up host headers.
