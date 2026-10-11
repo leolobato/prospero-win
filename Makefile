@@ -58,11 +58,15 @@ PUBLICATION_HEADERS := $(wildcard third_party/mbedtls-publication/include/mbedtl
 PUBLICATION_SHA_SOURCES := src/pw_publication_sha256.c third_party/mbedtls-publication/library/sha256.c
 $(BUILD)/test_pw_publication_sha256: tests/test_pw_publication_sha256.c $(PUBLICATION_SHA_SOURCES) $(HEADERS) $(PUBLICATION_HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(PUBLICATION_FLAGS) $(filter %.c,$^) -o $@
+# GCC's -Wmisleading-indentation flags two of the console source's one-line
+# `if (...) stmt; next;` lines (clang, which builds it for the console, does
+# not); the code is right, so the host test turns only that warning off.
+PW_TITLE_PUBLICATION_NATIVE_TEST_FLAGS := -Wno-misleading-indentation
 $(BUILD)/test_pw_title_publication_native: tests/test_pw_title_publication_native.c \
 	native/pw_title_publication_native.c src/pw_title_publication.c src/pw_title_launch.c \
 	src/pw_game_profile.c src/pw_app_profile.c src/pw_profile_catalog.c src/pw_wine_launch.c \
 	$(PUBLICATION_SHA_SOURCES) $(HEADERS) $(PUBLICATION_HEADERS) | $(BUILD)
-	$(CC) $(CFLAGS) $(PUBLICATION_FLAGS) $(filter %.c,$^) -o $@
+	$(CC) $(CFLAGS) $(PUBLICATION_FLAGS) $(PW_TITLE_PUBLICATION_NATIVE_TEST_FLAGS) $(filter %.c,$^) -o $@
 $(eval $(call test_rule,test_pw_title_session,tests/test_pw_title_session.c src/pw_title_session.c,))
 $(eval $(call test_rule,test_pw_app_profile,tests/test_pw_app_profile.c src/pw_app_profile.c,))
 $(eval $(call test_rule,test_pw_profile_catalog,tests/test_pw_profile_catalog.c src/pw_profile_catalog.c,))

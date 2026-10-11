@@ -62,7 +62,7 @@ static const char committed_receipt[] =
 static void valid_metadata(char *text, size_t capacity)
 {
     char input_hex[129], dxvk_hex[1025], key0[2049], name0[129];
-    char value0[129], key1[2049], name1[129], line[2300];
+    char value0[129], key1[2049], name1[129], line[5120]; /* fits the five hex fields at full size */
     hex_encode("gamepad.input", input_hex, sizeof(input_hex));
     hex_encode("/data/homebrew/FAKE78001/game/hl2/dxvk.conf", dxvk_hex, sizeof(dxvk_hex));
     hex_encode("Software\\Wine\\AppDefaults\\hl2.exe", key0, sizeof(key0));

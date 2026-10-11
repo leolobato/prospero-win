@@ -147,7 +147,7 @@ int main(void)
     visible_in = 0; real_restore_fail = 1;
     effective_uid = real_uid = 1;
     {
-        static const PwDataMountOps hidden = {fake_request, fake_hidden_then_visible, fake_sleep};
+        static const PwDataMountOps hidden = {fake_request, fake_hidden_then_visible, fake_sleep, NULL};
         assert(pw_data_mount_request_with(&hidden, 7, 300, &r) == -1);
     }
     assert(r.credential_errno == EPERM && real_uid == 0);

@@ -475,8 +475,10 @@ static void cross_process_lock_contract(void)
     path(mapped, sizeof(mapped), &f, "/data/playden/games/install-220/.playden-control/publication.lock");
     pid_t child = fork(); CHECK(child >= 0);
     if (!child) {
-        close(ready[0]); int fd = open(mapped, O_RDONLY); if (fd < 0 || flock(fd, LOCK_EX) != 0) _exit(2);
-        if (write(ready[1], "x", 1) != 1) _exit(3); sleep(1); close(fd); _exit(0);
+        close(ready[0]); int fd = open(mapped, O_RDONLY);
+        if (fd < 0 || flock(fd, LOCK_EX) != 0) _exit(2);
+        if (write(ready[1], "x", 1) != 1) _exit(3);
+        sleep(1); close(fd); _exit(0);
     }
     close(ready[1]); CHECK(read(ready[0], &byte, 1) == 1); close(ready[0]);
     CHECK(admit(&f, &lease) == PW_TITLE_PUBLICATION_ADMISSION_BUSY);
