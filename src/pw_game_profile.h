@@ -40,7 +40,8 @@
  *   WINE_CPU_TOPOLOGY = 4:0,1,2,3   ; more variables for this game's Wine
  *   DXVK_FRAME_RATE = 60            ; environment, at most 8: names start with
  *                                   ; DXVK_, MESA_, RADV_ or SDL_, or are
- *                                   ; WINE_CPU_TOPOLOGY; case matters. Refused:
+ *                                   ; WINE_CPU_TOPOLOGY or PW_MEDIA_DISABLE
+ *                                   ; (exactly 0 or 1); case matters. Refused:
  *                                   ; names the title sets itself (DXVK_HUD,
  *                                   ; SDL_JOYSTICK_RAWINPUT) and names a [debug]
  *                                   ; env line sets. They come after the title's

@@ -510,6 +510,12 @@ static void test_environment(void)
 
     assert(parse(APP, &p) == PW_OK && p.environment_count == 0 && pw_game_environment_env(&p, env) == 0);
     assert(pw_game_environment_env(NULL, env) == 0 && pw_game_environment_env(&p, NULL) == 0);
+    /* Only this media switch is admitted from the PW_ family. */
+    assert(parse(APP "[environment]\nPW_MEDIA_DISABLE = 1\n", &p) == PW_OK);
+    assert(pw_game_environment_env(&p, env) == 1);
+    assert(!strcmp(env[0].name, "PW_MEDIA_DISABLE") && !strcmp(env[0].value, "1"));
+    assert(parse(APP "[environment]\nPW_MEDIA_DISABLE = 0\n", &p) == PW_OK);
+    assert(pw_game_environment_env(&p, env) == 1 && !strcmp(env[0].value, "0"));
     /* Playden's CPU cores row writes this one */
     assert(parse(APP "[environment]\nWINE_CPU_TOPOLOGY = 4:0,1,2,3\nDXVK_FRAME_RATE = 60\n"
                  "SDL_HINT_X = a b=c\nRADV_PERFTEST = gpl\nMESA_SHADER_CACHE_DIR = Z:/cache\n", &p) == PW_OK);
@@ -531,6 +537,11 @@ static void test_environment(void)
             "WINEPREFIX = C:\\x\n",                /* steers Wine or the loader */
             "WINEDLLOVERRIDES = d3d9=n\n", "WINEDEBUG = +all\n", "WINE_PS5_SCHED = 1\n",
             "LD_PRELOAD = x\n", "LD_LIBRARY_PATH = /x\n", "PATH = /x\n", "HOME = /tmp\n",
+            "PW_MEDIA_DISABLE = 2\n", "PW_MEDIA_DISABLE = -1\n", "PW_MEDIA_DISABLE = +1\n",
+            "PW_MEDIA_DISABLE = true\n", "PW_MEDIA_DISABLE = false\n", "PW_MEDIA_DISABLE = 00\n",
+            "PW_MEDIA_DISABLE = 01\n", "PW_MEDIA_DISABLE = 1 0\n", "PW_MEDIA_DISABLE =\n",
+            "PW_MEDIA_DISABLE_X = 1\n", "PW_NATIVE_PROFILE = 1\n", "PW_WINE64_MODE = game\n",
+            "PW_MEDIA_DISABLE = 1\nPW_MEDIA_DISABLE = 0\n",
             "PW_VK_BATCH = 0\n", "GALLIUM_DRIVER = llvmpipe\n", /* [debug] env's families */
             "DXVK_HUD = full\n", "SDL_JOYSTICK_RAWINPUT = 1\n", /* the title sets them */
             "DXVK_ = 1\n", "SDL_ = 1\n",                     /* a family alone */
