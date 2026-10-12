@@ -87,6 +87,8 @@ unsupported-codec test rather than assuming HEVC is unsupported.
 
 Set `env = PW_MEDIA_DISABLE=1` in a game's profile `[debug]` section to disable
 MF byte-stream handlers and the Windows Media synchronous reader at creation.
+This fork also accepts `PW_MEDIA_DISABLE = 1` in a profile's `[environment]`
+section; see `docs/WINE_PS5_BUILD.md`.
 The exact value is read once per process. MP4/ASF factories delegate to the
 generic handler when Wine's optional DMO demuxer cannot handle the stream, as
 on the PS5 build. Host acceptance must use that same fallback path. Creation returns

@@ -1151,7 +1151,10 @@ The title runs one game per process (`src/pw_wine_launch.h`):
     Wine environment, e.g. `WINE_CPU_TOPOLOGY = 4:0,1,2,3` (Wine patch
     0958: the game sees four processors) or `DXVK_FRAME_RATE = 60`. Names
     start with `DXVK_`, `MESA_`, `RADV_` or `SDL_`, or are
-    `WINE_CPU_TOPOLOGY`; case matters. Refused: anything that steers Wine,
+    `WINE_CPU_TOPOLOGY` or `PW_MEDIA_DISABLE` (exactly `0` or `1`); case matters.
+    The media exception requires a title rebuilt with this parser update; the
+    older `3b6d7c6` wrapper does not accept it in `[environment]`.
+    Refused: anything that steers Wine,
     the loader or the prefix, `DXVK_HUD` and `SDL_JOYSTICK_RAWINPUT` (the
     title sets them), a name a `[debug] env` line also sets, and quotes in
     values. They are set after the title's own variables, and the log
