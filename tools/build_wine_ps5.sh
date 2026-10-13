@@ -103,7 +103,9 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # game's hidclass sends hardware input through it (patch 0955). gdi32: a
 # window keeps its pixel format with a native opengl32 (patch 0956).
 # kernelbase: the computer name without wineboot's volatile key (patch 0957).
-PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan ntoskrnl.exe winebus.sys setupapi gdi32 kernelbase"
+# wined3d: it carries vkd3d-shader, which d3dcompiler uses to compile D3DX
+# effects with samplers and in-pass shaders (patches 0959-0960).
+PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan ntoskrnl.exe winebus.sys setupapi gdi32 kernelbase wined3d"
 # Everything optional but FreeType (built below) is off: the console has none
 # of these libraries, and a configure-time probe against the payload SDK must
 # not pick up host headers.
