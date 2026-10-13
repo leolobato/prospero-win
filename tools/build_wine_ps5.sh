@@ -56,7 +56,7 @@
 # Usage:
 #   tools/build_wine_ps5.sh [--check-patches] [--patches DIR] [--work DIR]
 #       [--source DIR] [--host-tools DIR] [--foundation DIR] [--sdk DIR]
-#       [--prx-foundation DIR] [--ps5vk-sdk DIR | --radv DIR] [--jobs N]
+#       [--prx-foundation DIR] [--ps5vk-sdk DIR | --radv DIR] [--media-root DIR] [--jobs N]
 set -eu
 
 WINE_COMMIT=490f6d5dcbb2a5047345b8af88d114bbcaad69a8
@@ -105,7 +105,7 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # kernelbase: the computer name without wineboot's volatile key (patch 0957).
 # wined3d: it carries vkd3d-shader, which d3dcompiler uses to compile D3DX
 # effects with samplers and in-pass shaders (patches 0959-0963).
-PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan ntoskrnl.exe winebus.sys setupapi gdi32 kernelbase wined3d"
+PE_MODULES="ntdll win32u rtworkq xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan ntoskrnl.exe winebus.sys setupapi gdi32 kernelbase wined3d"
 # Everything optional but FreeType (built below) is off: the console has none
 # of these libraries, and a configure-time probe against the payload SDK must
 # not pick up host headers.
@@ -128,6 +128,7 @@ sdk=${PS5_PAYLOAD_SDK:-}
 prx_foundation=${PS5_PRX_FOUNDATION:-}
 ps5vk_sdk=${PS5VK_SDK:-}
 radv=${PROSPERO_RADV:-}
+media_root=${PROSPERO_MEDIA_ROOT:-}
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 check_only=0
 
@@ -144,6 +145,7 @@ while [ $# -gt 0 ]; do
     --prx-foundation) prx_foundation=$2; shift ;;
     --ps5vk-sdk) ps5vk_sdk=$2; shift ;;
     --radv) radv=$2; shift ;;
+    --media-root) media_root=$2; shift ;;
     --jobs) jobs=$2; shift ;;
     *) fail "unknown argument $1" ;;
     esac
@@ -245,6 +247,20 @@ if [ -f "$tls/lib/libgnutls.a" ]; then
 else
     gnutls_args="--without-gnutls"
 fi
+# Media is opt-in until real game acceptance. Reject host or incomplete
+# prefixes rather than silently configuring out the backend.
+media_ldlibs=
+if [ -n "$media_root" ]; then
+    python3 "$root/tools/media_link_flags.py" "$media_root" > "$work/media-flags.json" ||
+        fail "invalid target media prefix"
+    GSTREAMER_CFLAGS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["cflags"])' "$work/media-flags.json")
+    GSTREAMER_LIBS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["libs"])' "$work/media-flags.json")
+    media_ldlibs=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ldlibs"])' "$work/media-flags.json")
+    export GSTREAMER_CFLAGS GSTREAMER_LIBS
+    CONFIGURE_ARGS=$(printf '%s' "$CONFIGURE_ARGS" | sed 's/--without-gstreamer/--with-gstreamer/')
+    TARGETS="$TARGETS dlls/winegstreamer/winegstreamer.so"
+    PE_MODULES="$PE_MODULES winegstreamer"
+fi
 tree=$work/source
 if [ ! -d "$tree/.git" ]; then
     git clone -q --shared --no-checkout "$source_dir" "$tree"
@@ -268,11 +284,18 @@ cp "$root/wine/ps5/input/pw_key_shared.h" "$tree/dlls/win32u/pw_key_shared.h" ||
     fail "cannot stage shared-input ABI"
 
 cflags=${CFLAGS:--g -O2}
+# __FILE__ is also used in runtime diagnostics, so stripping debug sections
+# cannot remove build-machine paths from the packaged DLLs.
+cflags="$cflags -ffile-prefix-map=$work=/build/prospero-wine -fmacro-prefix-map=$work=/build/prospero-wine"
+if [ -n "$media_root" ]; then
+    cflags="$cflags -ffile-prefix-map=$media_root=/build/media -fmacro-prefix-map=$media_root=/build/media"
+fi
 
 # Reconfigure whenever the patches, staged Vulkan sources or arguments change.
 stamp=$(
     { printf '%s\n' "$WINE_COMMIT" "$CONFIGURE_ARGS" "$sdk" "$FREETYPE_SHA256" \
-        "$cflags" "$gnutls_args" "${GNUTLS_LIBS:-}"
+        "$cflags" "$gnutls_args" "${GNUTLS_LIBS:-}" \
+        "${GSTREAMER_CFLAGS:-}" "${GSTREAMER_LIBS:-}"
       for patch in $ordered; do cat "$patches/$patch"; done
       cat "$root/tools/stage_vk_batch.py" "$root/tools/generate_vk_codecs.py" "$root"/wine/ps5/pw_vk_*.[ch] \
           "$root"/wine/ps5/vulkan/*.[ch] "$root/wine/ps5/time/pw_qpc_clock.h" "$root/wine/ps5/input/pw_key_shared.h"; } | sha256sum | cut -c1-64)
@@ -324,7 +347,8 @@ status=0
 for step in "dlls/ntdll/ntdll.so|$heap $dmem" "dlls/win32u/win32u.so|" "server/wineserver|$heap" \
         "dlls/winevulkan/winevulkan.so|" "dlls/opengl32/opengl32.so|" "dlls/ws2_32/ws2_32.so|" \
         "dlls/crypt32/crypt32.so|" "dlls/dwrite/dwrite.so|" "dlls/winebus.sys/winebus.so|" \
-        $([ -f "$tls/lib/libgnutls.a" ] && echo "dlls/secur32/secur32.so|"); do
+        $([ -f "$tls/lib/libgnutls.a" ] && echo "dlls/secur32/secur32.so|") \
+        $([ -n "$media_root" ] && echo "dlls/winegstreamer/winegstreamer.so|"); do
     target=${step%%|*}; objects=${step#*|}
     make -C "$build" -k -j"$jobs" LDFLAGS="$objects $base" "$target" \
         >> "$work/make.log" 2>&1 || status=$?
@@ -339,7 +363,7 @@ for arch in i386 x86_64; do
         file=$module
         case $module in *.*) ;; *) file=$module.dll ;; esac
         target=dlls/$module/$arch-windows/$file
-        make -C "$build" -k -j"$jobs" "$target" >> "$work/make.log" 2>&1 || status=$?
+        make -C "$build" -k -j"$jobs" "${arch}_CFLAGS=$cflags" "$target" >> "$work/make.log" 2>&1 || status=$?
         [ ! -f "$build/$target" ] || cp "$build/$target" "$work/pe/$arch-windows/"
     done
 done
@@ -461,13 +485,18 @@ if [ "$prx_status" = 0 ]; then
             $(grep -ohE 'LOAD_FUNCPTR\(gnutls_[a-z0-9_]+\)' "$tree/dlls/secur32/schannel_gnutls.c" \
                 "$tree/dlls/crypt32/unixlib.c" | sed 's/LOAD_FUNCPTR(//; s/)//' | LC_ALL=C sort -u)
     fi
+    if [ -n "$media_root" ]; then
+        python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/winegstreamer_desc.c" \
+            __wine_unix_call_funcs __wine_unix_call_wow64_funcs
+    fi
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/libvulkan_desc.c" \
         vkGetInstanceProcAddr vkGetDeviceProcAddr
     # shellcheck disable=SC2086
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/libfreetype_desc.c" $FREETYPE_EXPORTS
     for unit in ntdll_desc win32u_desc wineserver_desc wowprospero_desc wineps5_desc \
             libfreetype_desc xinput_desc winebus_desc winevulkan_desc opengl32_desc ws2_32_desc crypt32_desc dwrite_desc \
-            libvulkan_desc $([ -f "$tls/lib/libgnutls.a" ] && echo secur32_desc libgnutls_desc); do
+            libvulkan_desc $([ -f "$tls/lib/libgnutls.a" ] && echo secur32_desc libgnutls_desc) \
+            $([ -n "$media_root" ] && echo winegstreamer_desc); do
         "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC -I"$root/wine/ps5" \
             -c "$prx/obj/$unit.c" -o "$prx/obj/$unit.o" || fail "cannot compile $unit.c"
     done
@@ -550,6 +579,16 @@ if [ "$prx_status" = 0 ]; then
     # NULL table, and Chromium (Battle.net's login page) aborts laying out
     # text.
     link_prx dwrite dlls/dwrite/dwrite.so "$prx/obj/dwrite_desc.o" "$prx/ntdll.shared.elf"
+    if [ -n "$media_root" ]; then
+        media_adapters=$(python3 "$root/tools/build_media_prx_adapters.py" "$sdk" "$prx/media-adapters") ||
+            fail "cannot build title-safe media adapters"
+        link_prx winegstreamer dlls/winegstreamer/winegstreamer.so \
+            "$prx/obj/winegstreamer_desc.o $prx/obj/emutls.o $media_adapters $media_ldlibs" "$prx/ntdll.shared.elf"
+        cp "$prx/media-adapters/media-adapters.json" "$prx/media-adapters.json"
+        mkdir -p "$prx/licenses/media"
+        cp -R "$media_root/licenses/." "$prx/licenses/media/"
+        cp "$work/media-flags.json" "$prx/media-flags.json"
+    fi
     if [ -f "$tls/lib/libgnutls.a" ]; then
         # GnuTLS itself, with nettle: the descriptor's exports pull what
         # schannel and crypt32 dlsym from the archives, and the rest follows.
@@ -573,8 +612,8 @@ if [ "$prx_status" = 0 ]; then
         # build_tls_ps5.sh, for tools/package_release.sh.
         [ -d "$tls/licenses/gnutls" ] && [ -d "$tls/licenses/nettle" ] ||
             fail "no licence texts under $tls/licenses; run tools/build_tls_ps5.sh again"
-        rm -rf "$prx/licenses"
-        cp -R "$tls/licenses" "$prx/licenses"
+        mkdir -p "$prx/licenses"
+        cp -R "$tls/licenses/." "$prx/licenses/"
     fi
     # The Vulkan driver itself, from ps5vk's SDK: only what its two entry
     # points reach, since the archive repeats a member. Its import facades
@@ -627,7 +666,8 @@ owners = {"dlls/ntdll/": "dlls/ntdll/ntdll.so", "dlls/win32u/": "dlls/win32u/win
           "server/": "server/wineserver", "dlls/winevulkan/": "dlls/winevulkan/winevulkan.so",
           "dlls/opengl32/": "dlls/opengl32/opengl32.so", "dlls/ws2_32/": "dlls/ws2_32/ws2_32.so",
           "dlls/crypt32/": "dlls/crypt32/crypt32.so", "dlls/dwrite/": "dlls/dwrite/dwrite.so",
-          "dlls/secur32/": "dlls/secur32/secur32.so"}
+          "dlls/secur32/": "dlls/secur32/secur32.so",
+          "dlls/winegstreamer/": "dlls/winegstreamer/winegstreamer.so"}
 unresolved = {target: set() for target in owners.values()}
 # lld prints each unresolved symbol, then ">>> referenced by" lines whose
 # continuation names the object ("dir/file.o:(function)"); the object's
@@ -674,10 +714,10 @@ objdump = shutil.which("llvm-objdump-18") or shutil.which("llvm-objdump") or f"{
 SYSCALL_ALLOWED = {"__wine_syscall_dispatcher", "__wine_unix_call_dispatcher"}
 ntdll_exports = exports("ntdll.shared.elf", prx) if (Path(prx) / "ntdll.shared.elf").is_file() else set()
 for name in ("ntdll", "win32u", "wineserver", "wowprospero", "wineps5", "libfreetype", "xinput1_3", "winebus",
-             "winevulkan", "opengl32", "ws2_32", "crypt32", "dwrite", "libvulkan", "secur32", "libgnutls") if not prx_status.startswith("skipped") else ():
+             "winevulkan", "opengl32", "ws2_32", "crypt32", "dwrite", "libvulkan", "secur32", "libgnutls", "winegstreamer") if not prx_status.startswith("skipped") else ():
     module = Path(prx) / "sce_module" / f"{name}.prx"
     link_log = Path(prx) / f"{name}.link.log"
-    if name in ("libvulkan", "secur32", "libgnutls") and not link_log.is_file():
+    if name in ("libvulkan", "secur32", "libgnutls", "winegstreamer") and not link_log.is_file():
         continue    # neither a ps5vk SDK nor RADV given; no GnuTLS built
     link_text = link_log.read_text(errors="replace") if link_log.is_file() else ""
     entry = {"built": module.is_file(),
@@ -697,7 +737,7 @@ for name in ("ntdll", "win32u", "wineserver", "wowprospero", "wineps5", "libfree
                    if len(fields) >= 8 and fields[6] == "UND"}
         provided = title_exports | (ntdll_exports if name in ("win32u", "wowprospero", "wineps5",
                                                               "xinput1_3", "winebus", "winevulkan", "opengl32", "ws2_32",
-                                                              "crypt32", "dwrite", "secur32") else set())
+                                                              "crypt32", "dwrite", "secur32", "winegstreamer") else set())
         entry["title_unbound"] = sorted((imports & exports("libkernel_sys.so")) - provided)
         # Nor does it get the WebKit process's libraries: ws2_32's getaddrinfo,
         # bound to libScePosixForWebKit, jumped to 0 in GTA IV (measured).

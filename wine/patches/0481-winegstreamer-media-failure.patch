@@ -1,0 +1,343 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 12 Oct 2026 09:00:00 +0200
+Subject: [PATCH] winegstreamer: Fail media creation cleanly.
+
+Bound parser initialization, preserve asynchronous failure codes and provide
+a process-cached per-game disable switch for MF and Windows Media readers.
+
+---
+
+diff --git a/dlls/winegstreamer/gst_private.h b/dlls/winegstreamer/gst_private.h
+--- a/dlls/winegstreamer/gst_private.h
++++ b/dlls/winegstreamer/gst_private.h
+@@ -36,6 +36,8 @@
+ #include "wine/mfinternal.h"
+ 
+ #include "unixlib.h"
++
++BOOL media_disabled(void);
+ 
+ bool array_reserve(void **elements, size_t *capacity, size_t count, size_t size);
+ 
+diff --git a/dlls/winegstreamer/main.c b/dlls/winegstreamer/main.c
+--- a/dlls/winegstreamer/main.c
++++ b/dlls/winegstreamer/main.c
+@@ -1059,13 +1059,29 @@
+     return TRUE;
+ }
+ 
++static BOOL CALLBACK media_disabled_once(INIT_ONCE *once, void *param, void **ctx)
++{
++    WCHAR value[2];
++    BOOL *disabled = param;
++
++    *disabled = GetEnvironmentVariableW(L"PW_MEDIA_DISABLE", value, ARRAY_SIZE(value)) == 1 && value[0] == L'1';
++    return TRUE;
++}
++
++BOOL media_disabled(void)
++{
++    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
++    static BOOL disabled;
++
++    InitOnceExecuteOnce(&once, media_disabled_once, &disabled, NULL);
++    return disabled;
++}
++
+ BOOL init_gstreamer(void)
+ {
+     static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+ 
+-    InitOnceExecuteOnce(&once, init_gstreamer_proc, NULL, NULL);
+-
+-    return TRUE;
++    return InitOnceExecuteOnce(&once, init_gstreamer_proc, NULL, NULL);
+ }
+ 
+ static const REGPINTYPES reg_audio_mt = {&MEDIATYPE_Audio, &GUID_NULL};
+diff --git a/dlls/winegstreamer/media_source.c b/dlls/winegstreamer/media_source.c
+--- a/dlls/winegstreamer/media_source.c
++++ b/dlls/winegstreamer/media_source.c
+@@ -1678,13 +1678,26 @@
+     object->wg_parser = parser;
+ 
+     object->read_thread = CreateThread(NULL, 0, read_thread, object, 0, NULL);
++    if (!object->read_thread)
++    {
++        hr = HRESULT_FROM_WIN32(GetLastError());
++        goto fail;
++    }
+ 
+     object->state = SOURCE_OPENING;
+ 
+     if (FAILED(hr = wg_parser_connect(parser, object->file_size, context->url)))
++    {
++        if (hr == E_FAIL) hr = MF_E_UNSUPPORTED_BYTESTREAM_TYPE;
+         goto fail;
++    }
+ 
+     stream_count = wg_parser_get_stream_count(parser);
++    if (!stream_count)
++    {
++        hr = MF_E_UNSUPPORTED_BYTESTREAM_TYPE;
++        goto fail;
++    }
+ 
+     if (!(object->descriptors = calloc(stream_count, sizeof(*object->descriptors)))
+             || !(object->streams = calloc(stream_count, sizeof(*object->streams))))
+@@ -1710,7 +1723,7 @@
+         }
+ 
+         object->duration = max(object->duration, wg_parser_stream_get_duration(wg_stream));
+-        IMFStreamDescriptor_AddRef(descriptor);
++        /* Transfer the creator reference; the stream already owns its own. */
+         object->descriptors[i] = descriptor;
+         object->streams[i] = stream;
+         object->stream_count++;
+@@ -1750,6 +1763,7 @@
+     if (object->event_queue)
+         IMFMediaEventQueue_Release(object->event_queue);
+     IMFByteStream_Release(object->byte_stream);
++    DeleteCriticalSection(&object->cs);
+     free(object);
+     return hr;
+ }
+@@ -1904,6 +1918,9 @@
+         return hr;
+     }
+ 
++    if (!file_size)
++        return MF_E_UNSUPPORTED_BYTESTREAM_TYPE;
++
+     if (FAILED(hr = MFCreateAsyncResult(NULL, callback, state, &result)))
+         return hr;
+     if (FAILED(hr = object_context_create(flags, stream, url, file_size, result, &context)))
+@@ -1939,13 +1956,14 @@
+     {
+         *type = MF_OBJECT_INVALID;
+         *object = NULL;
+-        return MF_E_UNEXPECTED;
++        hr = IMFAsyncResult_GetStatus(result);
++        return FAILED(hr) ? hr : MF_E_UNEXPECTED;
+     }
+ 
+     hr = IMFAsyncResult_GetStatus(entry->result);
+     *type = entry->type;
+     *object = entry->object;
+-    IUnknown_AddRef(*object);
++    if (*object) IUnknown_AddRef(*object);
+     result_entry_destroy(entry);
+     return hr;
+ }
+@@ -2063,6 +2081,10 @@
+ 
+     TRACE("%s, %p.\n", debugstr_guid(riid), obj);
+ 
++    *obj = NULL;
++    if (media_disabled())
++        return MF_E_UNSUPPORTED_BYTESTREAM_TYPE;
++
+     if (!(handler = calloc(1, sizeof(*handler))))
+         return E_OUTOFMEMORY;
+ 
+diff --git a/dlls/winegstreamer/wg_format.c b/dlls/winegstreamer/wg_format.c
+--- a/dlls/winegstreamer/wg_format.c
++++ b/dlls/winegstreamer/wg_format.c
+@@ -632,12 +632,16 @@
+ 
+ void wg_format_from_caps(struct wg_format *format, const GstCaps *caps)
+ {
+-    const GstStructure *structure = gst_caps_get_structure(caps, 0);
+-    const char *name = gst_structure_get_name(structure);
++    const GstStructure *structure;
++    const char *name;
+     gboolean parsed;
+     gint version;
+ 
+     memset(format, 0, sizeof(*format));
++    /* Template caps describe alternatives, not a negotiated media type. */
++    if (!gst_caps_is_fixed(caps)) return;
++    structure = gst_caps_get_structure(caps, 0);
++    name = gst_structure_get_name(structure);
+ 
+     if (!strcmp(name, "audio/x-raw"))
+     {
+diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
+--- a/dlls/winegstreamer/wg_parser.c
++++ b/dlls/winegstreamer/wg_parser.c
+@@ -29,6 +29,8 @@
+ #include <assert.h>
+ #include <stdarg.h>
+ #include <stdio.h>
++#include <errno.h>
++#include <time.h>
+ 
+ #include <gst/gst.h>
+ #include <gst/video/video.h>
+@@ -263,7 +265,7 @@
+ 
+     pthread_mutex_lock(&parser->mutex);
+ 
+-    stream->desired_caps = wg_format_to_caps(format);
++    gst_caps_take(&stream->desired_caps, wg_format_to_caps(format));
+     stream->enabled = true;
+ 
+     pthread_mutex_unlock(&parser->mutex);
+@@ -286,11 +288,7 @@
+ 
+     pthread_mutex_lock(&parser->mutex);
+     stream->enabled = false;
+-    if (stream->desired_caps)
+-    {
+-        gst_caps_unref(stream->desired_caps);
+-        stream->desired_caps = NULL;
+-    }
++    gst_caps_replace(&stream->desired_caps, NULL);
+     pthread_mutex_unlock(&parser->mutex);
+     pthread_cond_signal(&stream->event_empty_cond);
+     return S_OK;
+@@ -594,6 +592,7 @@
+ 
+         GST_INFO("Result %"GST_PTR_FORMAT, result);
+         gst_query_set_caps_result(query, result);
++        gst_caps_unref(result);
+ 
+         return TRUE;
+     }
+@@ -703,7 +702,7 @@
+ 
+             gst_event_parse_caps(event, &caps);
+             pthread_mutex_lock(&parser->mutex);
+-            stream->current_caps = gst_caps_ref(caps);
++            gst_caps_replace(&stream->current_caps, caps);
+             pthread_mutex_unlock(&parser->mutex);
+             pthread_cond_signal(&parser->init_cond);
+             break;
+@@ -932,8 +931,8 @@
+ 
+     if (stream->codec_caps)
+         gst_caps_unref(stream->codec_caps);
+-    if (stream->current_caps)
+-        gst_caps_unref(stream->current_caps);
++    gst_caps_replace(&stream->current_caps, NULL);
++    gst_caps_replace(&stream->desired_caps, NULL);
+ 
+     free(stream);
+ }
+@@ -1658,6 +1657,10 @@
+     const WCHAR *uri = params->uri;
+     unsigned int i;
+     int ret;
++    struct timespec deadline;
++
++    if (clock_gettime(CLOCK_REALTIME, &deadline)) return E_FAIL;
++    deadline.tv_sec += 30;
+ 
+     parser->file_size = params->file_size;
+     parser->sink_connected = true;
+@@ -1695,8 +1698,8 @@
+         goto out;
+ 
+     gst_element_set_state(parser->container, GST_STATE_PAUSED);
+-    ret = gst_element_get_state(parser->container, NULL, NULL, -1);
+-    if (ret == GST_STATE_CHANGE_FAILURE)
++    ret = gst_element_get_state(parser->container, NULL, NULL, 30 * GST_SECOND);
++    if (ret == GST_STATE_CHANGE_FAILURE || ret == GST_STATE_CHANGE_ASYNC)
+     {
+         GST_ERROR("Failed to play stream.");
+         goto out;
+@@ -1705,7 +1708,8 @@
+     pthread_mutex_lock(&parser->mutex);
+ 
+     while (!parser_no_more_pads(parser) && !parser->error)
+-        pthread_cond_wait(&parser->init_cond, &parser->mutex);
++        if (pthread_cond_timedwait(&parser->init_cond, &parser->mutex, &deadline) == ETIMEDOUT)
++            parser->error = true;
+     if (parser->error)
+     {
+         pthread_mutex_unlock(&parser->mutex);
+@@ -1719,7 +1723,8 @@
+ 
+         /* Make sure the stream has a buffer or an initial gap. */
+         while (!parser->error && !stream->has_buffer && !stream->has_initial_gap)
+-            pthread_cond_wait(&parser->init_cond, &parser->mutex);
++            if (pthread_cond_timedwait(&parser->init_cond, &parser->mutex, &deadline) == ETIMEDOUT)
++                parser->error = true;
+ 
+         /* GStreamer doesn't actually provide any guarantees about when duration
+          * is available, even for seekable streams. It's basically built for
+@@ -1747,6 +1752,9 @@
+ 
+         for (;;)
+         {
++            struct timespec now;
++            if (clock_gettime(CLOCK_REALTIME, &now) || now.tv_sec >= deadline.tv_sec)
++                parser->error = true;
+             if (parser->error)
+             {
+                 pthread_mutex_unlock(&parser->mutex);
+@@ -1778,7 +1786,8 @@
+             }
+             else
+             {
+-                pthread_cond_wait(&parser->init_cond, &parser->mutex);
++                if (pthread_cond_timedwait(&parser->init_cond, &parser->mutex, &deadline) == ETIMEDOUT)
++                parser->error = true;
+             }
+         }
+ 
+@@ -1827,6 +1836,17 @@
+     return E_FAIL;
+ }
+ 
++static void parser_clear_input_cache(struct wg_parser *parser)
++{
++    unsigned int i;
++
++    for (i = 0; i < ARRAY_SIZE(parser->input_cache_chunks); i++)
++    {
++        free(parser->input_cache_chunks[i].data);
++        parser->input_cache_chunks[i].data = NULL;
++    }
++}
++
+ static NTSTATUS wg_parser_disconnect(void *args)
+ {
+     struct wg_parser *parser = get_parser(*(wg_parser_t *)args);
+@@ -1866,11 +1886,7 @@
+     g_free(parser->sink_caps);
+     parser->sink_caps = NULL;
+ 
+-    for (i = 0; i < ARRAY_SIZE(parser->input_cache_chunks); i++)
+-    {
+-        free(parser->input_cache_chunks[i].data);
+-        parser->input_cache_chunks[i].data = NULL;
+-    }
++    parser_clear_input_cache(parser);
+ 
+     return S_OK;
+ }
+@@ -1941,6 +1957,8 @@
+     pthread_cond_destroy(&parser->read_cond);
+     pthread_cond_destroy(&parser->read_done_cond);
+ 
++    /* Failed connect skips disconnect, but may already own cached reads. */
++    parser_clear_input_cache(parser);
+     free(parser->uri);
+     free(parser);
+     return S_OK;
+diff --git a/dlls/winegstreamer/wm_reader.c b/dlls/winegstreamer/wm_reader.c
+--- a/dlls/winegstreamer/wm_reader.c
++++ b/dlls/winegstreamer/wm_reader.c
+@@ -2807,6 +2807,10 @@
+ 
+     TRACE("out %p.\n", out);
+ 
++    *out = NULL;
++    if (media_disabled())
++        return NS_E_UNSUPPORTED_SOURCETYPE;
++
+     if (!init_gstreamer())
+         return E_FAIL;
+ 

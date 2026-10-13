@@ -42,8 +42,12 @@ set -eu
 build=$PW_PE_BUILD
 work=$PW_PE_WORK
 jobs=1
+cflags="-O2 -ffile-prefix-map=$work=/build/prospero-wine"
 status=0
 make() {
+    for option in "$@"; do
+        case "$option" in *_CFLAGS=*) printf '%s\n' "$option" >> "$work/cflags";; esac
+    done
     for target in "$@"; do :; done
     printf '%s\n' "$target" >> "$work/requests"
     if [ "$target" = "${PW_PE_FAIL_TARGET:-}" ]; then return 17; fi
@@ -56,13 +60,19 @@ make() {
         assert result.returncode == 0, result.stderr
         assert not stale.exists()
         requests = (work / 'requests').read_text().splitlines()
+        compile_flags = (work / 'cflags').read_text().splitlines()
+        for arch in ('i386', 'x86_64'):
+            assert f'{arch}_CFLAGS=-O2 -ffile-prefix-map={work}=/build/prospero-wine' in compile_flags
         for arch in ('i386', 'x86_64'):
             target = f'dlls/winevulkan/{arch}-windows/winevulkan.dll'
             assert requests.count(target) == 1
             assert (work / f'pe/{arch}-windows/winevulkan.dll').read_bytes() == ('MZfresh:' + target).encode()
         for arch in ('i386', 'x86_64'):
-            for module in ('ntdll', 'win32u'):
+            for module in ('ntdll', 'win32u', 'rtworkq'):
                 assert requests.count(f'dlls/{module}/{arch}-windows/{module}.dll') == 1
+                if module == 'rtworkq':
+                    target = f'dlls/{module}/{arch}-windows/{module}.dll'
+                    assert (work / f'pe/{arch}-windows/{module}.dll').read_bytes() == ('MZfresh:' + target).encode()
         assert requests.count('dlls/wow64/x86_64-windows/wow64.dll') == 1
         assert 'dlls/wow64/i386-windows/wow64.dll' not in requests
         assert (work / 'status').read_text() == '0'

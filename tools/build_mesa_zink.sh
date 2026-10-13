@@ -6,13 +6,14 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 MESA_COMMIT=e4607ef697fe3df8d1ebc329bf1917d041843306
 LLVM_MINGW_VERSION=20260922-ucrt
 LLVM_MINGW_SHA256=bb7bb7654b33d5aa8712acb837c963b2e0c56352560c76105270a3268c665c21
-work= mesa= archive= jobs=1
+work= mesa= archive= runtime_source= jobs=1
 fail() { echo "build_mesa_zink: $*" >&2; exit 2; }
 while [ $# -gt 0 ]; do
  case $1 in
  --work) work=$2; shift 2;;
  --mesa) mesa=$2; shift 2;;
  --llvm-mingw) archive=$2; shift 2;;
+ --llvm-runtime-source) runtime_source=$2; shift 2;;
  --jobs) jobs=$2; shift 2;;
  *) fail "unknown argument $1";;
  esac
@@ -40,6 +41,10 @@ if [ ! -f "$work/toolchain/.archive-sha256" ]; then
  mv "$staging" "$work/toolchain"
 fi
 [ "$(cat "$work/toolchain/.archive-sha256")" = "$LLVM_MINGW_SHA256" ] || fail 'work compiler pin differs'
+if [ -n "$runtime_source" ]; then
+ bash "$root/tools/build_mingw_runtimes.sh" --source "$runtime_source" \
+  --work "$work/cxx-runtimes" --toolchain "$work/toolchain" --jobs "$jobs"
+fi
 export PATH="$work/toolchain/bin:$PATH"
 meson=${MESON:-meson}
 for arch in i686 x86_64; do
@@ -66,6 +71,8 @@ CROSS
  reconfigure=(); [ ! -f "$build/build.ninja" ] || reconfigure=(--reconfigure)
  "$meson" setup "${reconfigure[@]}" "$build" "$work/source" --cross-file "$cross" \
   --wrap-mode=nofallback --buildtype=release --default-library=static \
+  -Dc_args="-ffile-prefix-map=$work=/src/mesa -fmacro-prefix-map=$work=/src/mesa" \
+  -Dcpp_args="-ffile-prefix-map=$work=/src/mesa -fmacro-prefix-map=$work=/src/mesa" \
   -Dplatforms=windows -Dgallium-drivers=zink -Dvulkan-drivers= -Dopengl=true \
   -Degl=disabled -Dgbm=disabled -Dglx=disabled -Dgles1=disabled -Dgles2=disabled \
   -Dllvm=disabled -Dzlib=disabled -Dzstd=disabled -Dshader-cache=disabled \
@@ -83,6 +90,11 @@ CROSS
   "$work/artifacts/$destination" "$work/toolchain/$arch-w64-mingw32/bin" \
   "$work/toolchain/bin/llvm-readobj"
 done
+if [ -n "$runtime_source" ]; then
+ mkdir -p "$work/artifacts/LICENSES/llvm-runtime"
+ cp "$work/cxx-runtimes/source/llvm-project/LICENSE.TXT" "$work/artifacts/LICENSES/llvm-runtime/"
+ cp "$work/cxx-runtimes/manifest.json" "$work/artifacts/LICENSES/llvm-runtime/source-build.json"
+fi
 mkdir -p "$work/artifacts/LICENSES/mesa" "$work/artifacts/LICENSES/llvm-mingw"
 cp "$work/source/docs/license.rst" "$work/artifacts/LICENSES/mesa/"
 cp -R "$work/source/licenses" "$work/artifacts/LICENSES/mesa/"

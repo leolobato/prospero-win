@@ -47,3 +47,19 @@ Source copyright/permission notices and component licence texts accompany the
 artifacts. The manifest explicitly records that console validation is pending.
 
 The optional release packaging interface is supplied by a separate change.
+
+For strict release kits, rebuild the static C++ runtimes supplied by the
+compiler archive. Their upstream diagnostics contain the vendor's builder
+home directory; stripping DLL debug sections cannot remove these strings.
+Clone llvm-mingw tag `20260922` (commit
+`0eca5ac93da14a74bc81c249e841356ececc5d95`) and place an LLVM checkout at
+`llvm-mingw/llvm-project`, tag `llvmorg-23.1.2` (commit
+`85ac560262434c9ccfc0c183ec22d4138ed647fb`). Pass
+`--llvm-runtime-source /path/to/llvm-mingw` to `build_mesa_zink.sh`.
+The helper exports both pinned sources, builds only i686 and x86_64 static
+libc++/libc++abi/libunwind with compiler prefix maps, and installs them into
+the build's private compiler installation before linking Mesa. The manifest
+records the runtime source commits and archive hashes; its LLVM license and
+source-build manifest accompany the artifacts. Mesa itself uses prefix maps
+for diagnostic source paths. Use a new work directory when changing between
+the vendor runtimes and this source build.

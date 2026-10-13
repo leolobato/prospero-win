@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 12 Oct 2026 01:30:00 +0200
+Subject: [PATCH] winegstreamer: Register the PS5 static media plugins.
+
+Use the existing Unix-call and WoW64 bridge with a target-only plugin set.
+Disable external plugin discovery; register the same decoder/container stack
+as the native console probe, plus the DirectShow post-processing elements.
+
+---
+
+diff --git a/dlls/winegstreamer/unixlib.c b/dlls/winegstreamer/unixlib.c
+--- a/dlls/winegstreamer/unixlib.c
++++ b/dlls/winegstreamer/unixlib.c
+@@ -48,6 +48,22 @@
+ 
+ static UINT thread_count;
+ 
++#ifdef __PROSPERO__
++GST_PLUGIN_STATIC_DECLARE(coreelements);
++GST_PLUGIN_STATIC_DECLARE(app);
++GST_PLUGIN_STATIC_DECLARE(playback);
++GST_PLUGIN_STATIC_DECLARE(typefindfunctions);
++GST_PLUGIN_STATIC_DECLARE(audioconvert);
++GST_PLUGIN_STATIC_DECLARE(audioresample);
++GST_PLUGIN_STATIC_DECLARE(videoconvertscale);
++GST_PLUGIN_STATIC_DECLARE(isomp4);
++GST_PLUGIN_STATIC_DECLARE(avi);
++GST_PLUGIN_STATIC_DECLARE(videoparsersbad);
++GST_PLUGIN_STATIC_DECLARE(libav);
++GST_PLUGIN_STATIC_DECLARE(deinterlace);
++GST_PLUGIN_STATIC_DECLARE(videofilter);
++#endif
++
+ GstStreamType stream_type_from_caps(GstCaps *caps)
+ {
+     const gchar *media_type;
+@@ -267,6 +283,15 @@
+     GError *err;
+     DWORD_PTR process_mask;
+ 
++#ifdef __PROSPERO__
++    /* The title ships static plugins only. Never scan host/user directories. */
++    setenv("GST_PLUGIN_PATH_1_0", "", TRUE);
++    setenv("GST_PLUGIN_SYSTEM_PATH_1_0", "", TRUE);
++    setenv("GST_REGISTRY_UPDATE", "no", TRUE);
++    setenv("GST_REGISTRY", "/nonexistent/prospero-media/registry", TRUE);
++    setenv("GST_REGISTRY_FORK", "no", TRUE);
++#endif
++
+     if (params->trace_on)
+         setenv("GST_DEBUG", "WINE:9,4", FALSE);
+     if (params->warn_on)
+@@ -288,6 +313,22 @@
+         g_error_free(err);
+         return STATUS_UNSUCCESSFUL;
+     }
++
++#ifdef __PROSPERO__
++    GST_PLUGIN_STATIC_REGISTER(coreelements);
++    GST_PLUGIN_STATIC_REGISTER(app);
++    GST_PLUGIN_STATIC_REGISTER(playback);
++    GST_PLUGIN_STATIC_REGISTER(typefindfunctions);
++    GST_PLUGIN_STATIC_REGISTER(audioconvert);
++    GST_PLUGIN_STATIC_REGISTER(audioresample);
++    GST_PLUGIN_STATIC_REGISTER(videoconvertscale);
++    GST_PLUGIN_STATIC_REGISTER(isomp4);
++    GST_PLUGIN_STATIC_REGISTER(avi);
++    GST_PLUGIN_STATIC_REGISTER(videoparsersbad);
++    GST_PLUGIN_STATIC_REGISTER(libav);
++    GST_PLUGIN_STATIC_REGISTER(deinterlace);
++    GST_PLUGIN_STATIC_REGISTER(videofilter);
++#endif
+ 
+     if (!NtQueryInformationProcess(GetCurrentProcess(),
+             ProcessAffinityMask, &process_mask, sizeof(process_mask), NULL))

@@ -232,6 +232,17 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_image_view_fds.py
 	python3 tests/test_build_wine_ps5.py
 	python3 tests/test_build_tls_ps5.py
+	python3 tests/test_build_mingw_runtimes.py
+	python3 tests/test_build_wpf_ps5.py
+	python3 tests/test_build_media_ps5.py
+	python3 tests/test_media_decode_probe.py
+	python3 tests/test_media_link_flags.py
+	python3 tests/test_media_build_paths.py
+	python3 tests/test_media_libc.py
+	python3 tests/test_media_prx_libc.py
+	python3 tests/test_wine_media_failure.py
+	python3 tests/test_wine_alert_kqueue.py
+	python3 tests/test_mf_probe_handles.py
 	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_ws2_fqdn.py
 	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_mutex_fast.py
 	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_shared_mutex_word.py
@@ -309,3 +320,19 @@ native-release: test
 
 clean:
 	rm -rf build dist release tools/__pycache__ tests/__pycache__
+
+# Focused real media probe tests; test skips them without host FFmpeg and its CLI.
+.PHONY: test-media-probe
+test-media-probe:
+	PW_REQUIRE_MEDIA_PROBE=1 python3 tests/test_media_decode_probe.py
+
+.PHONY: test-media-runtime
+test-media-runtime:
+	python3 tests/test_build_media_ps5.py
+	python3 tests/test_media_link_flags.py
+	python3 tests/test_media_build_paths.py
+	python3 tests/test_media_libc.py
+	python3 tests/test_media_prx_libc.py
+	python3 tests/test_wine_media_failure.py
+	python3 tests/test_wine_alert_kqueue.py
+	python3 tests/test_mf_probe_handles.py
