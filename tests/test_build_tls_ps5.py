@@ -37,6 +37,11 @@ def main() -> int:
     assert re.fullmatch(r"[0-9a-f]{64}", pin("CA_BUNDLE_SHA256"))
     assert pin("CA_BUNDLE_URL") == "https://curl.se/ca/cacert-$CA_BUNDLE_DATE.pem"
 
+    # TLS diagnostics and its optional system config must not name the builder.
+    script = SCRIPT.read_text()
+    assert '--sysconfdir=/nonexistent' in script, 'GnuTLS config follows the host installation prefix'
+    assert '-ffile-prefix-map=$work=' in script, 'TLS diagnostics retain build paths'
+
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         # No SDK: named, before any download.

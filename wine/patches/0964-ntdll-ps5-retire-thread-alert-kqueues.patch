@@ -1,0 +1,311 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 12 Oct 2026 23:00:00 +0200
+Subject: [PATCH] ntdll: Own PS5 alert kqueues by live thread.
+
+Retire native alert descriptors on thread exit and failed creation. Serialize
+alert delivery with retirement, retain an old owner's FD across TID reuse,
+and block termination signals while the ownership lock is held.
+
+---
+
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -3474,9 +3474,13 @@
+ {
+ #ifdef USE_FUTEX
+     LONG futex;
+ #elif defined(HAVE_KQUEUE)
++#ifdef __PROSPERO__
++    struct thread_data *owner;
++#else
+     int kq;
++#endif
+ #else
+     HANDLE event;
+ #endif
+ };
+@@ -3498,8 +3502,129 @@
+     handle_to_index( tid, &block_idx );
+     return block_idx <= ARRAY_SIZE(tid_alert_blocks);
+ }
+ 
++#if defined(__PROSPERO__) && defined(HAVE_KQUEUE) && !defined(USE_FUTEX)
++/* The slot indexes a live owner, not an immortal descriptor. The owner keeps
++ * the FD until its own exit, even if the server has already reused its TID. */
++static pthread_mutex_t tid_alert_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++static union tid_alert_entry *ps5_tid_alert_slot( HANDLE tid, BOOL create )
++{
++    unsigned int block_idx, idx = handle_to_index( tid, &block_idx );
++    if (block_idx >= ARRAY_SIZE(tid_alert_blocks)) return NULL;
++    if (!tid_alert_blocks[block_idx] && create)
++    {
++        size_t size = TID_ALERT_BLOCK_SIZE * sizeof(union tid_alert_entry);
++        void *ptr = anon_mmap_alloc( size, PROT_READ | PROT_WRITE );
++        if (ptr == MAP_FAILED) return NULL;
++        tid_alert_blocks[block_idx] = ptr; /* caller holds tid_alert_mutex */
++    }
++    if (!tid_alert_blocks[block_idx]) return NULL;
++    return &tid_alert_blocks[block_idx][idx];
++}
++
++static void ps5_tid_alert_lock( sigset_t *previous )
++{
++    /* A termination signal must not interrupt an owner while it holds the
++     * lock, since the exit path acquires the same lock to retire its FD. */
++    pthread_sigmask( SIG_BLOCK, &server_block_set, previous );
++    pthread_mutex_lock( &tid_alert_mutex );
++}
++
++static void ps5_tid_alert_unlock( const sigset_t *previous )
++{
++    pthread_mutex_unlock( &tid_alert_mutex );
++    pthread_sigmask( SIG_SETMASK, previous, NULL );
++}
++
++void ps5_init_thread_alert( struct thread_data *data )
++{
++    union tid_alert_entry *entry;
++    sigset_t previous;
++    ps5_tid_alert_lock( &previous );
++    if ((entry = ps5_tid_alert_slot( ULongToHandle(data->tid), TRUE ))) entry->owner = data;
++    ps5_tid_alert_unlock( &previous );
++}
++
++void ps5_free_thread_alert( struct thread_data *data )
++{
++    union tid_alert_entry *entry;
++    sigset_t previous;
++    ps5_tid_alert_lock( &previous );
++    if ((entry = ps5_tid_alert_slot( ULongToHandle(data->tid), FALSE )) && entry->owner == data)
++        entry->owner = NULL;
++    /* FD+1 permits a valid descriptor zero and makes repeated cleanup safe. */
++    if (data->tid_alert_kqueue)
++    {
++        close( data->tid_alert_kqueue - 1 );
++        data->tid_alert_kqueue = 0;
++    }
++    ps5_tid_alert_unlock( &previous );
++}
++
++/* Called under tid_alert_mutex; the caller retains the live owner or is the
++ * owner itself. No unrelated thread can close or recycle this FD mid-alert. */
++static int ps5_thread_alert_kqueue_locked( struct thread_data *data )
++{
++    static const struct kevent init_event =
++    {
++        .ident = 1, .filter = EVFILT_USER, .flags = EV_ADD | EV_CLEAR,
++        .fflags = 0, .data = 0, .udata = NULL
++    };
++    int fd;
++    if (data->tid_alert_kqueue) return data->tid_alert_kqueue - 1;
++    if ((fd = kqueue()) == -1)
++    {
++        ERR( "kqueue failed with error: %d (%s)\n", errno, strerror(errno) );
++        return -1;
++    }
++    if (kevent( fd, &init_event, 1, NULL, 0, NULL ) == -1)
++    {
++        ERR( "kevent creation failed with error: %d (%s)\n", errno, strerror(errno) );
++        close( fd );
++        return -1;
++    }
++    data->tid_alert_kqueue = fd + 1;
++    return fd;
++}
++
++static int ps5_thread_alert_kqueue( struct thread_data *data )
++{
++    sigset_t previous;
++    int fd;
++    union tid_alert_entry *entry;
++    ps5_tid_alert_lock( &previous );
++    entry = ps5_tid_alert_slot( ULongToHandle(data->tid), FALSE );
++    fd = entry && entry->owner == data ? ps5_thread_alert_kqueue_locked( data ) : -1;
++    ps5_tid_alert_unlock( &previous );
++    return fd;
++}
++
++static NTSTATUS ps5_alert_thread( HANDLE tid )
++{
++    static const struct kevent signal_event =
++    {
++        .ident = 1, .filter = EVFILT_USER, .flags = 0,
++        .fflags = NOTE_TRIGGER, .data = 0, .udata = NULL
++    };
++    union tid_alert_entry *entry;
++    sigset_t previous;
++    NTSTATUS status = STATUS_INVALID_CID;
++    int fd;
++    ps5_tid_alert_lock( &previous );
++    if ((entry = ps5_tid_alert_slot( tid, FALSE )) && entry->owner)
++    {
++        if ((fd = ps5_thread_alert_kqueue_locked( entry->owner )) >= 0)
++        {
++            status = kevent( fd, &signal_event, 1, NULL, 0, NULL ) == -1
++                    ? STATUS_INVALID_HANDLE : STATUS_SUCCESS;
++        }
++    }
++    ps5_tid_alert_unlock( &previous );
++    return status;
++}
++#else
+ static union tid_alert_entry *get_tid_alert_entry( HANDLE tid )
+ {
+     unsigned int block_idx, idx = handle_to_index( tid, &block_idx );
+     union tid_alert_entry *entry;
+@@ -3581,8 +3706,10 @@
+     return entry;
+ }
+ 
+ 
++#endif
++
+ /***********************************************************************
+  *             NtAlertMultipleThreadByThreadId (NTDLL.@)
+  */
+ NTSTATUS WINAPI NtAlertMultipleThreadByThreadId( HANDLE *tids, ULONG count, void *unk1, void *unk2 )
+@@ -3605,8 +3732,12 @@
+  *             NtAlertThreadByThreadId (NTDLL.@)
+  */
+ NTSTATUS WINAPI NtAlertThreadByThreadId( HANDLE tid )
+ {
++#if defined(__PROSPERO__) && defined(HAVE_KQUEUE) && !defined(USE_FUTEX)
++    TRACE( "%p\n", tid );
++    return ps5_alert_thread( tid );
++#else
+     union tid_alert_entry *entry = get_tid_alert_entry( tid );
+ 
+     TRACE( "%p\n", tid );
+ 
+@@ -3637,8 +3768,9 @@
+     }
+ #else
+     return NtSetEvent( entry->event, NULL );
+ #endif
++#endif
+ }
+ 
+ 
+ #if defined(USE_FUTEX) || defined(HAVE_KQUEUE)
+@@ -3668,13 +3800,21 @@
+  *             NtWaitForAlertByThreadId (NTDLL.@)
+  */
+ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEGER *timeout )
+ {
++#if defined(__PROSPERO__) && defined(HAVE_KQUEUE) && !defined(USE_FUTEX)
++    int ps5_kq = ps5_thread_alert_kqueue( get_thread_data() );
++#else
+     union tid_alert_entry *entry = get_tid_alert_entry( ULongToHandle(get_thread_data()->tid) );
++#endif
+ 
+     TRACE( "%p %s\n", address, debugstr_timeout( timeout ) );
+ 
++#if defined(__PROSPERO__) && defined(HAVE_KQUEUE) && !defined(USE_FUTEX)
++    if (ps5_kq < 0) return STATUS_INVALID_CID;
++#else
+     if (!entry) return STATUS_INVALID_CID;
++#endif
+ 
+ #ifdef USE_FUTEX
+     {
+         LONG *futex = &entry->futex;
+@@ -3732,9 +3872,13 @@
+                 timespec.tv_nsec = (timeleft % TICKSPERSEC) * 100;
+                 if (timespec.tv_sec > 0x7FFFFFFF) timeout = NULL;
+             }
+ 
++#ifdef __PROSPERO__
++            ret = kevent( ps5_kq, NULL, 0, &wait_event, 1, timeout ? &timespec : NULL );
++#else
+             ret = kevent( entry->kq, NULL, 0, &wait_event, 1, timeout ? &timespec : NULL );
++#endif
+         } while (ret == -1 && errno == EINTR);
+ 
+         switch (ret)
+         {
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1119,8 +1119,11 @@
+ #ifdef WINE_INPROCESS_SERVER
+     extern void unregister_inprocess_thread(void);
+     unregister_inprocess_thread();
+ #endif
++#if defined(__PROSPERO__) && defined(HAVE_KQUEUE) && !defined(USE_FUTEX)
++    ps5_free_thread_alert( data );
++#endif
+     close( data->alert_fd );
+     close( data->wait_fd[0] );
+     close( data->wait_fd[1] );
+     close( data->reply_fd );
+@@ -1188,8 +1191,11 @@
+         wow_teb->ClientId.UniqueProcess = pid;
+         wow_teb->ClientId.UniqueThread  = data->tid;
+         wow_teb->RealClientId = wow_teb->ClientId;
+     }
++#if defined(__PROSPERO__) && defined(HAVE_KQUEUE) && !defined(USE_FUTEX)
++    ps5_init_thread_alert( data );
++#endif
+ }
+ 
+ 
+ /***********************************************************************
+@@ -1315,8 +1321,11 @@
+     }
+ 
+     data->request_fd = request_pipe[1];
+     data->tid        = tid;
++#if defined(__PROSPERO__) && defined(HAVE_KQUEUE) && !defined(USE_FUTEX)
++    ps5_init_thread_alert( data );
++#endif
+ #if defined(__PROSPERO__) || defined(WINE_INPROCESS_SERVER)
+     data->ps5_mutex_token = 0;
+ #endif
+     data->start      = start;
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -4606,8 +4606,12 @@
+     SIZE_T size;
+     sigset_t sigset;
+     WOW_TEB *wow_teb;
+ 
++#if defined(__PROSPERO__) && defined(HAVE_KQUEUE) && !defined(USE_FUTEX)
++    ps5_free_thread_alert( data ); /* also covers failed thread creation */
++#endif
++
+     if (!(teb = data->teb)) goto done;
+ 
+     if (teb->DeallocationStack)
+     {
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -107,8 +107,11 @@
+     int          reply_fd;          /* fd for receiving server replies */
+     int          wait_fd[2];        /* fd for sleeping server requests */
+     int          alert_fd;          /* inproc sync fd for user apc alerts */
+     DWORD        tid;               /* thread id */
++#if defined(__PROSPERO__) && defined(HAVE_KQUEUE) && !defined(USE_FUTEX)
++    int          tid_alert_kqueue;  /* owned alert kqueue FD+1, zero if absent */
++#endif
+     BOOL         allow_writes;      /* ThreadAllowWrites flags */
+     BOOL         suspend;           /* suspend on startup */
+     pthread_t    pthread_id;        /* pthread thread id */
+     void        *jmp_buf;           /* setjmp buffer for exception handling */
+@@ -271,8 +274,12 @@
+ extern void process_exit_wrapper( int status ) DECLSPEC_NORETURN;
+ extern size_t server_init_process(void);
+ extern void server_init_process_done(void);
+ extern void server_init_thread( struct thread_data *data );
++#if defined(__PROSPERO__) && defined(HAVE_KQUEUE) && !defined(USE_FUTEX)
++extern void ps5_init_thread_alert( struct thread_data *data );
++extern void ps5_free_thread_alert( struct thread_data *data );
++#endif
+ extern int server_pipe( int fd[2] );
+ 
+ extern void fpux_to_fpu( I386_FLOATING_SAVE_AREA *fpu, const XSAVE_FORMAT *fpux );
+ extern void fpu_to_fpux( XSAVE_FORMAT *fpux, const I386_FLOATING_SAVE_AREA *fpu );

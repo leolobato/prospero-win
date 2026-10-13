@@ -45,6 +45,9 @@ while [ $# -gt 0 ]; do
     shift
 done
 [ -x "$sdk/bin/prospero-clang" ] || fail "no PS5 payload SDK at $sdk"
+# Canonicalize before mapping __FILE__ in dependency diagnostics.
+mkdir -p "$work"
+work=$(CDPATH= cd -- "$work" && pwd)
 out=$work/root
 mkdir -p "$out/lib" "$work"
 fetch() {
@@ -57,7 +60,7 @@ fetch "$CA_BUNDLE_URL" "cacert-$CA_BUNDLE_DATE.pem" "$CA_BUNDLE_SHA256"
 [ -f "$out/lib/libm.a" ] || "$sdk/bin/llvm-ar" rcs "$out/lib/libm.a"
 export CC="$sdk/bin/prospero-clang" CXX="$sdk/bin/prospero-clang++" AR="$sdk/bin/llvm-ar" \
        RANLIB="$sdk/bin/llvm-ranlib" NM="$sdk/bin/llvm-nm" STRIP=true \
-       CFLAGS="-O2 -fPIC" LDFLAGS="-L$out/lib" \
+       CFLAGS="-O2 -fPIC -ffile-prefix-map=$work=/src/tls -fmacro-prefix-map=$work=/src/tls" LDFLAGS="-L$out/lib" \
        PKG_CONFIG_LIBDIR="$out/lib/pkgconfig" PKG_CONFIG_PATH="$out/lib/pkgconfig"
 host=x86_64-unknown-freebsd11
 if [ ! -f "$out/lib/libhogweed.a" ]; then
@@ -74,7 +77,9 @@ if [ ! -f "$out/lib/libgnutls.a" ]; then
     rm -rf "$work/gnutls-$GNUTLS_VERSION"
     tar -xJf "$work/gnutls-$GNUTLS_VERSION.tar.xz" -C "$work"
     (cd "$work/gnutls-$GNUTLS_VERSION" &&
-        ./configure --host=$host --prefix="$out" --disable-shared --enable-static \
+        # No host-local configuration is shipped; keep the absent optional
+        # config at a neutral path rather than the build installation root.
+        ./configure --host=$host --prefix="$out" --sysconfdir=/nonexistent --disable-shared --enable-static \
             --with-included-libtasn1 --with-included-unistring --without-p11-kit --without-idn \
             --without-tpm --without-tpm2 --without-zlib --without-brotli --without-zstd \
             --disable-doc --disable-tests --disable-tools --disable-cxx --disable-libdane \

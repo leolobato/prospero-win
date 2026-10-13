@@ -1,0 +1,178 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 12 Oct 2026 21:00:00 +0200
+Subject: [PATCH] rtworkq: Release cleanup groups with queues.
+
+Each queue owns one cleanup group shared by all priority environments.
+Release it after closing members and unwind initialized queues when the
+user queue handle table is exhausted. The common queue initializer owns
+critical-section initialization; do not allocate its debug state twice.
+
+---
+
+diff --git a/dlls/rtworkq/queue.c b/dlls/rtworkq/queue.c
+--- a/dlls/rtworkq/queue.c
++++ b/dlls/rtworkq/queue.c
+@@ -320,89 +320,89 @@
+         case RTWQ_CALLBACK_QUEUE_RT:
+         case RTWQ_CALLBACK_QUEUE_IO:
+         case RTWQ_CALLBACK_QUEUE_TIMER:
+         case RTWQ_CALLBACK_QUEUE_MULTITHREADED:
+         case RTWQ_CALLBACK_QUEUE_LONG_FUNCTION:
+             return &system_queues[queue_id - 1];
+     }
+ }
+ 
+ static HRESULT grab_queue(DWORD queue_id, struct queue **ret);
+ 
+ static void CALLBACK standard_queue_cleanup_callback(void *object_data, void *group_data)
+ {
+ }
+ 
+ static HRESULT pool_queue_init(const struct queue_desc *desc, struct queue *queue)
+ {
+     TP_CALLBACK_ENVIRON_V3 env;
+     unsigned int max_thread, i;
+ 
+     queue->pool = CreateThreadpool(NULL);
+ 
+     memset(&env, 0, sizeof(env));
+     env.Version = 3;
+     env.Size = sizeof(env);
+     env.Pool = queue->pool;
+     env.CleanupGroup = CreateThreadpoolCleanupGroup();
+     env.CleanupGroupCancelCallback = standard_queue_cleanup_callback;
+     env.CallbackPriority = TP_CALLBACK_PRIORITY_NORMAL;
+     for (i = 0; i < ARRAY_SIZE(queue->envs); ++i)
+     {
+         queue->envs[i] = env;
+         queue->envs[i].CallbackPriority = priorities[i];
+     }
+     list_init(&queue->pending_items);
+-    InitializeCriticalSection(&queue->cs);
+ 
+     max_thread = (desc->queue_type == RTWQ_STANDARD_WORKQUEUE || desc->queue_type == RTWQ_WINDOW_WORKQUEUE) ? 1 : 4;
+ 
+     SetThreadpoolThreadMinimum(queue->pool, 1);
+     SetThreadpoolThreadMaximum(queue->pool, max_thread);
+ 
+     if (desc->queue_type == RTWQ_WINDOW_WORKQUEUE)
+         FIXME("RTWQ_WINDOW_WORKQUEUE is not supported.\n");
+ 
+     return S_OK;
+ }
+ 
+ static BOOL pool_queue_shutdown(struct queue *queue)
+ {
+     if (!queue->pool)
+         return FALSE;
+ 
+     CloseThreadpoolCleanupGroupMembers(queue->envs[0].CleanupGroup, FALSE, NULL);
++    CloseThreadpoolCleanupGroup(queue->envs[0].CleanupGroup);
+     CloseThreadpool(queue->pool);
+     queue->pool = NULL;
+ 
+     return TRUE;
+ }
+ 
+ static void CALLBACK standard_queue_worker(TP_CALLBACK_INSTANCE *instance, void *context, TP_WORK *work)
+ {
+     struct work_item *item = context;
+     RTWQASYNCRESULT *result = (RTWQASYNCRESULT *)item->result;
+ 
+     TRACE("result object %p.\n", result);
+ 
+     /* Submitting from serial queue in reply mode, use different result object acting as receipt token.
+        It's submitted to user callback still, but when invoked, special serial queue callback will be used
+        to ensure correct destination queue. */
+ 
+     IRtwqAsyncCallback_Invoke(result->pCallback, item->reply_result ? item->reply_result : item->result);
+ 
+     IUnknown_Release(&item->IUnknown_iface);
+ }
+ 
+ static void pool_queue_submit(struct queue *queue, struct work_item *item)
+ {
+     TP_CALLBACK_PRIORITY callback_priority;
+     TP_CALLBACK_ENVIRON_V3 env;
+ 
+     if (item->priority == 0)
+         callback_priority = TP_CALLBACK_PRIORITY_NORMAL;
+     else if (item->priority < 0)
+         callback_priority = TP_CALLBACK_PRIORITY_LOW;
+     else
+         callback_priority = TP_CALLBACK_PRIORITY_HIGH;
+ 
+     env = queue->envs[callback_priority];
+@@ -956,70 +956,71 @@
+             IUnknown_Release(&item->IUnknown_iface);
+             return S_OK;
+         }
+     }
+     LeaveCriticalSection(&queue->cs);
+ 
+     return RTWQ_E_NOT_FOUND;
+ }
+ 
+ static HRESULT alloc_user_queue(const struct queue_desc *desc, DWORD *queue_id)
+ {
+     struct queue_handle *entry;
+     struct queue *queue;
+     unsigned int idx;
+ 
+     *queue_id = RTWQ_CALLBACK_QUEUE_UNDEFINED;
+ 
+     if (startup_count <= 0 || platform_lock <= 0)
+         return RTWQ_E_SHUTDOWN;
+ 
+     if (!(queue = calloc(1, sizeof(*queue))))
+         return E_OUTOFMEMORY;
+ 
+     init_work_queue(desc, queue);
+ 
+     EnterCriticalSection(&queues_section);
+ 
+     entry = next_free_user_queue;
+     if (entry)
+         next_free_user_queue = entry->obj;
+     else if (next_unused_user_queue < user_queues + MAX_USER_QUEUE_HANDLES)
+         entry = next_unused_user_queue++;
+     else
+     {
+         LeaveCriticalSection(&queues_section);
++        shutdown_queue(queue);
+         free(queue);
+         WARN("Out of user queue handles.\n");
+         return E_OUTOFMEMORY;
+     }
+ 
+     entry->refcount = 1;
+     entry->obj = queue;
+     if (++queue_generation == 0xffff) queue_generation = 1;
+     entry->generation = queue_generation;
+     idx = entry - user_queues + FIRST_USER_QUEUE_HANDLE;
+     *queue_id = (idx << 16) | entry->generation;
+ 
+     LeaveCriticalSection(&queues_section);
+ 
+     return S_OK;
+ }
+ 
+ struct async_result
+ {
+     RTWQASYNCRESULT result;
+     LONG refcount;
+     IUnknown *object;
+     IUnknown *state;
+     struct list entry;
+ };
+ 
+ static struct async_result *impl_from_IRtwqAsyncResult(IRtwqAsyncResult *iface)
+ {
+     return CONTAINING_RECORD(iface, struct async_result, result.AsyncResult);
+ }
+ 
+ static void free_async_result(struct async_result *result)
+ {
+     free(result);
+     RtwqUnlockPlatform();
