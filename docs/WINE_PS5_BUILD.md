@@ -127,6 +127,9 @@ before evaluating a candidate built from that cache.
 | 0958 | `ntdll`: `WINE_CPU_TOPOLOGY` (Proton's `<count>:<cpu>,...`) lowers `NumberOfProcessors` to its count, between 1 and the CPUs patch 0881 reports; the CPU list is not used. Playden's CPU cores setting writes it in a profile's `[environment]`, for games that fail or run worse with many cores. stderr says what was taken (`wine: WINE_CPU_TOPOLOGY=4:0,1,2,3, 4 of 13 processors`) |
 | 0959 | `vkd3d-shader`: fx_2_0 effects can assign a shader compiled in a pass (`VertexShader = compile vs_3_0 VS();`). The shader goes into the effect's resource table, where D3DX creates it. From the open vkd3d merge request 2145 (first patch only) |
 | 0960 | `vkd3d-shader`: fx_2_0 sampler parameters keep their `sampler_state` block (filters, address modes) and a state can name another parameter (`Texture = <tex>;`), stored the way native effects store them. Before 0959-0960, `D3DXCreateEffect` failed with `E_NOTIMPL` on such effects; DoDonPachi Resurrection then crashed on the missing effect. `wined3d` carries vkd3d-shader, so it is in `PE_MODULES` |
+| 0961 | `vkd3d-shader`: fx_2_0 states take `TRUE` and `FALSE` even when they have no list of named values (`AlphaBlendEnable = FALSE;`). Before, such effects failed with `E_NOTIMPL`, and Star Wars: Empire at War then crashed in the effect writer |
+| 0962 | `vkd3d-shader`: an fx_2_0 shader or texture state set to `NULL` (`PixelShader = NULL;`) is written as an object of that type with no data, which D3DX loads as NULL. Before, it was an integer state that D3DX would read as a pointer |
+| 0963 | `vkd3d-shader`: effects compile `compile ps_1_x` pass shaders as ps_2_0, because the shader model 1 pixel shader writer cannot sample textures |
 
 ## Allocator
 

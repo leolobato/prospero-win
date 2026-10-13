@@ -578,6 +578,9 @@ wine/patches/0957-kernelbase-fall-back-to-the-stored-computer-name.patch
 wine/patches/0958-ntdll-honor-wine-cpu-topology-s-processor-count.patch
 wine/patches/0959-vkd3d-shader-fx-implement-pass-assignment-for-fx-2-0.patch
 wine/patches/0960-vkd3d-shader-fx-write-sampler-state-initializers-for-fx-2-0.patch
+wine/patches/0961-vkd3d-shader-fx-accept-true-and-false-for-any-fx-2-0-state.patch
+wine/patches/0962-vkd3d-shader-fx-write-null-shader-and-texture-states-for-fx-2-0.patch
+wine/patches/0963-vkd3d-shader-hlsl-compile-ps-1-x-effect-shaders-as-ps-2-0.patch
 
 # Playden fork (feat/playden-ps5) only: lets `make all` audit this branch.
 # Not a decision to publish these upstream; see Playden Gitea #79.
