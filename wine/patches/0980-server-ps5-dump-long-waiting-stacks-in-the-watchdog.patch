@@ -15,9 +15,9 @@ PW_WAIT_WATCHDOG turns the watchdog and the slow-operation log (patch
 line, which takes PW_ names only, can enable them for one game.
 ---
  dlls/ntdll/unix/server.c |   2 +-
- server/thread.c          | 102 ++++++++++++++++++++++++---------------
+ server/thread.c          | 103 ++++++++++++++++++++++++---------------
  server/thread.h          |   1 +
- 3 files changed, 65 insertions(+), 40 deletions(-)
+ 3 files changed, 66 insertions(+), 40 deletions(-)
 
 diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
 index a5f24e3..3a3c4a6 100644
@@ -33,10 +33,18 @@ index a5f24e3..3a3c4a6 100644
                                (void *)server_call_unlocked );
      }
 diff --git a/server/thread.c b/server/thread.c
-index d23a29d..ef0397a 100644
+index d23a29d..d1c1b52 100644
 --- a/server/thread.c
 +++ b/server/thread.c
-@@ -1126,12 +1126,65 @@ extern void dump_process_asyncs( struct process *process );
+@@ -416,6 +416,7 @@ static inline void init_thread_structure( struct thread *thread )
+     thread->reply_fd        = NULL;
+     thread->wait_fd         = NULL;
+     thread->state           = RUNNING;
++    thread->ps5_dumped_wait = 0;
+ #ifdef WINE_INPROCESS_SERVER
+     thread->ps5_mutex_token = 0;
+ #endif
+@@ -1126,12 +1127,65 @@ extern void dump_process_asyncs( struct process *process );
  
  /* Copy bytes of this process's memory if they can be read: write() reports
   * EFAULT for an unreadable source instead of faulting. */
@@ -103,7 +111,7 @@ index d23a29d..ef0397a 100644
  static void wait_watchdog( void *arg )
  {
      struct thread *thread;
-@@ -1148,44 +1201,15 @@ static void wait_watchdog( void *arg )
+@@ -1148,44 +1202,15 @@ static void wait_watchdog( void *arg )
           * from the WoW64 CPU area (TEB64 TlsSlots[WOW64_TLS_CPURESERVED]).
           * The server runs in the game's process, so it can read it. */
          if (!thread->wait && thread->teb && monotonic_time - thread->ps5_last_req_time > TICKS_PER_SEC)
@@ -156,7 +164,7 @@ index d23a29d..ef0397a 100644
          }
      }
      {
-@@ -1221,7 +1245,7 @@ static void start_wait_watchdog(void)
+@@ -1221,7 +1246,7 @@ static void start_wait_watchdog(void)
  
      if (started) return;
      started = 1;
