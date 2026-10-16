@@ -25,7 +25,8 @@
 # export descriptor, then converted and signed with ps5-native-tool into
 # <work>/prx/sce_module. Both are measured in <work>/report.json. Module
 # conversion needs a foundation with module export publishing and name-form
-# export hashes (its branch exp/prx-module, MODULE_EXPORTS_COMMIT); the
+# export hashes (its branch exp/prx-module, or that branch rebased onto the
+# foundation's main: MODULE_EXPORTS_COMMITS); the
 # title's pinned foundation predates it, so --prx-foundation names that checkout, and without it the
 # PRX link is skipped and says why.
 #
@@ -59,7 +60,10 @@
 set -eu
 
 WINE_COMMIT=490f6d5dcbb2a5047345b8af88d114bbcaad69a8
-MODULE_EXPORTS_COMMIT=30597512539e7edfde079cbcaf4a626bc0a948c5
+# The name-form export hash: exp/prx-module's merge, and the same change
+# rebased onto the foundation's main (it converts every module byte for byte
+# the same). Either one must be in the foundation's history.
+MODULE_EXPORTS_COMMITS="30597512539e7edfde079cbcaf4a626bc0a948c5 e879c08a408ac17186b4736d86f67bcc1aa9dab8"
 # FreeType draws Wine's text. It is built from a pinned release with the
 # payload SDK and linked into libfreetype.prx, which Wine's own
 # dlopen("libfreetype.so") loads through pw_wine_dl, next to ntdll.prx.
@@ -340,10 +344,13 @@ rm -rf "$prx"
 mkdir -p "$prx/obj" "$prx/sce_module"
 if [ ! -x "$tool" ] || [ ! -f "$pie" ]; then
     prx_status="skipped: no built ps5-native-tool in $prx_foundation"
-elif ! git -C "$prx_foundation" merge-base --is-ancestor "$MODULE_EXPORTS_COMMIT" HEAD 2>/dev/null; then
-    prx_status="skipped: $prx_foundation lacks module exports ($MODULE_EXPORTS_COMMIT)"
 else
-    prx_status=0
+    prx_status="skipped: $prx_foundation lacks module exports ($MODULE_EXPORTS_COMMITS)"
+    for commit in $MODULE_EXPORTS_COMMITS; do
+        if git -C "$prx_foundation" merge-base --is-ancestor "$commit" HEAD 2>/dev/null; then
+            prx_status=0
+        fi
+    done
 fi
 # The revisions behind the PRXs, for the release's SOURCES.txt
 # (tools/package_release.sh): report.json's "sources".

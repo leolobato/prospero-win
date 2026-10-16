@@ -74,9 +74,55 @@ make() {
         assert not (work / 'pe/i386-windows/winevulkan.dll').exists()
 
 
+def check_prx_foundation_gate() -> None:
+    # Execute the real PRX gate against a scratch foundation repository. Any
+    # commit of MODULE_EXPORTS_COMMITS in its history enables the link (the
+    # exp/prx-module merge or the same change rebased onto main); none skips it.
+    text = SCRIPT.read_text()
+    commits = re.search(r'^MODULE_EXPORTS_COMMITS="([0-9a-f ]+)"$', text, re.M).group(1).split()
+    assert len(commits) >= 2 and all(len(commit) == 40 for commit in commits)
+    start = text.index('if [ ! -x "$tool" ] || [ ! -f "$pie" ]; then')
+    block = text[start:text.index('\nfi\n', start) + 4]
+    with tempfile.TemporaryDirectory() as directory:
+        foundation = Path(directory)
+        tool, pie = foundation / 'ps5-native-tool', foundation / 'ps5-pie.ld'
+        tool.write_text('#!/bin/sh\n'); tool.chmod(0o755); pie.write_text('')
+        env = {key: value for key, value in os.environ.items()
+               if key not in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
+                              'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CEILING_DIRECTORIES')}
+        env.update(GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t', GIT_COMMITTER_NAME='t',
+                   GIT_COMMITTER_EMAIL='t@t', GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+        def git(*args: str) -> str:
+            return subprocess.run(['git', '-C', str(foundation), *args], env=env, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        git('init', '-q')
+        git('commit', '-q', '--allow-empty', '-m', 'base')
+        base = git('rev-parse', 'HEAD')
+        git('checkout', '-q', '-b', 'side')
+        git('commit', '-q', '--allow-empty', '-m', 'side')
+        side = git('rev-parse', 'HEAD')
+        git('checkout', '-q', '-')
+        git('commit', '-q', '--allow-empty', '-m', 'head')
+        def gate(listed: str) -> str:
+            script = (f'set -eu\nprx_foundation={foundation}\ntool={tool}\npie={pie}\n'
+                      f'MODULE_EXPORTS_COMMITS="{listed}"\n{block}\nprintf "%s" "$prx_status"\n')
+            result = subprocess.run(['sh'], input=script, env=env, capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            return result.stdout
+        missing = '0123456789abcdef' * 2 + '01234567'  # not an object in the repository
+        assert gate(f'{side} {base}') == '0'
+        assert gate(f'{base} {side}') == '0'
+        assert gate(f'{missing} {base}') == '0' and gate(f'{base} {missing}') == '0'
+        assert gate(missing).startswith('skipped:')
+        assert gate(side).startswith('skipped:') and 'lacks module exports' in gate(side)
+        tool.unlink()
+        assert gate(base).startswith('skipped: no built ps5-native-tool')
+
+
 def main() -> int:
     check_vk_runtime_staging()
     check_patched_pe_staging()
+    check_prx_foundation_gate()
     # The committed series itself.
     result = subprocess.run(["sh", str(SCRIPT), "--check-patches"], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
