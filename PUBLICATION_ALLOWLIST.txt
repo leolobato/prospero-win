@@ -732,3 +732,4 @@ wine/patches/0482-rtworkq-cleanup-groups.patch
 wine/patches/0964-ntdll-ps5-retire-thread-alert-kqueues.patch
 tests/test_wine_alert_kqueue.py
 wine/patches/0981-win32u-register-builtin-classes-without-waiting.patch
+wine/patches/0980-server-ps5-dump-long-waiting-stacks-in-the-watchdog.patch
