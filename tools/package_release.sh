@@ -116,7 +116,7 @@ for arch in i386-windows x86_64-windows; do
         esac
         cp "$file" "$lib/$arch/$name"
     done
-    # The PE modules the PS5 patches change (the xinput DLLs).
+    # The PE modules the PS5 patches change (PE_MODULES in build_wine_ps5.sh).
     if [ -d "$wine_ps5/pe/$arch" ]; then cp "$wine_ps5/pe/$arch"/*.dll "$lib/$arch/"; fi
 done
 cp "$cpu_dll" "$lib/x86_64-windows/wowprospero.dll"

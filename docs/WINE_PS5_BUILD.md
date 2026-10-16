@@ -22,7 +22,7 @@ FreeBSD headers, so Wine selects its FreeBSD paths (kqueue instead of epoll,
 sysctl), and `__PROSPERO__` selects the PS5 patches. PE modules come from
 the host build that `tools/build_wine_runtime.sh` produces, which also
 supplies winebuild and widl. The exception is the few PE modules a patch
-changes (`PE_MODULES`, today the xinput DLLs), which are built from the
+changes (`PE_MODULES` in `tools/build_wine_ps5.sh`), which are built from the
 patched tree for i386 and x86_64 into `.deps/wine-ps5/pe`. That needs both
 MinGW cross compilers.
 
@@ -122,6 +122,7 @@ before evaluating a candidate built from that cache.
 | 0899 | `include`: list the PS5 sync headers (0810, 0820, 0885, 0887) in `include/Makefile.in`, which makedep needs to resolve them; configure failed without it |
 | 0902 | `win32u`: the PS5 driver sends the arrows, Insert, Delete, Home, End, Page Up, Page Down, right Ctrl and Alt, the Windows and menu keys and keypad `/` with `KEYEVENTF_EXTENDEDKEY`; their scan codes are the keypad's without it, so DirectInput reported the keypad's 8 for the up arrow and a game's arrow-key bindings never fired |
 | 0903 | `ntdll`: a signal frame keeps the FS base it was taken with when the thread resumes where it was; the host's is set only where the handler sends a context to Wine's 64-bit code (the exception dispatcher, a different 64-bit context). The native WoW64 CPU sets the guest FS just before it switches to 32-bit code, and a signal in that window used to send the thread into its 32-bit code with the host FS (GTA San Andreas' DXVK workers crashing at startup in `RtlEnterCriticalSection`) |
+| 0971 | `kernelbase`: in a PS5 title (`WINE_PS5_NTDLL_DIR` set, read at DLL attach), `UnhandledExceptionFilter` calls the game's own filter, logs `wine: Unhandled ... (thread N), no debugger, ending the process` and returns `EXCEPTION_EXECUTE_HANDLER`, so the process ends through patch 0896. winedbg can never start in a title (0550), and `start_debugger`'s heap allocations before `CreateProcessW` waited forever when another game thread held the process heap lock (Call of Juarez Gunslinger froze) |
 
 ## Allocator
 
