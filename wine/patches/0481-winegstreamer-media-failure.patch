@@ -175,7 +175,57 @@ diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
  
  #include <gst/gst.h>
  #include <gst/video/video.h>
-@@ -263,7 +265,7 @@
+@@ -226,13 +228,29 @@
+     return S_OK;
+ }
+ 
++static GstCaps *stream_get_current_caps(struct wg_parser_stream *stream)
++{
++    GstCaps *caps;
++
++    /* a CAPS event can replace and free them on the streaming thread */
++    pthread_mutex_lock(&stream->parser->mutex);
++    if ((caps = stream->current_caps))
++        gst_caps_ref(caps);
++    pthread_mutex_unlock(&stream->parser->mutex);
++    return caps;
++}
++
+ static NTSTATUS wg_parser_stream_get_current_format(void *args)
+ {
+     const struct wg_parser_stream_get_current_format_params *params = args;
+     struct wg_parser_stream *stream = get_stream(params->stream);
++    GstCaps *caps;
+ 
+-    if (stream->current_caps)
+-        wg_format_from_caps(params->format, stream->current_caps);
++    if ((caps = stream_get_current_caps(stream)))
++    {
++        wg_format_from_caps(params->format, caps);
++        gst_caps_unref(caps);
++    }
+     else
+         memset(params->format, 0, sizeof(*params->format));
+ 
+@@ -243,11 +261,15 @@
+ {
+     struct wg_parser_stream_get_codec_format_params *params = args;
+     struct wg_parser_stream *stream = get_stream(params->stream);
++    GstCaps *caps;
+ 
+     if (caps_is_compressed(stream->codec_caps))
+         wg_format_from_caps(params->format, stream->codec_caps);
+-    else if (stream->current_caps)
+-        wg_format_from_caps(params->format, stream->current_caps);
++    else if ((caps = stream_get_current_caps(stream)))
++    {
++        wg_format_from_caps(params->format, caps);
++        gst_caps_unref(caps);
++    }
+     else
+         memset(params->format, 0, sizeof(*params->format));
+ 
+@@ -263,7 +285,7 @@
  
      pthread_mutex_lock(&parser->mutex);
  
@@ -184,7 +234,7 @@ diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
      stream->enabled = true;
  
      pthread_mutex_unlock(&parser->mutex);
-@@ -286,11 +288,7 @@
+@@ -286,11 +308,7 @@
  
      pthread_mutex_lock(&parser->mutex);
      stream->enabled = false;
@@ -197,7 +247,7 @@ diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
      pthread_mutex_unlock(&parser->mutex);
      pthread_cond_signal(&stream->event_empty_cond);
      return S_OK;
-@@ -594,6 +592,7 @@
+@@ -594,6 +612,7 @@
  
          GST_INFO("Result %"GST_PTR_FORMAT, result);
          gst_query_set_caps_result(query, result);
@@ -205,7 +255,7 @@ diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
  
          return TRUE;
      }
-@@ -703,7 +702,7 @@
+@@ -703,7 +722,7 @@
  
              gst_event_parse_caps(event, &caps);
              pthread_mutex_lock(&parser->mutex);
@@ -214,7 +264,7 @@ diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
              pthread_mutex_unlock(&parser->mutex);
              pthread_cond_signal(&parser->init_cond);
              break;
-@@ -932,8 +931,8 @@
+@@ -932,8 +951,8 @@
  
      if (stream->codec_caps)
          gst_caps_unref(stream->codec_caps);
@@ -225,7 +275,7 @@ diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
  
      free(stream);
  }
-@@ -1658,6 +1657,10 @@
+@@ -1658,6 +1677,10 @@
      const WCHAR *uri = params->uri;
      unsigned int i;
      int ret;
@@ -236,7 +286,7 @@ diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
  
      parser->file_size = params->file_size;
      parser->sink_connected = true;
-@@ -1695,8 +1698,8 @@
+@@ -1695,8 +1718,8 @@
          goto out;
  
      gst_element_set_state(parser->container, GST_STATE_PAUSED);
@@ -247,7 +297,7 @@ diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
      {
          GST_ERROR("Failed to play stream.");
          goto out;
-@@ -1705,7 +1708,8 @@
+@@ -1705,7 +1728,8 @@
      pthread_mutex_lock(&parser->mutex);
  
      while (!parser_no_more_pads(parser) && !parser->error)
@@ -257,7 +307,7 @@ diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
      if (parser->error)
      {
          pthread_mutex_unlock(&parser->mutex);
-@@ -1719,7 +1723,8 @@
+@@ -1719,7 +1743,8 @@
  
          /* Make sure the stream has a buffer or an initial gap. */
          while (!parser->error && !stream->has_buffer && !stream->has_initial_gap)
@@ -267,7 +317,7 @@ diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
  
          /* GStreamer doesn't actually provide any guarantees about when duration
           * is available, even for seekable streams. It's basically built for
-@@ -1747,6 +1752,9 @@
+@@ -1747,6 +1772,9 @@
  
          for (;;)
          {
@@ -277,7 +327,7 @@ diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
              if (parser->error)
              {
                  pthread_mutex_unlock(&parser->mutex);
-@@ -1778,7 +1786,8 @@
+@@ -1778,7 +1806,8 @@
              }
              else
              {
@@ -287,7 +337,7 @@ diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
              }
          }
  
-@@ -1827,6 +1836,17 @@
+@@ -1827,6 +1856,17 @@
      return E_FAIL;
  }
  
@@ -305,7 +355,7 @@ diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
  static NTSTATUS wg_parser_disconnect(void *args)
  {
      struct wg_parser *parser = get_parser(*(wg_parser_t *)args);
-@@ -1866,11 +1886,7 @@
+@@ -1866,11 +1906,7 @@
      g_free(parser->sink_caps);
      parser->sink_caps = NULL;
  
@@ -318,7 +368,7 @@ diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
  
      return S_OK;
  }
-@@ -1941,6 +1957,8 @@
+@@ -1941,6 +1977,8 @@
      pthread_cond_destroy(&parser->read_cond);
      pthread_cond_destroy(&parser->read_done_cond);
  
