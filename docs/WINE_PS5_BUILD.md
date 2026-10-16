@@ -131,6 +131,7 @@ before evaluating a candidate built from that cache.
 | 0962 | `vkd3d-shader`: an fx_2_0 shader or texture state set to `NULL` (`PixelShader = NULL;`) is written as an object of that type with no data, which D3DX loads as NULL. Before, it was an integer state that D3DX would read as a pointer |
 | 0963 | `vkd3d-shader`: effects compile `compile ps_1_x` pass shaders as ps_2_0, because the shader model 1 pixel shader writer cannot sample textures |
 | 0965 | `win32u`: setting a pixel format on the desktop window no longer posts `WM_WINE_SETPIXELFORMAT` to it. Nothing owns the server-created desktop on the PS5, so the message came back to the game's own queue and posted itself again forever. `vkCreateWin32SurfaceKHR` sets format -1 on every surface's window, so a Vulkan surface on the desktop (DXVK or Zink) kept the game on a black screen with one core busy (Syndicate, leolobato/playden-ps5#56) |
+| 0970 | `ntdll`: `NtQueryInformationProcess` traces each information class only the first time it is queried. The title's default `+process` then still shows process creation and exit, but a game that polls a class every frame no longer fills the log: Call of Juarez Gunslinger's `ProcessAffinityMask` line, 60 times a second, pushed the `+loaddll` lines out of both 1 MB segments |
 
 ## Allocator
 
