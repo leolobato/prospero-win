@@ -566,3 +566,4 @@ wine/patches/0878-crypt32-ps5-root-certificates-beside-the-runtime.patch
 wine/ps5/pw_gnutls_libc.c
 wine/patches/0877-secur32-log-gnutls-errors-and-the-clock-on-handshake-failure.patch
 tests/test_build_tls_ps5.py
+wine/patches/0972-faudio-keep-resampling-taps-within-the-samples.patch

@@ -26,7 +26,8 @@ def check_patched_pe_staging() -> None:
     # both architecture targets, emitted bytes, stale staging cleanup and errors
     # without requiring the SDK/full Wine rebuild for this focused contract.
     text = SCRIPT.read_text()
-    modules = re.search(r'^PE_MODULES="([^"\n]+)"', text, re.M).group(1)
+    # Every assignment, in order: later lines append to the list.
+    modules = ''.join(re.findall(r'^PE_MODULES="[^"\n]+"\n', text, re.M))
     block = text.split('# The patched PE modules,', 1)[1].split('# The PRX link.', 1)[0]
     block = block[block.index('rm -rf'):]
     with tempfile.TemporaryDirectory() as directory:
@@ -50,7 +51,7 @@ make() {
     printf 'MZfresh:%s' "$target" > "$build/$target"
 }
 """
-        script = setup + 'PE_MODULES="' + modules + '"\n' + block + '\nprintf "%s" "$status" > "$work/status"\n'
+        script = setup + modules + block + '\nprintf "%s" "$status" > "$work/status"\n'
         result = subprocess.run(['sh'], input=script, env=env, capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
         assert not stale.exists()
@@ -60,7 +61,7 @@ make() {
             assert requests.count(target) == 1
             assert (work / f'pe/{arch}-windows/winevulkan.dll').read_bytes() == ('MZfresh:' + target).encode()
         for arch in ('i386', 'x86_64'):
-            for module in ('ntdll', 'win32u'):
+            for module in ('ntdll', 'win32u', 'xaudio2_7', 'xactengine3_7'):
                 assert requests.count(f'dlls/{module}/{arch}-windows/{module}.dll') == 1
         assert requests.count('dlls/wow64/x86_64-windows/wow64.dll') == 1
         assert 'dlls/wow64/i386-windows/wow64.dll' not in requests
