@@ -102,7 +102,8 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # A module with no extension is a .dll. wow64win (x86_64 only): a 32-bit
 # game's hidclass sends hardware input through it (patch 0955). gdi32: a
 # window keeps its pixel format with a native opengl32 (patch 0956).
-# kernelbase: the computer name without wineboot's volatile key (patch 0957).
+# kernelbase: the computer name without wineboot's volatile key (patch 0957),
+# and no debugger start in a title (0971).
 # wined3d: it carries vkd3d-shader, which d3dcompiler uses to compile D3DX
 # effects with samplers and in-pass shaders (patches 0959-0963).
 PE_MODULES="ntdll win32u rtworkq xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan ntoskrnl.exe winebus.sys setupapi gdi32 kernelbase wined3d"

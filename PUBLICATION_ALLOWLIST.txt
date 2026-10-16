@@ -667,3 +667,4 @@ wine/patches/0964-ntdll-ps5-retire-thread-alert-kqueues.patch
 tests/test_wine_alert_kqueue.py
 wine/patches/0965-win32u-ps5-no-pixel-format-message-loop-on-the-desktop.patch
 wine/patches/0970-ntdll-ps5-trace-each-process-query-class-once.patch
+wine/patches/0971-kernelbase-ps5-no-debugger-in-a-title.patch
