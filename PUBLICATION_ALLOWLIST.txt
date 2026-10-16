@@ -668,4 +668,5 @@ tests/test_wine_alert_kqueue.py
 wine/patches/0965-win32u-ps5-no-pixel-format-message-loop-on-the-desktop.patch
 wine/patches/0970-ntdll-ps5-trace-each-process-query-class-once.patch
 wine/patches/0971-kernelbase-ps5-no-debugger-in-a-title.patch
+wine/patches/0972-faudio-keep-resampling-taps-within-the-samples.patch
 wine/patches/0981-win32u-register-builtin-classes-without-waiting.patch
