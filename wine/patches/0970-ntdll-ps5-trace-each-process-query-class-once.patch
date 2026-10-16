@@ -9,7 +9,10 @@ for ProcessAffinityMask every frame (Call of Juarez Gunslinger, 60 times
 a second) filled both 1 MB title log segments with that one line, so the
 +loaddll lines that place a crash address were gone.
 
-Each class is now traced the first time it is queried.
+Each class below 128, which covers every class Windows defines, is now
+traced the first time it is queried. Wine's own classes above that keep
+a line per call; the PS5 clock anchor (ProcessWineQpcAnchor) is queried
+only when its anchor runs out.
 ---
  dlls/ntdll/unix/process.c | 19 +++++++++++++++++++
  1 file changed, 19 insertions(+)
