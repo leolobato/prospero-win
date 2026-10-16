@@ -14,10 +14,10 @@ PW_WAIT_WATCHDOG turns the watchdog and the slow-operation log (patch
 0690) on as WINE_PS5_WAIT_WATCHDOG does, so a game profile's [debug] env
 line, which takes PW_ names only, can enable them for one game.
 ---
- dlls/ntdll/unix/server.c |  2 +-
- server/thread.c          | 95 ++++++++++++++++++++++++----------------
- server/thread.h          |  1 +
- 3 files changed, 59 insertions(+), 39 deletions(-)
+ dlls/ntdll/unix/server.c |   2 +-
+ server/thread.c          | 102 ++++++++++++++++++++++++---------------
+ server/thread.h          |   1 +
+ 3 files changed, 65 insertions(+), 40 deletions(-)
 
 diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
 index a5f24e3..3a3c4a6 100644
@@ -33,10 +33,17 @@ index a5f24e3..3a3c4a6 100644
                                (void *)server_call_unlocked );
      }
 diff --git a/server/thread.c b/server/thread.c
-index d23a29d..4b5e002 100644
+index d23a29d..ef0397a 100644
 --- a/server/thread.c
 +++ b/server/thread.c
-@@ -1132,6 +1132,54 @@ static int ps5_peek( int probe[2], unsigned int address, void *out, size_t size
+@@ -1126,12 +1126,65 @@ extern void dump_process_asyncs( struct process *process );
+ 
+ /* Copy bytes of this process's memory if they can be read: write() reports
+  * EFAULT for an unreadable source instead of faulting. */
+-static int ps5_peek( int probe[2], unsigned int address, void *out, size_t size )
++static int ps5_peek( int probe[2], client_ptr_t address, void *out, size_t size )
+ {
+     if (write( probe[1], (const void *)(ULONG_PTR)address, size ) != (ssize_t)size) return 0;
      return read( probe[0], out, size ) == (ssize_t)size;
  }
  
@@ -44,21 +51,26 @@ index d23a29d..4b5e002 100644
 + * first words of its stack, then the critical sections among the first
 + * scan words (a pointer whose DebugInfo points back at it). Memory is read
 + * only after write() to a pipe accepts it, so a bad pointer is skipped,
-+ * not a crash. */
++ * not a crash. Only a WoW64 process reserves the CPU area's TLS slot: a
++ * 64-bit one can allocate it and keep anything there. */
 +static void dump_guest_stack( struct thread *thread, int words, int scan )
 +{
 +    static int probe[2] = { -1, -1 };
-+    const unsigned char *cpu = *(unsigned char * const *)(ULONG_PTR)(thread->teb + 0x1480 + 8);
-+    const unsigned char *context;
++    unsigned char cpu[4 + 0xc8];  /* WOW64_CPURESERVED header, i386 CONTEXT up to Esp */
++    client_ptr_t cpu_ptr = 0;
 +    unsigned int eip, esp, ebp, seen[32], nseen = 0, k, word;
 +    int i;
 +
-+    if (!cpu || *(const unsigned short *)(cpu + 2) != 0x14c /* IMAGE_FILE_MACHINE_I386 */) return;
++    if (!is_wow64_process( thread->process )) return;
 +    if (probe[0] == -1 && pipe( probe )) probe[0] = probe[1] = -1;
-+    context = cpu + 4;
-+    eip = *(const unsigned int *)(context + 0xb8);
-+    esp = *(const unsigned int *)(context + 0xc4);
-+    ebp = *(const unsigned int *)(context + 0xb4);
++    if (probe[1] == -1) return;
++    /* TEB64 TlsSlots[WOW64_TLS_CPURESERVED] */
++    if (!ps5_peek( probe, thread->teb + 0x1480 + 8, &cpu_ptr, sizeof(cpu_ptr) ) || !cpu_ptr) return;
++    if (!ps5_peek( probe, cpu_ptr, cpu, sizeof(cpu) )) return;
++    if (*(const unsigned short *)(cpu + 2) != 0x14c /* IMAGE_FILE_MACHINE_I386 */) return;
++    memcpy( &eip, cpu + 4 + 0xb8, sizeof(eip) );
++    memcpy( &esp, cpu + 4 + 0xc4, sizeof(esp) );
++    memcpy( &ebp, cpu + 4 + 0xb4, sizeof(ebp) );
 +    fprintf( stderr, "wine-ps5: guest tid=%04x eip=%08x esp=%08x ebp=%08x:", thread->id, eip, esp, ebp );
 +    for (i = 0; esp && probe[1] != -1 && i < words; i++)
 +    {
@@ -91,7 +103,7 @@ index d23a29d..4b5e002 100644
  static void wait_watchdog( void *arg )
  {
      struct thread *thread;
-@@ -1148,44 +1196,15 @@ static void wait_watchdog( void *arg )
+@@ -1148,44 +1201,15 @@ static void wait_watchdog( void *arg )
           * from the WoW64 CPU area (TEB64 TlsSlots[WOW64_TLS_CPURESERVED]).
           * The server runs in the game's process, so it can read it. */
          if (!thread->wait && thread->teb && monotonic_time - thread->ps5_last_req_time > TICKS_PER_SEC)
@@ -144,7 +156,7 @@ index d23a29d..4b5e002 100644
          }
      }
      {
-@@ -1221,7 +1240,7 @@ static void start_wait_watchdog(void)
+@@ -1221,7 +1245,7 @@ static void start_wait_watchdog(void)
  
      if (started) return;
      started = 1;
