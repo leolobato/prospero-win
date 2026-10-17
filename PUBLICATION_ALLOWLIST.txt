@@ -671,3 +671,4 @@ wine/patches/0971-kernelbase-ps5-no-debugger-in-a-title.patch
 wine/patches/0972-faudio-keep-resampling-taps-within-the-samples.patch
 wine/patches/0981-win32u-register-builtin-classes-without-waiting.patch
 wine/patches/0980-server-ps5-dump-long-waiting-stacks-in-the-watchdog.patch
+wine/patches/0982-ntdll-ps5-high-area-as-large-as-the-kernel-grants.patch
