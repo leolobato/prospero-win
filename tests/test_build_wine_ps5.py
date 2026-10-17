@@ -4,6 +4,7 @@
 from __future__ import annotations
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 from pathlib import Path
@@ -26,7 +27,8 @@ def check_patched_pe_staging() -> None:
     # both architecture targets, emitted bytes, stale staging cleanup and errors
     # without requiring the SDK/full Wine rebuild for this focused contract.
     text = SCRIPT.read_text()
-    modules = re.search(r'^PE_MODULES="([^"\n]+)"', text, re.M).group(1)
+    # Every assignment, in order: later lines append to the list.
+    modules = ''.join(re.findall(r'^PE_MODULES="[^"\n]+"\n', text, re.M))
     block = text.split('# The patched PE modules,', 1)[1].split('# The PRX link.', 1)[0]
     block = block[block.index('rm -rf'):]
     with tempfile.TemporaryDirectory() as directory:
@@ -50,7 +52,7 @@ make() {
     printf 'MZfresh:%s' "$target" > "$build/$target"
 }
 """
-        script = setup + 'PE_MODULES="' + modules + '"\n' + block + '\nprintf "%s" "$status" > "$work/status"\n'
+        script = setup + modules + block + '\nprintf "%s" "$status" > "$work/status"\n'
         result = subprocess.run(['sh'], input=script, env=env, capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
         assert not stale.exists()
@@ -60,7 +62,7 @@ make() {
             assert requests.count(target) == 1
             assert (work / f'pe/{arch}-windows/winevulkan.dll').read_bytes() == ('MZfresh:' + target).encode()
         for arch in ('i386', 'x86_64'):
-            for module in ('ntdll', 'win32u'):
+            for module in ('ntdll', 'win32u', 'xaudio2_7', 'xactengine3_7'):
                 assert requests.count(f'dlls/{module}/{arch}-windows/{module}.dll') == 1
         assert requests.count('dlls/wow64/x86_64-windows/wow64.dll') == 1
         assert 'dlls/wow64/i386-windows/wow64.dll' not in requests
@@ -74,9 +76,56 @@ make() {
         assert not (work / 'pe/i386-windows/winevulkan.dll').exists()
 
 
+def check_prx_foundation_gate() -> None:
+    # Execute the real PRX gate against a scratch foundation repository. Any
+    # commit of MODULE_EXPORTS_COMMITS in its history enables the link (the
+    # exp/prx-module merge or the same change rebased onto main); none skips it.
+    text = SCRIPT.read_text()
+    commits = re.search(r'^MODULE_EXPORTS_COMMITS="([0-9a-f ]+)"$', text, re.M).group(1).split()
+    assert len(commits) >= 2 and all(len(commit) == 40 for commit in commits)
+    start = text.index('if [ ! -x "$tool" ] || [ ! -f "$pie" ]; then')
+    block = text[start:text.index('\nfi\n', start) + 4]
+    with tempfile.TemporaryDirectory() as directory:
+        foundation = Path(directory)
+        tool, pie = foundation / 'ps5-native-tool', foundation / 'ps5-pie.ld'
+        tool.write_text('#!/bin/sh\n'); tool.chmod(0o755); pie.write_text('')
+        env = {key: value for key, value in os.environ.items()
+               if key not in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
+                              'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CEILING_DIRECTORIES')}
+        env.update(GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t', GIT_COMMITTER_NAME='t',
+                   GIT_COMMITTER_EMAIL='t@t', GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+        def git(*args: str) -> str:
+            return subprocess.run(['git', '-C', str(foundation), *args], env=env, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        git('init', '-q')
+        git('commit', '-q', '--allow-empty', '-m', 'base')
+        base = git('rev-parse', 'HEAD')
+        git('checkout', '-q', '-b', 'side')
+        git('commit', '-q', '--allow-empty', '-m', 'side')
+        side = git('rev-parse', 'HEAD')
+        git('checkout', '-q', '-')
+        git('commit', '-q', '--allow-empty', '-m', 'head')
+        def gate(listed: str) -> str:
+            script = (f'set -eu\nprx_foundation={foundation}\ntool={tool}\npie={pie}\n'
+                      f'MODULE_EXPORTS_COMMITS="{listed}"\n{block}\nprintf "%s" "$prx_status"\n')
+            result = subprocess.run(['sh'], input=script, env=env, capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            return result.stdout
+        missing = '0123456789abcdef' * 2 + '01234567'  # not an object in the repository
+        assert gate(f'{side} {base}') == '0'
+        assert gate(f'{base} {side}') == '0'
+        assert gate(f'{missing} {base}') == '0' and gate(f'{base} {missing}') == '0'
+        assert gate(missing).startswith('skipped:')
+        assert gate(side).startswith('skipped:') and 'lacks module exports' in gate(side)
+        tool.unlink()
+        assert gate(base).startswith('skipped: no built ps5-native-tool')
+
+
 def main() -> int:
+    check_memory_status()
     check_vk_runtime_staging()
     check_patched_pe_staging()
+    check_prx_foundation_gate()
     # The committed series itself.
     result = subprocess.run(["sh", str(SCRIPT), "--check-patches"], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
@@ -110,6 +159,117 @@ def main() -> int:
         assert "WINE_COMMIT=490f6d5dcbb2a5047345b8af88d114bbcaad69a8" in (ROOT / "tools" / tool).read_text()
     print(f"wine ps5 patch series passed: {len(listed)} patch(es)")
     return 0
+
+
+def check_memory_status() -> None:
+    """Run the patched Wine queries and its Windows field conversion, if sourced."""
+    source = Path(os.environ.get("PROSPERO_WINE_SOURCE", ROOT / ".deps/wine/source"))
+    paths = ("dlls/ntdll/unix/system.c", "dlls/ntdll/unix/virtual.c")
+    if not all((source / path).is_file() for path in (*paths, "dlls/kernelbase/memory.c")):
+        print("wine memory status integration skipped: needs the pinned Wine source")
+        return
+
+    def function(text: str, signature: str) -> str:
+        start = text.index(signature)
+        end = text.index("\n{", start) + 2
+        depth = 1
+        while depth:
+            depth += (text[end] == "{") - (text[end] == "}")
+            end += 1
+        return text[start:end]
+
+    with tempfile.TemporaryDirectory() as directory:
+        tree = Path(directory)
+        for path in paths:
+            target = tree / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text((source / path).read_text())
+            for patch in sorted((ROOT / "wine/patches").glob("*.patch")):
+                if f"diff --git a/{path} " in patch.read_text():
+                    subprocess.run(["git", "apply", f"--include={path}", str(patch)],
+                                   cwd=tree, check=True)
+        perf = function((tree / paths[0]).read_text(), "static void get_performance_info(")
+        basic = function((tree / paths[1]).read_text(), "void virtual_get_system_info(")
+        memory = (source / "dlls/kernelbase/memory.c").read_text()
+        fields = memory[memory.index("    status->dwMemoryLoad     = 0;"):]
+        fields = fields[:fields.index("\n    TRACE_(virtual)")]
+        harness = r'''
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#undef linux
+#undef __APPLE__
+#define __PROSPERO__ 1
+#define max(a,b) ((a) > (b) ? (a) : (b))
+#define MESSAGE(...) fprintf(stderr, __VA_ARGS__)
+typedef unsigned long long ULONGLONG;
+typedef uintptr_t ULONG_PTR;
+typedef int BOOL;
+typedef struct {
+    unsigned MmHighestPhysicalPage, unknown, KeMaximumIncrement, PageSize;
+    unsigned MmLowestPhysicalPage, MmNumberOfPhysicalPages, AllocationGranularity;
+    void *LowestUserAddress, *HighestUserAddress;
+    uintptr_t ActiveProcessorsAffinityMask;
+    unsigned NumberOfProcessors;
+} SYSTEM_BASIC_INFORMATION;
+typedef struct {
+    struct { ULONGLONG QuadPart; } IdleTime;
+    unsigned AvailablePages, TotalCommittedPages, TotalCommitLimit;
+} SYSTEM_PERFORMANCE_INFORMATION;
+typedef struct {
+    unsigned dwMemoryLoad;
+    ULONGLONG ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile;
+    ULONGLONG ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
+} MEMORYSTATUSEX;
+static unsigned page_size = 4096, granularity_mask = 65535;
+static char *user_space_limit = (char *)0x7fff0000;
+static struct { unsigned NumberOfProcessors; } peb_value = {8}, *peb = &peb_value;
+static uintptr_t get_system_affinity_mask(void) { return 255; }
+static char *get_wow_user_space_limit(void) { return user_space_limit; }
+static ULONGLONG budget_total, budget_available;
+void __wine_ps5_memory_budget(ULONGLONG *total, ULONGLONG *available)
+{
+    *total = budget_total;
+    *available = budget_available;
+}
+'''
+        harness += perf + "\n" + basic + r'''
+static void memory_status(MEMORYSTATUSEX *status)
+{
+    SYSTEM_BASIC_INFORMATION basic_info;
+    SYSTEM_PERFORMANCE_INFORMATION perf_info;
+    struct { ULONGLONG WorkingSetSize; } vmc = {0};
+    virtual_get_system_info(&basic_info, 0);
+    get_performance_info(&perf_info);
+'''
+        harness += fields + r'''
+}
+int main(void)
+{
+    const ULONGLONG gib = 1024ull * 1024 * 1024;
+    const ULONGLONG cases[][2] = {{12 * gib, 10 * gib}, {256 * 1024 * 1024, 256 * 1024 * 1024}};
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        MEMORYSTATUSEX status = {0};
+        budget_total = cases[i][0]; budget_available = cases[i][1];
+        memory_status(&status);
+        assert(status.ullTotalPhys == cases[i][0]);
+        assert(status.ullAvailPhys == cases[i][1]);
+        assert(status.ullTotalPageFile == 2 * cases[i][0]);
+        assert(status.ullAvailPageFile == 2 * cases[i][1]);
+        assert(status.ullAvailPageFile >= 0x20000000);
+        assert(status.dwMemoryLoad <= 100);
+    }
+}
+'''
+        cfile, executable = tree / "memory_status.c", tree / "memory_status"
+        cfile.write_text(harness)
+        subprocess.run(shlex.split(os.environ.get("CC", "cc")) +
+                       ["-std=c11", "-Wall", "-Wextra", "-Werror", str(cfile), "-o", str(executable)],
+                       check=True)
+        result = subprocess.run([str(executable)], capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+    print("wine memory status integration passed: physical pages, commit budget and memory load")
 
 
 def check_vk_runtime_staging() -> None:

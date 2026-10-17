@@ -75,6 +75,7 @@ before evaluating a candidate built from that cache.
 | 0120 | `server`: when the current user names no audio driver, default `HKCU\Software\Wine\Drivers\Audio` to `ps5`; see [Audio](#audio) |
 | 0130 | `ntdll`: a main program mapped away from its preferred base (the title's image may hold 0x400000) runs in-process, relocated by the PE loader; any other load failure prints the program and the status instead of running `start.exe`, which would need a new process. Both failure paths leave through `exit()`, so the title restarts into its launcher |
 | 0140 | `ntdll`: `NtQueryDirectoryFile` enters a directory by the name the server opened it with when `fchdir()` on the server's descriptor fails. The descriptor has no path in ntdll's working-directory emulation, so no directory could be listed |
+| 0145 | `ntdll`: a name opened relative to a root directory (`ObjectAttributes.RootDirectory`) is looked up with `openat()`/`fstatat()` on the server's descriptor for that directory, which has no path in ntdll's working-directory emulation (as in 0140), so the lookup failed with `EBADF` and the open with `STATUS_INVALID_HANDLE`. ntdll records the name the server opened the directory with before the lookup, by name and by file id. .NET enumerates a tree this way, so a recursive enumeration failed at the first subdirectory |
 | 0150 | `server`: save the registry in 1 MiB writes: each `write()` costs about 3.3 ms on the console whatever its size, and stdio issued one per 64 KiB, so a 3.2 MB `system.reg` took 154 ms, during which the in-process server answers nothing |
 | 0160 | `ntdll`: cheaper lookups of names that are not there. Wine searched the whole directory for another spelling, then again for `name?` (a reparse point), and probed the volume's case sensitivity each time: 24 system calls per missed name in a host trace of the same code. The Ultimate ASI Loader makes such a lookup in its `update` folder before every file a game opens. On PS5 the case probe answers at once (a title has no `fstatfs`, so it always answered case-sensitive), the names come from `pw_cwd_scan_directory()`, which keeps them while the directory cannot have changed (`wine/ps5/pw_wine_cwd.h`), and the `name?` retry is skipped when no name in the directory ends in `?`. A missed name then takes the stats of the path and one of its directory |
 | 0400 | `win32u`: in-process PS5 user driver (`WINE_PS5_USER_DRIVER`, set on PS5); see [User driver](#user-driver) |
@@ -123,6 +124,8 @@ before evaluating a candidate built from that cache.
 | 0902 | `win32u`: the PS5 driver sends the arrows, Insert, Delete, Home, End, Page Up, Page Down, right Ctrl and Alt, the Windows and menu keys and keypad `/` with `KEYEVENTF_EXTENDEDKEY`; their scan codes are the keypad's without it, so DirectInput reported the keypad's 8 for the up arrow and a game's arrow-key bindings never fired |
 | 0903 | `ntdll`: a signal frame keeps the FS base it was taken with when the thread resumes where it was; the host's is set only where the handler sends a context to Wine's 64-bit code (the exception dispatcher, a different 64-bit context). The native WoW64 CPU sets the guest FS just before it switches to 32-bit code, and a signal in that window used to send the thread into its 32-bit code with the host FS (GTA San Andreas' DXVK workers crashing at startup in `RtlEnterCriticalSection`) |
 | 0965 | `win32u`: setting a pixel format on the desktop window no longer posts `WM_WINE_SETPIXELFORMAT` to it. Nothing owns the server-created desktop on the PS5, so the message came back to the game's own queue and posted itself again forever. `vkCreateWin32SurfaceKHR` sets format -1 on every surface's window, so a Vulkan surface on the desktop (DXVK or Zink) kept the game on a black screen with one core busy (Syndicate) |
+| 0970 | `ntdll`: `NtQueryInformationProcess` traces each information class below 128 (all of Windows' classes) only the first time it is queried; Wine's own classes, such as the rarely queried `ProcessWineQpcAnchor`, keep a line per call. The title's default `+process` then still shows process creation and exit, but a game that polls a class every frame no longer fills the log: Call of Juarez Gunslinger's `ProcessAffinityMask` line, 60 times a second, pushed the `+loaddll` lines out of the title log |
+| 0972 | `faudio` (Wine's bundled FAudio 26.09): upstream FAudio a3b49d6 and 2ead980 (2026-09-26). A source voice that played at the output rate never advanced `resampleOffset`, so when it started resampling, the tap loops of `FAudio_INTERNAL_MixSource` ran from the stale offset, `toResample - tap_samples` wrapped and the SSE2 resampler wrote far past `resampled_audio`. Call of Juarez Gunslinger corrupted its process heap and crashed in the mixer, or in the heap. FAudio is a static library, so every `xaudio2_*` and `xactengine*` module is in `PE_MODULES` |
 
 ## Allocator
 
@@ -193,6 +196,27 @@ area, where the guest saw its base truncated to 32 bits. The host tests run the 
 for physical memory, reservations that refuse to overlap, execute refused at
 map time) with 20,000 random operations checked page by page.
 
+Patch 0603 reports the title's direct-memory pool to Windows memory queries
+instead of the BSD sysctls, which can return zero inside the title sandbox.
+`virtual_get_system_info` uses the pool for physical pages;
+`get_performance_info` uses it for physical memory and its page-file budget,
+with the largest free direct-memory block as the availability estimate.
+Wine adds the physical and synthetic page-file budgets when computing commit
+limits, so reported total and available commit are twice the corresponding
+physical estimates.
+The [Windows `MEMORYSTATUSEX` contract](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/ns-sysinfoapi-memorystatusex)
+defines the page-file fields as commit limits and available commit, so this
+budget does not imply disk-backed swap on the console. The helper keeps an
+optimistic 1 GiB availability floor, capped at the total, and a 4 GiB total
+fallback when the pool query returns zero. Neither estimate reserves memory;
+allocation can still fail below the reported availability. Raw kernel and
+BSD readings are logged once. `tests/test_pw_wine_dmem_ps5.c` covers normal
+readings, failed queries, the fallback, the floor and the cap with host kernel
+stubs. With the pinned Wine source present, `tests/test_build_wine_ps5.py`
+also runs the patched queries and Windows field conversion, checking physical
+page counts, commit capacity and bounded memory load. Rebuild `ntdll.prx` to
+use the change.
+
 ## PRX modules
 
 The console does not load ELF shared objects, so after the ELF link the
@@ -223,7 +247,10 @@ Module conversion publishes exports from foundation commit `5bd0887`
 onward, and binds imports between application PRXs from
 `30597512539e7edfde079cbcaf4a626bc0a948c5` (the name-form export hash) onward. The
 build requires the second. Both are on the foundation's `exp/prx-module`
-branch, and the title's pinned foundation predates them. `PS5_PRX_FOUNDATION` (or `--prx-foundation`) names a checkout
+branch, and the title's pinned foundation predates them. The same commits
+rebased onto the foundation's main also qualify (the name-form hash there is
+`e879c08a408ac17186b4736d86f67bcc1aa9dab8`); that converter writes every
+Wine PRX byte for byte the same. `PS5_PRX_FOUNDATION` (or `--prx-foundation`) names a checkout
 that has it; otherwise the PRX link is skipped and the report says why.
 
 `report.json` gains a `prx` section. For each module it lists whether the
