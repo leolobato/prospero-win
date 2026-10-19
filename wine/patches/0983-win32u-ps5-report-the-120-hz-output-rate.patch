@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 19 Oct 2026 12:00:00 +0200
+Subject: [PATCH] win32u: Report the PS5's 120 Hz output rate.
+
+The PS5 user driver reported its one mode at 60 Hz. A title can ask
+the video output for 119.88 Hz on a 120 Hz TV, and every Vulkan game
+then presents at that rate, but EnumDisplaySettings, DXGI's mode list
+and D3D9's adapter modes still said 60. DXVK limits a fullscreen D3D9
+game with VSync to the rate its mode reports, so such a game never
+went past 60 frames per second.
+
+The driver now reports 120 Hz when the title sets
+PS5_VIDEOOUT_REFRESH=120, and 60 Hz otherwise. win32u then lists every
+mode at both 60 and 120 Hz, the current one at 120. It is the rate the
+title asked for, not the one the TV took: a display query cannot ask
+Vulkan. If the TV refuses 120 Hz, the output stays at 60 and DXVK's
+limit of 120 does nothing. ChangeDisplaySettings still accepts any rate
+a game sets.
+---
+ dlls/win32u/ps5drv.c | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/win32u/ps5drv.c b/dlls/win32u/ps5drv.c
+index da9cc05..78f0839 100644
+--- a/dlls/win32u/ps5drv.c
++++ b/dlls/win32u/ps5drv.c
+@@ -217,6 +217,19 @@ static void present_screen_for_change(void)
+ /***********************************************************************
+  *           display
+  */
++/* The rate the title asks the video output for, 120 or 60 (a game's
++ * [display] refresh). DXVK limits a game to the rate its mode reports, so
++ * a game on a 120 Hz output must see 120. It is the rate asked for, not
++ * the one the TV took, which only Vulkan knows, and a display query must
++ * not wait on Vulkan (loaderdrv_VulkanInit). If the TV refuses 120, the
++ * output stays at 60 and a limit of 120 does nothing. */
++static UINT display_frequency(void)
++{
++    const char *refresh = getenv( "PS5_VIDEOOUT_REFRESH" );
++
++    return refresh && !strcmp( refresh, "120" ) ? 120 : 60;
++}
++
+ static UINT ps5_UpdateDisplayDevices( const struct gdi_device_manager *manager, void *param )
+ {
+     struct pci_id pci_id = {0};
+@@ -229,7 +242,7 @@ static UINT ps5_UpdateDisplayDevices( const struct gdi_device_manager *manager,
+     mode.dmBitsPerPel = 32;
+     mode.dmPelsWidth = screen_width;
+     mode.dmPelsHeight = screen_height;
+-    mode.dmDisplayFrequency = 60;
++    mode.dmDisplayFrequency = display_frequency();
+ 
+     SetRect( &monitor.rc_monitor, 0, 0, screen_width, screen_height );
+     monitor.rc_work = monitor.rc_monitor;
