@@ -165,7 +165,7 @@ name: Test Game
 game_slug: test-game
 runner: wine
 prospero:
-  display: {desktop: 1920x1080, scaling: fit, show_fps: true, refresh: 120, opengl_thread: true}
+  display: {desktop: 1920x1080, scaling: fit, show_fps: true, refresh: 120, frame_rate: 60, opengl_thread: true}
   input: {preset: mouse}
 script:
   game:
@@ -294,7 +294,7 @@ def main() -> int:
                      "working_directory = C:\\Games\\Test", "arguments = -window -opengl",
                      "dll_overrides = d3d8,d3d9,d3d10core,d3d11,dxgi,ddraw=n", "prefix = test-game",
                      "runtime = wine-wow64", "architecture = pe32", "graphics = dxvk",
-                     "[display]", "desktop = 1920x1080", "scaling = fit", "show_fps = true", "refresh = 120", "opengl_thread = true", "[input]", "preset = mouse"):
+                     "[display]", "desktop = 1920x1080", "scaling = fit", "show_fps = true", "refresh = 120", "frame_rate = 60", "opengl_thread = true", "[input]", "preset = mouse"):
             assert line in profile.splitlines(), (line, profile)
 
         # A PS5 backend choice overrides Lutris's DXVK setting for this game.
@@ -334,6 +334,13 @@ def main() -> int:
         assert pw_install.main([str(invalid_script), "--library", str(library), "--wine", str(wine),
                                 "--slug", "invalid-graphics", "--file", f"setup={setup}"]) == 1
         assert not (library / "prefixes" / "invalid-graphics").exists()
+
+        # A display key the runtime does not know is refused, not written.
+        unknown_script = root / "unknown-display.yml"
+        unknown_script.write_text(SCRIPT.replace("frame_rate: 60", "frame_limit: 60", 1))
+        assert pw_install.main([str(unknown_script), "--library", str(library), "--wine", str(wine),
+                                "--slug", "unknown-display", "--file", f"setup={setup}"]) == 1
+        assert not (library / "profiles" / "unknown-display.profile").exists()
 
         # Explicit local Zink packages install only the game's architecture.
         zink_script = root / "zink.yml"
