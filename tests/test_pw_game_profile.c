@@ -36,10 +36,11 @@ static void test_graphics_env(void)
             p.runtime.cpu = PW_GAME_CPU_NATIVE; /* worst-case explicit override */
             size_t count = pw_game_graphics_env(&p, env);
             assert(count <= PW_GAME_GRAPHICS_ENV_MAX);
-            /* Fixed6, desktop/override/XInput3, graphics, runtime, clock and CPU. */
-            assert(6 + 3 + count + pw_game_cpu_env(&p, cpu) + pw_game_runtime_env(&p.runtime, runtime) +
-                   PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX + PW_GAME_ENVIRONMENT_MAX <= PW_WINE_START_MAX_ENV);
-            /* refresh and opengl_thread no longer set anything */
+            /* Fixed6, desktop/override/XInput3, graphics, display, runtime, clock and CPU. */
+            assert(6 + 3 + count + PW_GAME_DISPLAY_ENV_MAX + pw_game_cpu_env(&p, cpu) +
+                   pw_game_runtime_env(&p.runtime, runtime) + PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX +
+                   PW_GAME_ENVIRONMENT_MAX <= PW_WINE_START_MAX_ENV);
+            /* refresh and opengl_thread are not graphics variables */
             if (graphics == PW_APP_GRAPHICS_ZINK) {
                 assert(count == (size_t)(2 + fps));
                 assert(!strcmp(env[0].name, "GALLIUM_DRIVER") && !strcmp(env[0].value, "zink"));
@@ -104,6 +105,45 @@ static void test_graphics_env(void)
     assert(pw_game_graphics_env(&p, env) == 1 && !strcmp(env[0].name, "GALLIUM_DRIVER"));
 }
 
+/* [display] refresh and frame_rate: two variables the title always sets. */
+static void test_display_env(void)
+{
+    static const struct { const char *lines, *refresh, *frame_rate; } cases[] = {
+        { "", "60", "0" },
+        { "[display]\nrefresh = 60\n", "60", "0" },
+        { "[display]\nrefresh = 120\n", "120", "0" },
+        { "[display]\nframe_rate = 60\n", "60", "60" },
+        { "[display]\nrefresh = 120\nframe_rate = 120\n", "120", "120" },
+        { "[display]\nrefresh = 120\nframe_rate = 60\n", "120", "60" },
+        { "[display]\nrefresh = 120\nframe_rate = 40\n", "120", "40" },
+        { "[display]\nframe_rate = 30\n", "60", "30" },
+        { "[display]\nframe_rate = 0\nopengl_thread = true\n", "60", "0" },
+    };
+    PwGameProfile p;
+    PwGameEnv env[PW_GAME_DISPLAY_ENV_MAX];
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char text[1024];
+        snprintf(text, sizeof(text), APP "%s", cases[i].lines);
+        assert(parse(text, &p) == PW_OK);
+        assert(pw_game_display_env(&p.display, env) == PW_GAME_DISPLAY_ENV_MAX);
+        assert(!strcmp(env[0].name, "PS5_VIDEOOUT_REFRESH") && !strcmp(env[0].value, cases[i].refresh));
+        assert(!strcmp(env[1].name, "PS5_VIDEOOUT_FRAME_RATE") && !strcmp(env[1].value, cases[i].frame_rate));
+    }
+    /* the title's default for a bare path= without a profile */
+    {
+        const PwGameDisplay display = { .refresh = 60 };
+        assert(pw_game_display_env(&display, env) == 2 && !strcmp(env[0].value, "60") &&
+               !strcmp(env[1].value, "0"));
+    }
+    assert(pw_game_display_env(NULL, env) == 0 && pw_game_display_env(&p.display, NULL) == 0);
+    /* The names are the title's: neither [debug] env nor [environment] may set them. */
+    assert(parse(APP "[debug]\nenv = PS5_VIDEOOUT_REFRESH=120\n", &p) != PW_OK);
+    assert(parse(APP "[debug]\nenv = PS5_VIDEOOUT_FRAME_RATE=60\n", &p) != PW_OK);
+    assert(parse(APP "[environment]\nPS5_VIDEOOUT_REFRESH = 120\n", &p) != PW_OK);
+    assert(parse(APP "[environment]\nPS5_VIDEOOUT_FRAME_RATE = 60\n", &p) != PW_OK);
+}
+
 static void test_profile(void)
 {
     PwGameProfile p;
@@ -149,6 +189,19 @@ static void test_profile(void)
     assert(parse(APP "[display]\nopengl_thread = true\n", &p) == PW_OK && p.display.opengl_thread == 1);
     assert(parse(APP "[display]\nopengl_thread = false\nrefresh = 120\n", &p) == PW_OK &&
            p.display.opengl_thread == 0 && p.display.refresh == 120);
+    /* frame_rate: no cap unless the profile sets one */
+    assert(parse(APP "[display]\nshow_fps = false\n", &p) == PW_OK && p.display.frame_rate == 0);
+    assert(parse(APP "[display]\nframe_rate = 60\n", &p) == PW_OK && p.display.frame_rate == 60);
+    assert(parse(APP "[display]\nrefresh = 120\nframe_rate = 40\n", &p) == PW_OK &&
+           p.display.refresh == 120 && p.display.frame_rate == 40);
+    assert(parse(APP "[display]\nframe_rate = 120\n", &p) == PW_OK && p.display.frame_rate == 120);
+    assert(parse(APP "[display]\nframe_rate = 30\n", &p) == PW_OK && p.display.frame_rate == 30);
+    assert(parse(APP "[display]\nframe_rate = 0\n", &p) == PW_OK && p.display.frame_rate == 0);
+    /* another value is unsupported, a key twice malformed */
+    assert(parse(APP "[display]\nframe_rate = 50\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[display]\nrefresh = 90\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[display]\nframe_rate = 60\nframe_rate = 60\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[display]\nrefresh = 120\nrefresh = 120\n", &p) == PW_ERR_MALFORMED);
     assert(parse(APP "[display]\nview = Window\n", &p) == PW_OK && p.display.view == PW_GAME_VIEW_WINDOW);
     assert(parse(APP "[display]\ndesktop = 320x200\n[input]\nmouse = left_stick\n", &p) == PW_OK);
     assert(p.display.width == 320 && p.input.mouse == PW_GAME_STICK_LEFT);
@@ -265,6 +318,12 @@ static void test_refusals(void)
         APP "[display]\nrefresh = 90\n",                      /* 60 or 120 only */
         APP "[display]\nrefresh =\n",
         APP "[display]\nrefresh = 120\nrefresh = 60\n",         /* twice */
+        APP "[display]\nframe_rate = 50\n",                   /* 0, 120, 60, 40 or 30 only */
+        APP "[display]\nframe_rate = 90\n",
+        APP "[display]\nframe_rate = 060\n",
+        APP "[display]\nframe_rate = -60\n",
+        APP "[display]\nframe_rate =\n",
+        APP "[display]\nframe_rate = 60\nframe_rate = 30\n",     /* twice */
         APP "[display]\nopengl_thread = yes\n",                /* true or false only */
         APP "[display]\nopengl_thread = true\nopengl_thread = false\n", /* twice */
         APP "[display]\nframegen = 1\n",                     /* off or 2..4 only */
@@ -563,7 +622,7 @@ static void test_debug_env(void)
     }
     /* The title's environment has room for every profile variable at once. */
     assert(PW_GAME_DEBUG_ENV_MAX == 5);
-    assert(7 + 3 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_RUNTIME_ENV_MAX +
+    assert(7 + 3 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_DISPLAY_ENV_MAX + PW_GAME_RUNTIME_ENV_MAX +
            PW_GAME_CPU_ENV_MAX + PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX + PW_GAME_ENVIRONMENT_MAX <=
            PW_WINE_START_MAX_ENV);
 }
@@ -650,6 +709,7 @@ int main(void)
     test_graphics_env();
     test_published_forms();
     test_profile();
+    test_display_env();
     test_runtime();
     test_cpu();
     test_debug_env();
@@ -658,6 +718,6 @@ int main(void)
     test_presets();
     test_default_mode();
     printf("game profile passed: application plus display and input, every binding kind, "
-           "runtime settings and their environment, the CPU backend choice, debug env and [environment] variables, refusals, shared presets overridden by the profile\n");
+           "the video output's refresh and frame rate, runtime settings and their environment, the CPU backend choice, debug env and [environment] variables, refusals, shared presets overridden by the profile\n");
     return 0;
 }

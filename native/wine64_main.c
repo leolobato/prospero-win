@@ -1338,8 +1338,9 @@ int main(int argc, char **argv)
     static char prefix[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY], desktop[24], view[8] = "window";
     static char radv_cache[PW_WINE_LIBRARY_PATH + 16];
     enum { WINE64_FIXED_ENV_COUNT = 7,
-           WINE64_PROFILE_ENV_CAPACITY = 4 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_RUNTIME_ENV_MAX + PW_GAME_CPU_ENV_MAX +
-                                         PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX + PW_GAME_ENVIRONMENT_MAX };
+           WINE64_PROFILE_ENV_CAPACITY = 4 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_DISPLAY_ENV_MAX +
+                                         PW_GAME_RUNTIME_ENV_MAX + PW_GAME_CPU_ENV_MAX + PW_GAME_CLOCK_ENV_MAX +
+                                         PW_GAME_DEBUG_ENV_MAX + PW_GAME_ENVIRONMENT_MAX };
     static PwWineStartEnv extra[WINE64_FIXED_ENV_COUNT + WINE64_PROFILE_ENV_CAPACITY] = {
         { "WINEDEBUG", PW_WINE64_DEBUG },
         /* the i386 exe runs in this process through WoW64; otherwise Wine
@@ -1504,6 +1505,20 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    /* [display] refresh and frame_rate: the video output's rate and cap, set
+     * for every game, so one without a refresh line, or a bare path=
+     * without a profile, asks for 60 (src/pw_game_profile.h). */
+    {
+        static const PwGameDisplay display_default = { .refresh = 60 };
+        const PwGameDisplay *display = game ? &game->display : &display_default;
+        PwGameEnv display_env[PW_GAME_DISPLAY_ENV_MAX];
+        size_t display_count = pw_game_display_env(display, display_env);
+
+        for (size_t i = 0; i < display_count; i++)
+            extra[config.extra_env_count++] = (PwWineStartEnv){ display_env[i].name, display_env[i].value };
+        PS5LOG_LOG("PW_WINE64 display refresh=%u frame_rate=%u", (unsigned)display->refresh,
+                   (unsigned)display->frame_rate);
+    }
     if (game) {
         int input_status;
         if (per_game_mode) {
@@ -1667,11 +1682,11 @@ int main(int argc, char **argv)
                 PS5LOG_LOG("PW_WINE64 environment %s=%s", environment[i].name, environment[i].value);
             }
         }
-        /* refresh and opengl_thread set the PS5 OpenGL SDK's output rate and
-         * glthread; Zink, which replaced it, has neither, so they are ignored. */
-        if (game->display.refresh != 60 || game->display.opengl_thread)
-            PS5LOG_LOG("PW_WINE64 ignored display refresh=%u opengl_thread=%d (no longer supported)",
-                       (unsigned)game->display.refresh, game->display.opengl_thread);
+        /* opengl_thread set the PS5 OpenGL SDK's glthread; Zink, which
+         * replaced it, has none, so it is ignored. */
+        if (game->display.opengl_thread)
+            PS5LOG_LOG("PW_WINE64 ignored display opengl_thread=%d (no longer supported)",
+                       game->display.opengl_thread);
         PS5LOG_LOG("PW_WINE64 profile id=%s prefix=%s desktop=%s scaling=%d view=%s show_fps=%d framegen=%u "
                    "input=%s preset=%s mode=%s mouse=%d dll_overrides=%s", game->app.id, prefix,
                    desktop[0] ? desktop : "default",

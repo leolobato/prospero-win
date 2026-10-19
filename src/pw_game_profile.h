@@ -22,8 +22,14 @@
  *                          ; between made by MihawkGen in the Vulkan driver
  *                          ; (PW_FRAMEGEN); off by default. At the console's
  *                          ; 60 Hz, 2 takes a 30 fps game to 60
- *   refresh = 120          ; accepted and ignored: it set the PS5 OpenGL SDK's
- *   opengl_thread = true   ; output rate and glthread, which Zink replaced
+ *   refresh = 120          ; the video output's rate, 60 or 120 (default 60):
+ *                          ; 120 needs a 120 Hz TV; a game that counts time
+ *                          ; in frames runs too fast (PS5_VIDEOOUT_REFRESH)
+ *   frame_rate = 60        ; the most frames a second the game shows: 0 (no
+ *                          ; cap, the default), 120, 60, 40 or 30, paced by
+ *                          ; the output (PS5_VIDEOOUT_FRAME_RATE)
+ *   opengl_thread = true   ; accepted and ignored: it set the PS5 OpenGL
+ *                          ; SDK's glthread, which Zink replaced
  *
  *   [input]
  *   preset = pinball       ; an input file shared between profiles
@@ -131,7 +137,8 @@ typedef struct PwGameDisplay {
     int show_fps;               /* the graphics backend's frame-rate counter */
     int menu;                   /* the in-game menu (pw_game_menu) */
     uint32_t framegen;          /* pictures per game frame, 2..4; 0 off (PW_FRAMEGEN) */
-    uint32_t refresh;           /* parsed (60 or 120) but unused since Zink */
+    uint32_t refresh;           /* the output's rate: 60 or 120 */
+    uint32_t frame_rate;        /* a cap: 0 (none), 120, 60, 40 or 30 */
     int opengl_thread;          /* parsed but unused since Zink */
 } PwGameDisplay;
 
@@ -164,7 +171,7 @@ typedef struct PwGameEnvironmentEntry {
     char value[PW_GAME_ENVIRONMENT_VALUE];
 } PwGameEnvironmentEntry;
 enum { PW_GAME_RUNTIME_ENV_MAX = 2, PW_GAME_CPU_ENV_MAX = 2, PW_GAME_GRAPHICS_ENV_MAX = 4,
-       PW_GAME_CLOCK_ENV_MAX = 2 };
+       PW_GAME_CLOCK_ENV_MAX = 2, PW_GAME_DISPLAY_ENV_MAX = 2 };
 
 typedef struct PwGameProfile {
     PwAppProfile app;
@@ -205,6 +212,12 @@ size_t pw_game_cpu_env(const PwGameProfile *profile, PwGameEnv *env);
  * provider from win/mesa-zink/{i386-windows,x86_64-windows} and refuses the
  * launch when it is missing. */
 size_t pw_game_graphics_env(const PwGameProfile *profile, PwGameEnv *env);
+/* The video output's variables, into env, which has room for
+ * PW_GAME_DISPLAY_ENV_MAX; how many (always both). PS5_VIDEOOUT_REFRESH is
+ * "60" or "120" ([display] refresh), PS5_VIDEOOUT_FRAME_RATE the
+ * frame_rate ("0" for no cap). The Vulkan driver's video output reads
+ * both; Wine reports the refresh as its display mode's rate (patch 0983). */
+size_t pw_game_display_env(const PwGameDisplay *display, PwGameEnv *env);
 /* The [debug] env variables, into env, which has room for
  * PW_GAME_DEBUG_ENV_MAX; how many. The strings live in profile. */
 size_t pw_game_debug_env(const PwGameProfile *profile, PwGameEnv *env);

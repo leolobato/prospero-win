@@ -231,6 +231,17 @@ static int display_field(PwGameDisplay *display, uint32_t *seen, const uint8_t *
         *seen |= 64u;
         return PW_OK;
     }
+    if (is(key, key_length, "frame_rate")) {
+        if (*seen & 256u) return PW_ERR_MALFORMED;
+        if (is(v, n, "0")) display->frame_rate = 0;
+        else if (is(v, n, "120")) display->frame_rate = 120;
+        else if (is(v, n, "60")) display->frame_rate = 60;
+        else if (is(v, n, "40")) display->frame_rate = 40;
+        else if (is(v, n, "30")) display->frame_rate = 30;
+        else return PW_ERR_UNSUPPORTED;
+        *seen |= 256u;
+        return PW_OK;
+    }
     if (is(key, key_length, "opengl_thread")) {
         if (*seen & 32u) return PW_ERR_MALFORMED;
         if (is(v, n, "true")) display->opengl_thread = 1;
@@ -485,6 +496,22 @@ size_t pw_game_runtime_env(const PwGameRuntime *runtime, PwGameEnv *env)
     if (runtime->thread_scheduling) env[count++] = (PwGameEnv){ "WINE_PS5_SCHED", "1" };
     if (runtime->shared_input) env[count++] = (PwGameEnv){ "PW_INPUT_SHARED_FAST", "1" };
     return count;
+}
+
+size_t pw_game_display_env(const PwGameDisplay *display, PwGameEnv *env)
+{
+    if (!display || !env) return 0;
+    /* Always both: a title declares the 120 Hz output, so a game with no
+     * refresh line must still ask for 60. */
+    env[0] = (PwGameEnv){ "PS5_VIDEOOUT_REFRESH", display->refresh == 120 ? "120" : "60" };
+    switch (display->frame_rate) {
+    case 120: env[1] = (PwGameEnv){ "PS5_VIDEOOUT_FRAME_RATE", "120" }; break;
+    case 60: env[1] = (PwGameEnv){ "PS5_VIDEOOUT_FRAME_RATE", "60" }; break;
+    case 40: env[1] = (PwGameEnv){ "PS5_VIDEOOUT_FRAME_RATE", "40" }; break;
+    case 30: env[1] = (PwGameEnv){ "PS5_VIDEOOUT_FRAME_RATE", "30" }; break;
+    default: env[1] = (PwGameEnv){ "PS5_VIDEOOUT_FRAME_RATE", "0" }; break;
+    }
+    return 2;
 }
 
 size_t pw_game_debug_env(const PwGameProfile *profile, PwGameEnv *env)
