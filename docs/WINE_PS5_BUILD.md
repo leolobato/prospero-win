@@ -1125,10 +1125,18 @@ The title runs one game per process (`src/pw_wine_launch.h`):
     frame, so the game's frames are shown about one frame later. Once a
     second the log has `pw_framegen: N frames/s from the program, M
     pictures/s presented`;
-  - `[display] refresh` and `opengl_thread` set the PS5 OpenGL SDK's output
-    rate and glthread worker. Zink has neither, so they are accepted for
-    existing profiles and ignored; the launcher logs
-    `PW_WINE64 ignored display refresh=… opengl_thread=…`;
+  - `[display] refresh` (60 or 120, default 60) and `frame_rate` (0, 120,
+    60, 40 or 30, default 0 for no cap) set `PS5_VIDEOOUT_REFRESH` and
+    `PS5_VIDEOOUT_FRAME_RATE` for every game, also one without a profile
+    (`60` and `0`), and the launcher logs
+    `PW_WINE64 display refresh=… frame_rate=…`. The Vulkan driver's video
+    output reads both: the rate it asks the TV for, and how many vblanks each
+    frame stays on screen. Wine reports the refresh as its display mode's
+    rate (patch 0983). The names are the title's: `[debug] env` and
+    `[environment]` cannot set them;
+  - `[display] opengl_thread` set the PS5 OpenGL SDK's glthread worker. Zink
+    has none, so it is accepted for existing profiles and ignored; the
+    launcher logs `PW_WINE64 ignored display opengl_thread=…`;
   - `[input]` binds each DualSense button to a key or a mouse button, and a
     stick moves the pointer. `preset = <name>` shares a mapping from
     `<root>/input/<name>.input`.

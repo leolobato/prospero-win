@@ -231,8 +231,21 @@ Vulkan; `zink` is an older name for the same thing, and the profile says
 the frame-rate counter a game shows in the top-left corner by default, and
 `framegen: 2` (or `3`, `4`; `off` by default) turns on frame generation for
 the game.
-`refresh` and `opengl_thread` belonged to the old PS5 OpenGL SDK; they are
-still accepted and have no effect.
+
+`refresh: 120` asks the PS5 for a 120 Hz picture instead of the default 60 Hz.
+It needs a TV that takes 120 Hz and the PS5's own 120 Hz output turned on;
+otherwise the picture stays at 60 Hz. Some games tie their speed to the
+screen's refresh and run too fast at 120 Hz, so try it one game at a time.
+
+`frame_rate` caps how many frames a second the game shows: `0` (no cap, the
+default), `120`, `60`, `40` or `30`. The cap follows the screen's refresh, so
+frames come at even intervals: at 120 Hz, `60` and `40` are even; at 60 Hz,
+`30` is. A cap the screen can't pace evenly (`30` at 120 Hz, `40` at 60 Hz) is
+not applied. A game at 60 frames a second on a 120 Hz screen should use
+`frame_rate: 60`.
+
+`opengl_thread` belonged to the old PS5 OpenGL SDK; it is still accepted and
+has no effect.
 
 For `graphics: opengl`, pass `--mesa-zink DIR` to `pw_install.py`, naming a
 local output directory from the pinned Mesa WGL/Zink builder that contains

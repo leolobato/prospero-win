@@ -106,7 +106,7 @@ WINE_CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "w
 DOWNLOADS = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "prospero-win"
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 REG_TYPES = {"REG_SZ", "REG_DWORD", "REG_BINARY"}
-PROSPERO_DISPLAY = ("desktop", "scaling", "view", "show_fps", "framegen", "refresh", "opengl_thread")
+PROSPERO_DISPLAY = ("desktop", "scaling", "view", "show_fps", "framegen", "refresh", "frame_rate", "opengl_thread")
 PROSPERO_INPUT = ("preset", "mode", "mouse", "mouse_speed", "player2")
 
 
