@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Fri, 23 Oct 2026 12:00:00 +0200
+Subject: [PATCH] ntdll: Start a PS5 title's hosted drivers without thread
+ attach.
+
+Patch 0952 runs the controller's HID drivers on threads of the game,
+started before its entry point. Those threads ran DLL_THREAD_ATTACH and
+the TLS callbacks of the game's modules, which Windows never does for
+drivers: they run on system threads. An executable's TLS callback may
+also not be ready that early. NW.js's enters a lock that its C runtime
+initializes only in the entry point, so the driver loop thread blocked
+on it for good, and the game with it, waiting for the loop to start.
+
+A thread that starts in ntoskrnl.exe or in a driver (system32\drivers,
+syswow64\drivers) of a process hosting the drivers now skips thread
+attach, as with THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH. This covers the
+driver loop and the threads the drivers start themselves (winebus's bus
+threads, hidclass's device threads).
+---
+ dlls/ntdll/loader.c | 33 +++++++++++++++++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index 8793666..7987b8c 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -4440,6 +4440,9 @@ static void release_address_space(void)
+ #endif
+ }
+ 
++/* The game hosts the drivers: see start_hosted_drivers. */
++static BOOL hosted_drivers;
++
+ /* A PS5 title's game cannot start winedevice. With WINE_NTOSKRNL_HOSTED
+  * set, ntoskrnl runs the controller's HID drivers (winebus and the ones it
+  * loads) on threads of this process, started before the game's entry
+@@ -4464,6 +4467,7 @@ static void start_hosted_drivers(void)
+     /* Only the game: Wine's own programs (explorer, services) inherit the variable too. */
+     if (image->Buffer && (!wcsnicmp( image->Buffer, system_dir, wcslen(system_dir) ) ||
+                           !wcsnicmp( image->Buffer, L"C:\\windows\\syswow64\\", 20 ))) return;
++    hosted_drivers = TRUE;
+     if ((status = LdrLoadDll( NULL, 0, &dll, &module )))
+     {
+         ERR( "could not load ntoskrnl.exe, status %lx\n", status );
+@@ -4477,6 +4481,30 @@ static void start_hosted_drivers(void)
+     if ((status = host_start( L"winebus", 1000 ))) ERR( "hosted drivers failed, status %lx\n", status );
+ }
+ 
++/* Whether the calling thread runs a hosted driver: it starts in ntoskrnl.exe or in a
++ * driver. Windows runs drivers on system threads, which get no DLL_THREAD_ATTACH or TLS
++ * callbacks, and the game's may not be ready for them: they start before its entry point,
++ * and an executable's TLS callback may enter a lock that its C runtime only initializes
++ * there (NW.js does), which would leave the drivers, and the game waiting for them, stuck. */
++static BOOL is_hosted_driver_thread(void)
++{
++    static const WCHAR ntoskrnlW[] = L"ntoskrnl.exe";
++    static const WCHAR wow64_drivers[] = L"C:\\windows\\syswow64\\drivers\\";
++    PRTL_THREAD_START_ROUTINE entry = NULL;
++    LDR_DATA_TABLE_ENTRY *mod;
++    const WCHAR *name;
++    size_t len = wcslen( system_dir );
++
++    if (!hosted_drivers) return FALSE;
++    if (NtQueryInformationThread( GetCurrentThread(), ThreadQuerySetWin32StartAddress,
++                                  &entry, sizeof(entry), NULL )) return FALSE;
++    if (!entry || LdrFindEntryForAddress( entry, &mod )) return FALSE;
++    if (!wcsicmp( mod->BaseDllName.Buffer, ntoskrnlW )) return TRUE;
++    name = mod->FullDllName.Buffer;
++    if (!wcsnicmp( name, system_dir, len ) && !wcsnicmp( name + len, L"drivers\\", 8 )) return TRUE;
++    return !wcsnicmp( name, wow64_drivers, wcslen(wow64_drivers) );
++}
++
+ /******************************************************************
+  *		loader_init
+  *
+@@ -4578,6 +4606,11 @@ void loader_init( CONTEXT *context, void **entry )
+         arm64ec_thread_init();
+ #endif
+ 
++        if (!NtCurrentTeb()->SkipThreadAttach && is_hosted_driver_thread())
++        {
++            TRACE( "hosted driver thread %04lx: no thread attach\n", GetCurrentThreadId() );
++            NtCurrentTeb()->SkipThreadAttach = 1;
++        }
+         if (NtCurrentTeb()->SkipThreadAttach)
+         {
+             RtlLeaveCriticalSection( &loader_section );
