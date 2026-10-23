@@ -173,14 +173,17 @@ static void test_pad(void)
 
     memset(&pad, 0, sizeof(pad));
     pad.left_stick = pad.right_stick = (PwPadPs5Stick){ 0x80, 0x80 };
-    /* No pad: nothing, and a neutral state. */
+    /* No pad, or a disconnected one: nothing, and a neutral state. */
     memset(&xinput, 0x5a, sizeof(xinput));
     assert(pw_wine_game_pad(NULL, &xinput) == 0);
     assert(!xinput.connected && !xinput.buttons && !xinput.thumb_lx && !xinput.left_trigger);
+    memset(&xinput, 0x5a, sizeof(xinput));
+    assert(pw_wine_game_pad(&pad, &xinput) == 0);
+    assert(!xinput.connected && !xinput.buttons && !xinput.thumb_lx && !xinput.left_trigger);
     assert(pw_wine_game_pad(&pad, NULL) == 0);
 
-    /* Intercepted by the system overlay, disconnected or failing: still
-     * connected, neutral whatever was held. */
+    /* The system overlay has it: still connected, neutral whatever was held. */
+    pad.intercepted = 1;
     pad.core.previous_buttons = 0x4000u;
     pad.left_stick = (PwPadPs5Stick){ 0xff, 0x00 };
     pad.l2 = 255;
@@ -188,6 +191,7 @@ static void test_pad(void)
     assert(pw_wine_game_pad(&pad, &xinput) == 1 && xinput.connected == 1 && xinput.packet == 0);
     assert(!xinput.buttons && !xinput.left_trigger && !xinput.right_trigger);
     assert(!xinput.thumb_lx && !xinput.thumb_ly && !xinput.thumb_rx && !xinput.thumb_ry);
+    pad.intercepted = 0;
     pad.core.previous_buttons = 0;
     pad.left_stick = (PwPadPs5Stick){ 0x80, 0x80 };
     pad.l2 = 0;
@@ -304,9 +308,9 @@ static void test_script_pad(void)
         memset(&script, 0, sizeof(script));
         assert(pw_script_input_parse(macro, sizeof(macro) - 1, storage, 4, &in, &bad) == PW_OK);
         for (size_t i = 0; i < in.count; i++) assert(pw_script_pad_apply(&script, &in.events[i], &changed) == 1);
-        pad.core.connected = 0;                         /* held buttons and sticks dropped */
-        assert(pw_wine_game_pad(&pad, &xinput) == 1);
-        assert(pw_wine_script_pad(&xinput, 1, &script, in.pad_events != 0) == 1);
+        pad.core.connected = 0;
+        assert(pw_wine_game_pad(&pad, &xinput) == 0);
+        assert(pw_wine_script_pad(&xinput, 0, &script, in.pad_events != 0) == 1);
         assert(xinput.buttons == 0x1000u && xinput.thumb_lx == 0 && xinput.thumb_ly == 32767);
     }
 }

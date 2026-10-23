@@ -673,3 +673,4 @@ wine/patches/0981-win32u-register-builtin-classes-without-waiting.patch
 wine/patches/0980-server-ps5-dump-long-waiting-stacks-in-the-watchdog.patch
 wine/patches/0982-ntdll-ps5-high-area-as-large-as-the-kernel-grants.patch
 wine/patches/0983-win32u-ps5-report-the-120-hz-output-rate.patch
+wine/patches/0984-win32u-ps5-tell-windows-when-the-controller-comes-or-goes.patch

@@ -95,6 +95,7 @@ static int read_batch(PwPadPs5 *pad,PwPadSample samples[PW_PAD_PS5_BATCH])
             pad->last_generation=raw[i].connected_count;pad->generation_valid=1;
             pad->generation_changes++;
         }
+        pad->intercepted=intercepted;
         if(intercepted){pad->intercepted_samples++;centre_analog(pad);}
         else if(raw[i].connected) {
             pad->connected_samples++;

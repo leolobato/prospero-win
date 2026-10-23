@@ -138,6 +138,7 @@ before evaluating a candidate built from that cache.
 | 0981 | `win32u`: the builtin window classes are registered without a `pthread_once`. Its body takes the loader lock (cursors through a user32 callback, then user32 loads `uxtheme.dll`), so a thread creating its first window under the loader lock waited forever for a thread inside the once that waited for the loader lock. Now each thread registers the classes still missing (looking up one another thread registered first) and the first one runs user32's part. Source games hung at startup this way: `vgui2.dll`'s static initializer calls `OleInitialize` in its DllMain while the hosted PnP thread creates its COM apartment window |
 | 0982 | `ntdll`: the high reserved area at `0x1000000000` (0600) is as large as the kernel grants: 512 GiB first, halved down to 16 GiB, each try within the address space limits `map_view` honors, and reserved before the view heap's 64 MiB so the kernel cannot place that one inside the range. A 64-bit game's reservation of tens of GiB (Red Dead Redemption 2: 28 GiB, Cyberpunk 2077: 16 GiB, Fellowship: 48 GiB, a .NET runtime: 256 GiB) no longer falls through to `mmap( NULL )`, which the console refuses (`map_view anon mmap error Cannot allocate memory, size 700010000`). `PW_PS5_HIGH_RESERVE_GB` gives the first size tried (0 keeps the single 16 GiB reservation); one `wine-ps5: address space:` line at startup reports the host and user limits and the area granted. The page protection table's leaves (1 MiB per 4 GiB of views) come from the Unix heap, in direct memory, instead of flexible memory |
 | 0983 | `win32u`: the PS5 user driver reports its mode at 120 Hz when the title sets `PS5_VIDEOOUT_REFRESH=120` (a game's `[display] refresh = 120`), 60 Hz otherwise, so `EnumDisplaySettings`, DXGI's mode list and D3D9's adapter modes show the rate the title asked the video output for; win32u lists every mode at both 60 and 120 Hz. DXVK limits a fullscreen D3D9 game with VSync to its mode's rate, which held such a game at 60 on a 120 Hz output. A TV that refuses 120 Hz keeps the output at 60, where DXVK's limit of 120 does nothing. `ChangeDisplaySettings` still ignores the rate |
+| 0984 | `win32u`: when the title's gamepad connects or disconnects (`pw_wine_pad_changes`, which also wakes the input fd), the PS5 user driver posts `WM_DEVICECHANGE` with `DBT_DEVNODES_CHANGED` to the top-level windows, as Windows does through the plug and play service a title cannot run. Some games only look for a lost XInput controller again when told (Unreal Engine 4); see [XInput controller](#xinput-controller) |
 
 ## Allocator
 
@@ -607,6 +608,12 @@ the title's DualSense instead:
     (`045e:028e`), which games look for.
 - The parameters hold no pointers, so a 32-bit game's calls go through the
   same functions under WoW64.
+- The title keeps controller 0 connected, with nothing pressed, while the
+  system overlay has the DualSense (the PS or Create button), as a PS5 game
+  keeps its pad. A DualSense that turns off disconnects it. Each time it
+  connects or disconnects, the sink counts it and wakes the driver, which
+  posts `WM_DEVICECHANGE` (`DBT_DEVNODES_CHANGED`) to the game's windows
+  (patch 0984): some games look for a lost controller again only then.
 - The PRX stage links `xinput1_3.prx`. Its descriptor exports
   `__wine_unix_call_funcs` and `__wine_unix_call_wow64_funcs`, and it
   imports ntdll's `dlsym`, like `wowprospero.prx`.

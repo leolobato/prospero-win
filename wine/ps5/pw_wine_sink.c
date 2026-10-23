@@ -18,6 +18,7 @@ static PwWineSinkStats stats;
 static pthread_once_t wake_once=PTHREAD_ONCE_INIT;
 static int wake[2]={-1,-1};
 static PwWinePad pad_state;
+static uint32_t pad_changes;
 static uint32_t rumble_left,rumble_right,rumble_changed;
 /* Audio has its own lock: its sink blocks for a grain, which must not hold
  * up frames or input. */
@@ -40,6 +41,13 @@ int pw_wine_input_fd(void)
 {
     pthread_once(&wake_once,create_wake_pipe);
     return wake[0];
+}
+/* A full pipe is already readable: nothing is lost. */
+static void wake_driver(void)
+{
+    char byte=1;
+    pthread_once(&wake_once,create_wake_pipe);
+    if(wake[1]!=-1 && write(wake[1],&byte,1)<0){}
 }
 
 void pw_wine_set_present_sink(PwWinePresentSink new_sink,void *context)
@@ -110,12 +118,7 @@ int pw_wine_post_input(const PwWineInput *event)
     }
     else stats.inputs_dropped++;
     pthread_mutex_unlock(&lock);
-    if(!status) {
-        char byte=1;
-        pthread_once(&wake_once,create_wake_pipe);
-        /* a full pipe is already readable: nothing is lost */
-        if(wake[1]!=-1 && write(wake[1],&byte,1)<0){}
-    }
+    if(!status)wake_driver();
     return status;
 }
 int pw_wine_next_input(PwWineInput *event)
@@ -175,7 +178,10 @@ static int same_pad(const PwWinePad *a,const PwWinePad *b)
 }
 void pw_wine_set_pad(const PwWinePad *pad)
 {
+    int changed;
     pthread_mutex_lock(&lock);
+    changed=(pad!=NULL)!=(pad_state.connected!=0);
+    if(changed)pad_changes++;
     if(!pad)pad_state.connected=0;
     else if(!pad_state.connected || !same_pad(pad,&pad_state)) {
         uint32_t packet=pad_state.packet+1;
@@ -183,6 +189,15 @@ void pw_wine_set_pad(const PwWinePad *pad)
         pad_state.packet=packet?packet:1;   /* 0 is never a packet */
     }
     pthread_mutex_unlock(&lock);
+    if(changed)wake_driver();   /* the driver tells the game's windows */
+}
+uint32_t pw_wine_pad_changes(void)
+{
+    uint32_t changes;
+    pthread_mutex_lock(&lock);
+    changes=pad_changes;
+    pthread_mutex_unlock(&lock);
+    return changes;
 }
 int pw_wine_pad(PwWinePad *pad)
 {

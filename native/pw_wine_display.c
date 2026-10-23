@@ -116,9 +116,11 @@ int pw_wine_game_pad(const PwPadPs5 *pad, PwWinePad *out)
     if (!out) return 0;
     memset(out, 0, sizeof(*out));
     if (!pad) return 0;
-    /* The title's controller stays connected while the system overlay has
-     * it or it drops out: some games (Unreal Engine 4) only look for a lost
-     * XInput controller again after a device change Wine never sends. */
+    /* While the system overlay has the pad, the game keeps it, neutral, as a
+     * PS5 game does (and Windows under the Game Bar): a game that pauses on
+     * a lost controller would pause at every PS press. A disconnected pad is
+     * gone, and the driver tells the game's windows (patch 0984). */
+    if (!pad->core.connected && !pad->intercepted) return 0;
     out->connected = 1;
     if (!pad->core.connected) return 1;
     for (size_t i = 0; i < sizeof(pad_buttons) / sizeof(pad_buttons[0]); i++)

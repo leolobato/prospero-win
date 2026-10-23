@@ -237,9 +237,14 @@ int main(void)
     memset(&got,0x5a,sizeof(got));
     assert(!pw_wine_pad(&got) && got.connected==0 && got.packet==0 && got.buttons==0);
     assert(!pw_wine_pad(NULL));
+    assert(pw_wine_pad_changes()==0);
+    while(read(fd,drain,sizeof(drain))>0){}  /* the producer's wakes */
+    pw_wine_set_pad(NULL);assert(pw_wine_pad_changes()==0 && read(fd,drain,1)==-1);  /* still none */
     pad=(PwWinePad){0,77,0x1000,10,255,-32768,32767,0,-1};
     pw_wine_set_pad(&pad);
     assert(pw_wine_pad(&got) && got.connected==1 && got.packet==1);  /* the sink numbers it */
+    /* Connecting is a change, and wakes the driver; a new state is not. */
+    assert(pw_wine_pad_changes()==1 && read(fd,drain,sizeof(drain))==1);
     assert(got.buttons==0x1000 && got.left_trigger==10 && got.right_trigger==255);
     assert(got.thumb_lx==-32768 && got.thumb_ly==32767 && got.thumb_rx==0 && got.thumb_ry==-1);
     /* The same state keeps its packet; any change takes a new one. */
@@ -252,10 +257,15 @@ int main(void)
         pw_wine_set_pad(&changes[i]);
         assert(pw_wine_pad(&got) && got.packet==2+i);
     }
-    /* Disconnected: nothing to read; reconnecting is a new packet. */
+    assert(pw_wine_pad_changes()==1 && read(fd,drain,1)==-1);
+    /* Disconnected: nothing to read; reconnecting is a new packet. Both
+     * are changes that wake the driver, a second disconnect is not. */
     pw_wine_set_pad(NULL);
     assert(!pw_wine_pad(&got) && got.connected==0 && got.buttons==0);
+    assert(pw_wine_pad_changes()==2 && read(fd,drain,sizeof(drain))==1);
+    pw_wine_set_pad(NULL);assert(pw_wine_pad_changes()==2 && read(fd,drain,1)==-1);
     pw_wine_set_pad(&changes[6]);assert(pw_wine_pad(&got) && got.packet==9 && got.thumb_ry==4);
+    assert(pw_wine_pad_changes()==3 && read(fd,drain,sizeof(drain))==1);
 
     /* Rumble: reported once per change, clamped to 16 bits. */
     uint32_t left=1,right=1;

@@ -55,10 +55,10 @@ size_t pw_wine_game_inputs(const PwGameInput *input, uint32_t pressed, uint32_t 
 /* The DualSense as an XInput gamepad: its held buttons (Cross A, Circle B,
  * Square X, Triangle Y, L1/R1 shoulders, L3/R3 thumbs, Options Start,
  * Create Back, the touchpad Guide), the analog triggers, and the sticks
- * scaled to -32768..32767 with y up. 1 and the state in out for an open
- * pad, neutral while the system has it (intercepted), it is disconnected
- * or a read failed; 0 and a neutral state with no pad. The sink numbers
- * the packets. */
+ * scaled to -32768..32767 with y up. 1 and the state in out while the pad
+ * is connected, and neutral while the system overlay has it (intercepted);
+ * 0 and a neutral state with no pad, or a disconnected one. The sink
+ * numbers the packets. */
 int pw_wine_game_pad(const PwPadPs5 *pad, PwWinePad *out);
 
 /* A script build's scripted controller (src/pw_script_input.h) added to
