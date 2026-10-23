@@ -1300,6 +1300,7 @@ int main(int argc, char **argv)
     void (*set_pad)(const PwWinePad *) = NULL;
     int (*rumble)(uint32_t *, uint32_t *) = NULL;
     uint64_t vibrations = 0;
+    int pad_connected = -1;
     uint64_t shown_sequence = 0, shown = 0, posted = 0, refused = 0;
     VulkanFrames vulkan_frames = { 0 };
     Loading loading = { 0 };
@@ -1782,6 +1783,16 @@ int main(int argc, char **argv)
         }
 #endif
         int pad_read = pad_status == PW_OK && post_input && pw_pad_ps5_read(&pad) == PW_OK;
+        /* Each time the pad comes and goes (the system overlay, a drop out),
+         * what the reads said, so a lost controller shows in the report. */
+        if (pad_read && (int)pad.core.connected != pad_connected) {
+            pad_connected = (int)pad.core.connected;
+            PS5LOG_LOG("PW_WINE64 pad connected=%d rc=%d intercepted=%llu disconnected=%llu "
+                       "errors=%llu generation=%u",
+                       pad_connected, pad.last_read_rc, (unsigned long long)pad.intercepted_samples,
+                       (unsigned long long)pad.disconnected_samples, (unsigned long long)pad.read_errors,
+                       (unsigned)pad.last_generation);
+        }
         /* XInput controller 0: the DualSense, and in a script build the
          * macro's controller added to it, every frame, so a scripted press
          * stays down until its release. */

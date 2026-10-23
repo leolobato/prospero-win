@@ -115,8 +115,12 @@ int pw_wine_game_pad(const PwPadPs5 *pad, PwWinePad *out)
 {
     if (!out) return 0;
     memset(out, 0, sizeof(*out));
-    if (!pad || !pad->core.connected) return 0;
+    if (!pad) return 0;
+    /* The title's controller stays connected while the system overlay has
+     * it or it drops out: some games (Unreal Engine 4) only look for a lost
+     * XInput controller again after a device change Wine never sends. */
     out->connected = 1;
+    if (!pad->core.connected) return 1;
     for (size_t i = 0; i < sizeof(pad_buttons) / sizeof(pad_buttons[0]); i++)
         if (pad->core.previous_buttons & pad_buttons[i].dualsense) out->buttons |= pad_buttons[i].xinput;
     out->left_trigger = pad->l2;
