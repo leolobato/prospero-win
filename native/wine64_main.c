@@ -1404,6 +1404,7 @@ int main(int argc, char **argv)
     static PwOsk osk;
     int osk_status = PW_ERR_STATE;
     uint64_t vibrations = 0;
+    int pad_seen = -1;
     uint64_t shown_sequence = 0, shown = 0, posted = 0, refused = 0;
     VulkanFrames vulkan_frames = { 0 };
     Loading loading = { 0 };
@@ -1930,13 +1931,15 @@ int main(int argc, char **argv)
         }
 #endif
         int pad_read = pad_status == PW_OK && post_input && pw_pad_ps5_read(&pad) == PW_OK;
-        if (pad_read) {
-            static int pad_state = -1;
-            int state = pad.intercepted ? 2 : pad.core.connected ? 1 : 0;
-            if (state != pad_state) {
-                PS5LOG_LOG("PW_WINE64 pad state=%s", state == 2 ? "system" : state ? "connected" : "disconnected");
-                pad_state = state;
-            }
+        /* Each time the pad comes and goes (the system overlay, a drop out),
+         * what the reads said, so a lost controller shows in the report. */
+        if (pad_read && (int)(pad.core.connected | pad.intercepted << 1) != pad_seen) {
+            pad_seen = (int)(pad.core.connected | pad.intercepted << 1);
+            PS5LOG_LOG("PW_WINE64 pad connected=%u overlay=%u rc=%d intercepted=%llu disconnected=%llu "
+                       "errors=%llu generation=%u",
+                       pad.core.connected, pad.intercepted, pad.last_read_rc,
+                       (unsigned long long)pad.intercepted_samples, (unsigned long long)pad.disconnected_samples,
+                       (unsigned long long)pad.read_errors, (unsigned)pad.last_generation);
         }
         /* The menu and the on-screen keyboard take the pad in turn while
          * they are open: the game then sees it idle, and the buttons that

@@ -80,14 +80,14 @@ int main(void)
     assert(vibration_mode_calls==1 && vibration_mode_seen==PW_PAD_PS5_VIBRATION_COMPATIBLE);
     fixture[0]=(PwPadPs5Data){.buttons=L1|CREATE,.connected=1,.timestamp=1000,.connected_count=1};
     fixture_count=1;assert(pw_pad_ps5_read(&pad)==PW_OK);
-    assert(pad.connected_samples==1 && pad.core.pressed_edges==(L1|CREATE));
+    assert(pad.connected_samples==1 && pad.core.pressed_edges==(L1|CREATE) && !pad.intercepted);
     fixture_count=0;assert(pw_pad_ps5_read(&pad)==PW_OK &&
                            !pad.core.pressed_edges && !pad.core.released_edges);
     fixture_count=1;fixture[0].buttons=0x80000000u|L1;fixture[0].timestamp=2000;
     assert(pw_pad_ps5_read(&pad)==PW_OK);
     assert(pad.intercepted && !pad.core.connected);
     assert(pad.intercepted_samples==1 && pad.core.released_edges==(L1|CREATE) &&
-           !pad.core.previous_buttons);
+           !pad.core.previous_buttons && pad.intercepted && !pad.core.connected);
     read_rc=-9;assert(pw_pad_ps5_read(&pad)==PW_OK&&pad.read_errors==1&&!pad.intercepted);
     read_rc=0;
     fixture[0]=(PwPadPs5Data){.buttons=CREATE,.connected=1,.timestamp=3000,.connected_count=1};
@@ -106,6 +106,7 @@ int main(void)
     fixture[0]=(PwPadPs5Data){.left_stick={1,1},.connected=1,.timestamp=3200,.connected_count=1};
     assert(pw_pad_ps5_read(&pad)==PW_OK && pad.left_stick.x==1);
     fixture[0].connected=0;assert(pw_pad_ps5_read(&pad)==PW_OK && pad.left_stick.x==0x80);
+    assert(!pad.core.connected && !pad.intercepted);  /* gone, not with the overlay */
     fixture[0]=(PwPadPs5Data){.buttons=CREATE,.right_stick={9,9},.connected=1,.timestamp=3300,
                               .connected_count=1};
     assert(pw_pad_ps5_read(&pad)==PW_OK && pad.right_stick.x==9);

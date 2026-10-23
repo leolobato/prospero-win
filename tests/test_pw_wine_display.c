@@ -173,11 +173,14 @@ static void test_pad(void)
 
     memset(&pad, 0, sizeof(pad));
     pad.left_stick = pad.right_stick = (PwPadPs5Stick){ 0x80, 0x80 };
-    /* Disconnected: nothing, and a neutral state. */
+    /* No pad, or a disconnected one: nothing, and a neutral state. */
     memset(&xinput, 0x5a, sizeof(xinput));
     assert(pw_wine_game_pad(&pad, &xinput) == 0);
     assert(!xinput.connected && !xinput.buttons && !xinput.thumb_lx && !xinput.left_trigger);
     assert(pw_wine_game_pad(NULL, &xinput) == 0 && pw_wine_game_pad(&pad, NULL) == 0);
+    memset(&xinput, 0x5a, sizeof(xinput));
+    assert(pw_wine_game_pad(&pad, &xinput) == 0);
+    assert(!xinput.connected && !xinput.buttons && !xinput.thumb_lx && !xinput.left_trigger);
 
     /* The system has it (intercepted): still connected, idle, whatever
      * the last buttons and sticks were. */
