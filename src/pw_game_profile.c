@@ -405,7 +405,9 @@ static int debug_field(PwGameProfile *profile, const uint8_t *key, size_t key_le
 }
 
 /* [runtime] thread_scheduling, shared_input, fast_clock: true/false or
- * 1/0; cpu: native or translator; each once. */
+ * 1/0; cpu: native or translator; version: 1 or 2; each once. A version
+ * this title does not know is refused, so a profile written for newer
+ * defaults never runs with older ones. */
 static int runtime_field(PwGameRuntime *runtime, uint32_t *seen, const uint8_t *key, size_t key_length,
                          const uint8_t *v, size_t n)
 {
@@ -418,6 +420,14 @@ static int runtime_field(PwGameRuntime *runtime, uint32_t *seen, const uint8_t *
         else if (is(v, n, "translator")) runtime->cpu = PW_GAME_CPU_TRANSLATOR;
         else return PW_ERR_UNSUPPORTED;
         *seen |= 2u;
+        return PW_OK;
+    }
+    if (is(key, key_length, "version")) {
+        if (*seen & 16u) return PW_ERR_MALFORMED;
+        if (is(v, n, "1")) runtime->version = 1;
+        else if (is(v, n, "2")) runtime->version = 2;
+        else return PW_ERR_UNSUPPORTED;
+        *seen |= 16u;
         return PW_OK;
     }
     if (is(key, key_length, "thread_scheduling")) bit = 1u, field = &runtime->thread_scheduling;
@@ -496,6 +506,45 @@ size_t pw_game_runtime_env(const PwGameRuntime *runtime, PwGameEnv *env)
     if (runtime->thread_scheduling) env[count++] = (PwGameEnv){ "WINE_PS5_SCHED", "1" };
     if (runtime->shared_input) env[count++] = (PwGameEnv){ "PW_INPUT_SHARED_FAST", "1" };
     return count;
+}
+
+int pw_game_profile_version(const PwGameProfile *profile)
+{
+    return profile && profile->runtime.version == 2 ? 2 : 1;
+}
+
+/* Whether a RADV_PERFTEST value turns on pswave32: options are split at
+ * commas and spaces, as Mesa's parse_debug_string splits them. */
+static int perftest_has_pswave32(const char *value)
+{
+    while (*value) {
+        size_t length;
+
+        while (*value == ',' || *value == ' ') value++;
+        for (length = 0; value[length] && value[length] != ',' && value[length] != ' '; length++) {}
+        if (is((const uint8_t *)value, length, "pswave32")) return 1;
+        value += length;
+    }
+    return 0;
+}
+
+size_t pw_game_version_env(const PwGameProfile *profile, PwGameEnv *env)
+{
+    int wave32 = 0;
+
+    if (!profile || !env || pw_game_profile_version(profile) != 1) return 0;
+    for (size_t i = 0; i < profile->environment_count + profile->debug_env_count; i++) {
+        const char *name = i < profile->environment_count ? profile->environment[i].name :
+            profile->debug_env[i - profile->environment_count].name;
+        const char *value = i < profile->environment_count ? profile->environment[i].value :
+            profile->debug_env[i - profile->environment_count].value;
+
+        if (!strcmp(name, "RADV_PS5_PS_WAVE64")) return 0;
+        if (!strcmp(name, "RADV_PERFTEST") && perftest_has_pswave32(value)) wave32 = 1;
+    }
+    if (wave32) return 0;
+    env[0] = (PwGameEnv){ "RADV_PS5_PS_WAVE64", "1" };
+    return 1;
 }
 
 size_t pw_game_display_env(const PwGameDisplay *display, PwGameEnv *env)

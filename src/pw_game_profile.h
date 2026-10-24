@@ -155,6 +155,8 @@ typedef struct PwGameRuntime {
     int shared_input;           /* PW_INPUT_SHARED_FAST=1 */
     int fast_clock;             /* the title calibrates the TSC, then sets
                                    PW_QPC_TSC_VALIDATED and PW_QPC_TSC_HZ */
+    int version;                /* [runtime] version: 1 (also when unset) or 2;
+                                   whose defaults the title applies */
 } PwGameRuntime;
 
 /* A variable of Wine's environment; both strings are static. */
@@ -171,7 +173,7 @@ typedef struct PwGameEnvironmentEntry {
     char value[PW_GAME_ENVIRONMENT_VALUE];
 } PwGameEnvironmentEntry;
 enum { PW_GAME_RUNTIME_ENV_MAX = 2, PW_GAME_CPU_ENV_MAX = 2, PW_GAME_GRAPHICS_ENV_MAX = 4,
-       PW_GAME_CLOCK_ENV_MAX = 2, PW_GAME_DISPLAY_ENV_MAX = 2 };
+       PW_GAME_CLOCK_ENV_MAX = 2, PW_GAME_DISPLAY_ENV_MAX = 2, PW_GAME_VERSION_ENV_MAX = 1 };
 
 typedef struct PwGameProfile {
     PwAppProfile app;
@@ -196,6 +198,14 @@ int pw_game_profile_parse(const uint8_t *bytes, size_t length, PwGameProfile *pr
  * its frequency is measured at launch (src/pw_tsc_calibrate.h), and the
  * title adds up to PW_GAME_CLOCK_ENV_MAX variables itself. */
 size_t pw_game_runtime_env(const PwGameRuntime *runtime, PwGameEnv *env);
+/* The profile's version, 1 when it has no [runtime] version line. */
+int pw_game_profile_version(const PwGameProfile *profile);
+/* The variables that keep a version 1 profile's defaults on a newer driver,
+ * into env, which has room for PW_GAME_VERSION_ENV_MAX; how many. Version 1
+ * keeps pixel shaders in wave64 (RADV_PS5_PS_WAVE64=1) unless the profile
+ * asks for pswave32 in RADV_PERFTEST or sets RADV_PS5_PS_WAVE64 itself;
+ * version 2 takes the driver's defaults (wave32) and adds nothing. */
+size_t pw_game_version_env(const PwGameProfile *profile, PwGameEnv *env);
 /* Whether a game runs on the native WoW64 CPU: only 32-bit games; [runtime]
  * cpu when set, else native. OpenGL games draw through Zink, whose Vulkan
  * calls the batching covers like DXVK's. */

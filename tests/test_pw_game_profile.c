@@ -305,6 +305,51 @@ static void test_runtime(void)
     assert(!strcmp(env[0].name, "WINE_PS5_SCHED") && !strcmp(env[1].name, "PW_INPUT_SHARED_FAST"));
 }
 
+/* [runtime] version: a profile without it is version 1 and keeps wave64
+ * pixel shaders unless it asks for pswave32; version 2 takes the driver's
+ * defaults. A version this title does not know is refused. */
+static void test_version(void)
+{
+    PwGameEnv env[PW_GAME_VERSION_ENV_MAX];
+    PwGameProfile p;
+
+    assert(parse(APP, &p) == PW_OK && pw_game_profile_version(&p) == 1);
+    assert(pw_game_version_env(&p, env) == 1);
+    assert(!strcmp(env[0].name, "RADV_PS5_PS_WAVE64") && !strcmp(env[0].value, "1"));
+    assert(parse(APP "[runtime]\nversion = 1\n", &p) == PW_OK && pw_game_profile_version(&p) == 1);
+    assert(pw_game_version_env(&p, env) == 1);
+    assert(parse(APP "[runtime]\nversion = 2\n", &p) == PW_OK && pw_game_profile_version(&p) == 2);
+    assert(pw_game_version_env(&p, env) == 0);
+    assert(parse(APP "[runtime]\nthread_scheduling = 1\nVersion = 2\n", &p) == PW_OK);
+    assert(pw_game_profile_version(&p) == 2 && p.runtime.thread_scheduling == 1);
+    /* Once, and only a version this title knows. */
+    assert(parse(APP "[runtime]\nversion = 2\nversion = 2\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[runtime]\nversion = 3\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[runtime]\nversion = 0\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[runtime]\nversion = \n", &p) != PW_OK);
+    /* Version 1 that asks for wave32, in [environment] or a [debug] env
+     * line, among other options: nothing added. */
+    assert(parse(APP "[environment]\nRADV_PERFTEST = pswave32\n", &p) == PW_OK);
+    assert(pw_game_version_env(&p, env) == 0);
+    assert(parse(APP "[environment]\nRADV_PERFTEST = sam,pswave32\n", &p) == PW_OK);
+    assert(pw_game_version_env(&p, env) == 0);
+    assert(parse(APP "[debug]\nenv = RADV_PERFTEST=sam,pswave32\n", &p) == PW_OK);
+    assert(pw_game_version_env(&p, env) == 0);
+    /* Other options, or a word that only starts with pswave32, keep wave64. */
+    assert(parse(APP "[environment]\nRADV_PERFTEST = sam,nggc\n", &p) == PW_OK);
+    assert(pw_game_version_env(&p, env) == 1);
+    assert(parse(APP "[environment]\nRADV_PERFTEST = pswave32x\n", &p) == PW_OK);
+    assert(pw_game_version_env(&p, env) == 1);
+    /* The profile's own RADV_PS5_PS_WAVE64 is never set twice. */
+    assert(parse(APP "[environment]\nRADV_PS5_PS_WAVE64 = 1\n", &p) == PW_OK);
+    assert(pw_game_version_env(&p, env) == 0);
+    /* Version 2 with Wave64 chosen: the profile's own variable does it. */
+    assert(parse(APP "[runtime]\nversion = 2\n[environment]\nRADV_PS5_PS_WAVE64 = 1\n", &p) == PW_OK);
+    assert(pw_game_version_env(&p, env) == 0 && p.environment_count == 1);
+    assert(pw_game_profile_version(NULL) == 1 && pw_game_version_env(NULL, env) == 0 &&
+           pw_game_version_env(&p, NULL) == 0);
+}
+
 static void test_refusals(void)
 {
     static const char *const bad[] = {
@@ -623,7 +668,7 @@ static void test_debug_env(void)
     /* The title's environment has room for every profile variable at once. */
     assert(PW_GAME_DEBUG_ENV_MAX == 5);
     assert(7 + 3 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_DISPLAY_ENV_MAX + PW_GAME_RUNTIME_ENV_MAX +
-           PW_GAME_CPU_ENV_MAX + PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX + PW_GAME_ENVIRONMENT_MAX <=
+           PW_GAME_VERSION_ENV_MAX + PW_GAME_CPU_ENV_MAX + PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX + PW_GAME_ENVIRONMENT_MAX <=
            PW_WINE_START_MAX_ENV);
 }
 
@@ -711,6 +756,7 @@ int main(void)
     test_profile();
     test_display_env();
     test_runtime();
+    test_version();
     test_cpu();
     test_debug_env();
     test_environment();

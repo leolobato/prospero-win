@@ -1339,7 +1339,8 @@ int main(int argc, char **argv)
     static char radv_cache[PW_WINE_LIBRARY_PATH + 16];
     enum { WINE64_FIXED_ENV_COUNT = 7,
            WINE64_PROFILE_ENV_CAPACITY = 4 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_DISPLAY_ENV_MAX +
-                                         PW_GAME_RUNTIME_ENV_MAX + PW_GAME_CPU_ENV_MAX + PW_GAME_CLOCK_ENV_MAX +
+                                         PW_GAME_RUNTIME_ENV_MAX + PW_GAME_VERSION_ENV_MAX + PW_GAME_CPU_ENV_MAX +
+                                         PW_GAME_CLOCK_ENV_MAX +
                                          PW_GAME_DEBUG_ENV_MAX + PW_GAME_ENVIRONMENT_MAX };
     static PwWineStartEnv extra[WINE64_FIXED_ENV_COUNT + WINE64_PROFILE_ENV_CAPACITY] = {
         { "WINEDEBUG", PW_WINE64_DEBUG },
@@ -1611,6 +1612,17 @@ int main(int argc, char **argv)
                 extra[config.extra_env_count++] = (PwWineStartEnv){ runtime_env[i].name, runtime_env[i].value };
             PS5LOG_LOG("PW_WINE64 runtime thread_scheduling=%d shared_input=%d", game->runtime.thread_scheduling,
                        game->runtime.shared_input);
+        }
+        /* [runtime] version: a version 1 profile keeps the defaults it was
+         * written for (src/pw_game_profile.h). */
+        {
+            PwGameEnv version_env[PW_GAME_VERSION_ENV_MAX];
+            size_t version_count = pw_game_version_env(game, version_env);
+
+            for (size_t i = 0; i < version_count; i++)
+                extra[config.extra_env_count++] = (PwWineStartEnv){ version_env[i].name, version_env[i].value };
+            PS5LOG_LOG("PW_WINE64 profile version=%d wave64=%d", pw_game_profile_version(game),
+                       version_count != 0);
         }
         /* [runtime] fast_clock: patch 0900 answers QueryPerformanceCounter
          * from the TSC only when told its frequency; measure it now, and
