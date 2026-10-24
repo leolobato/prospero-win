@@ -1077,6 +1077,15 @@ The title runs one game per process (`src/pw_wine_launch.h`):
     These are the rules of Playden's `IsProsperoEnvironmentEntry`. Titles
     built before this section refuse a profile that has it.
   - `[runtime]` sets runtime behavior for that game only:
+    - `version = 1` or `version = 2` says whose defaults the profile was
+      written for; without it the profile is version 1. A version 1 profile
+      keeps pixel shaders in wave64: the title sets `RADV_PS5_PS_WAVE64=1`
+      unless the profile asks for `pswave32` in `RADV_PERFTEST` or sets
+      `RADV_PS5_PS_WAVE64` itself. A version 2 profile takes the driver's
+      defaults, wave32 pixel shaders on the console. The log shows it
+      (`PW_WINE64 profile version=2 wave64=0`). Titles built before this key
+      refuse a profile that has it, and a title refuses a version it does
+      not know.
     - `thread_scheduling = true` sets `WINE_PS5_SCHED=1` (Wine patch 0882):
       the game's threads take turns on the CPUs, and threads the game raises
       above normal priority get a higher priority on the console too. It
