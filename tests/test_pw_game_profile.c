@@ -52,6 +52,23 @@ static void test_graphics_env(void)
             }
         }
     }
+    /* The menu is a DXVK HUD item beside or instead of the frame rate; Mesa's
+     * HUD has none. */
+    assert(parse(APP "[display]\nmenu = true\n", &p) == PW_OK && p.display.menu == 1 && p.display.show_fps == 1);
+    assert(pw_game_graphics_env(&p, env) == 1 && !strcmp(env[0].name, "DXVK_HUD") &&
+           !strcmp(env[0].value, "fps,menu"));
+    assert(parse(APP "[display]\nmenu = true\nshow_fps = false\n", &p) == PW_OK);
+    assert(pw_game_graphics_env(&p, env) == 1 && !strcmp(env[0].value, "menu"));
+    p.app.graphics = PW_APP_GRAPHICS_ZINK;
+    assert(pw_game_graphics_env(&p, env) == 2 && strcmp(env[1].name, "GALLIUM_HUD"));
+    assert(parse(APP "[display]\nmenu = false\n", &p) == PW_OK && p.display.menu == 0);
+    assert(pw_game_graphics_env(&p, env) == 1 && !strcmp(env[0].value, "fps"));
+    assert(parse(APP "[display]\nmenu = yes\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[display]\nmenu = true\nmenu = false\n", &p) == PW_ERR_MALFORMED);
+    /* A profile with the menu on cannot set the HUD variable itself. */
+    assert(parse(APP "[display]\nmenu = true\nshow_fps = false\n[debug]\nenv = DXVK_HUD=full\n", &p) ==
+           PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[display]\nshow_fps = false\n[debug]\nenv = DXVK_HUD=full\n", &p) == PW_OK);
     /* A Zink game's [debug] env decides the deferral itself: the title adds none. */
     assert(parse(APP "[debug]\nenv = PW_VK_DEFER_DESCRIPTORS=0\n", &p) == PW_OK);
     p.app.graphics = PW_APP_GRAPHICS_ZINK; p.display.show_fps = 0;
@@ -389,6 +406,9 @@ static void test_refusals(void)
         APP "[input]\npreset = a/b\n",
         APP "[input]\npreset =\n",
         APP "[input]\npreset = a\npreset = b\n",
+        APP "[input]\nplayer2 = P2\n",
+        APP "[input]\nplayer2 =\n",
+        APP "[input]\nplayer2 = a\nplayer2 = b\n",
         APP "[input]\npreset = 0123456789012345678901234567890123456789012345678901234567890123456789\n",
         APP "[input]\ncross space\n",
         APP "[input]\n = space\n",
@@ -429,8 +449,14 @@ static void test_presets(void)
     pw_game_input_overlay(&input, &overrides);
     assert(input.mouse_speed == 400);
 
+    /* A second pad's preset is named by the profile alone. */
+    assert(parse(APP "[input]\npreset = bomb\nplayer2 = bomb-p2\n", &p) == PW_OK);
+    assert(!strcmp(p.input.preset, "bomb") && !strcmp(p.input.player2, "bomb-p2"));
+    assert(parse(APP "[input]\npreset = bomb\n", &p) == PW_OK && !p.input.player2[0]);
+
     /* A preset holds only [input] and cannot chain another preset. */
     assert(preset("[input]\npreset = other\n", &input) == PW_ERR_MALFORMED);
+    assert(preset("[input]\nplayer2 = other\n", &input) == PW_ERR_MALFORMED);
     assert(preset("[display]\ndesktop = 800x600\n", &input) == PW_ERR_MALFORMED);
     assert(preset(APP, &input) == PW_ERR_MALFORMED);
     assert(preset("; nothing\n", &input) == PW_ERR_MALFORMED);

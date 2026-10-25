@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sun, 25 Oct 2026 13:00:00 +0200
+Subject: [PATCH] nsi: Keep change requests pending without the nsiproxy
+ driver.
+
+NotifyAddrChange and the other change notifications ask nsiproxy, through
+\\.\Nsi, to complete a request when an address or route changes. A PS5
+title runs no driver host (patch 0550), so the device does not open and
+the request fails at once. Games retry a failed request in a loop; an
+Unreal Engine game polls it twice a second while connected to a server,
+and its connection to a dedicated server times out.
+
+When the device cannot be opened, an asynchronous request now stays
+pending, as it does on Windows while nothing changes, and the returned
+handle is an event that is never signaled. NsiCancelChangeNotification
+completes such a request as cancelled. Synchronous requests still fail,
+and nothing changes where NSI works.
+---
+ dlls/nsi/nsi.c | 35 ++++++++++++++++++++++++++++++++++-
+ 1 file changed, 34 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/nsi/nsi.c b/dlls/nsi/nsi.c
+--- a/dlls/nsi/nsi.c
++++ b/dlls/nsi/nsi.c
+@@ -17,6 +17,8 @@
+  * License along with this library; if not, write to the Free Software
+  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+  */
++#include "ntstatus.h"
++#define WIN32_NO_STATUS
+ #include "winsock2.h"
+ #include "winternl.h"
+ #include "ws2ipdef.h"
+@@ -63,6 +65,20 @@
+     return *cached_device;
+ }
+ 
++/* A handle that is never signaled, for change requests left pending without the nsiproxy driver. */
++static HANDLE get_unsignaled_event( void )
++{
++    static HANDLE event;
++    HANDLE created;
++
++    if (!event)
++    {
++        created = CreateEventW( NULL, TRUE, FALSE, NULL );
++        if (created && InterlockedCompareExchangePointer( &event, created, NULL )) CloseHandle( created );
++    }
++    return event;
++}
++
+ DWORD WINAPI NsiAllocateAndGetTable( DWORD unk, const NPI_MODULEID *module, DWORD table, void **key_data, DWORD key_size,
+                                      void **rw_data, DWORD rw_size, void **dynamic_data, DWORD dynamic_size,
+                                      void **static_data, DWORD static_size, DWORD *count, DWORD unk2 )
+@@ -123,6 +139,14 @@
+     TRACE( "%p.\n", ovr );
+ 
+     if (!ovr) return ERROR_NOT_FOUND;
++    if (get_nsi_device( TRUE ) == INVALID_HANDLE_VALUE)
++    {
++        if (ovr->Internal != STATUS_PENDING) return ERROR_NOT_FOUND;
++        ovr->Internal = STATUS_CANCELLED;
++        ovr->InternalHigh = 0;
++        if (ovr->hEvent) SetEvent( ovr->hEvent );
++        return ERROR_SUCCESS;
++    }
+     if (!CancelIoEx(  get_nsi_device( TRUE ), ovr ))
+         err = GetLastError();
+ 
+@@ -365,7 +389,16 @@
+ 
+     if (params->unk) FIXME( "unknown parameter %#lx.\n", params->unk );
+ 
+-    if (device == INVALID_HANDLE_VALUE) return GetLastError();
++    if (device == INVALID_HANDLE_VALUE)
++    {
++        /* Without the nsiproxy driver no change is ever reported. Leave an asynchronous request pending, as it stays
++         * while nothing changes, instead of failing it: callers retry a failed request in a loop. */
++        if (!params->ovr) return GetLastError();
++        params->ovr->Internal = STATUS_PENDING;
++        params->ovr->InternalHigh = 0;
++        if (params->handle) *params->handle = get_unsignaled_event();
++        return ERROR_IO_PENDING;
++    }
+ 
+     in = malloc( in_size );
+     if (!in) return ERROR_OUTOFMEMORY;

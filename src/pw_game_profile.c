@@ -2,7 +2,8 @@
 #include "pw_game_profile.h"
 #include <string.h>
 
-enum { SET_MODE = 1u << 0, SET_MOUSE = 1u << 1, SET_SPEED = 1u << 2, SET_PRESET = 1u << 3 };
+enum { SET_MODE = 1u << 0, SET_MOUSE = 1u << 1, SET_SPEED = 1u << 2, SET_PRESET = 1u << 3,
+       SET_PLAYER2 = 1u << 4 };
 
 /* DualSense buttons in PW_GAME_BUTTON order, with their scePadRead bits. */
 static const struct { const char *name; uint32_t mask; } buttons[PW_GAME_BUTTON_COUNT] = {
@@ -97,20 +98,33 @@ static int binding(const uint8_t *v, size_t n, PwGameBinding *out)
     return PW_ERR_UNSUPPORTED;
 }
 
+/* A preset's name: the file name under input/ without .input. */
+static int preset_name(char *out, size_t capacity, const uint8_t *v, size_t n)
+{
+    if (!n || n >= capacity) return PW_ERR_MALFORMED;
+    for (size_t i = 0; i < n; i++) {
+        char c = (char)v[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_'))
+            return PW_ERR_MALFORMED;
+        out[i] = c;
+    }
+    out[n] = 0;
+    return PW_OK;
+}
+
 static int input_field(PwGameInput *input, const uint8_t *key, size_t key_length,
                        const uint8_t *v, size_t n, int allow_preset)
 {
     if (is(key, key_length, "preset")) {
         if (!allow_preset || (input->set & SET_PRESET)) return PW_ERR_MALFORMED;
-        if (!n || n >= sizeof(input->preset)) return PW_ERR_MALFORMED;
-        for (size_t i = 0; i < n; i++) {
-            char c = (char)v[i];
-            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_'))
-                return PW_ERR_MALFORMED;
-            input->preset[i] = c;
-        }
-        input->preset[n] = 0;
+        if (preset_name(input->preset, sizeof(input->preset), v, n) != PW_OK) return PW_ERR_MALFORMED;
         input->set |= SET_PRESET;
+        return PW_OK;
+    }
+    if (is(key, key_length, "player2")) {
+        if (!allow_preset || (input->set & SET_PLAYER2)) return PW_ERR_MALFORMED;
+        if (preset_name(input->player2, sizeof(input->player2), v, n) != PW_OK) return PW_ERR_MALFORMED;
+        input->set |= SET_PLAYER2;
         return PW_OK;
     }
     if (is(key, key_length, "mode")) {
@@ -199,15 +213,23 @@ static int display_field(PwGameDisplay *display, uint32_t *seen, const uint8_t *
         *seen |= 16u;
         return PW_OK;
     }
-    if (is(key, key_length, "frame_rate")) {
+    if (is(key, key_length, "menu")) {
         if (*seen & 64u) return PW_ERR_MALFORMED;
+        if (is(v, n, "true")) display->menu = 1;
+        else if (is(v, n, "false")) display->menu = 0;
+        else return PW_ERR_UNSUPPORTED;
+        *seen |= 64u;
+        return PW_OK;
+    }
+    if (is(key, key_length, "frame_rate")) {
+        if (*seen & 128u) return PW_ERR_MALFORMED;
         if (is(v, n, "0")) display->frame_rate = 0;
         else if (is(v, n, "120")) display->frame_rate = 120;
         else if (is(v, n, "60")) display->frame_rate = 60;
         else if (is(v, n, "40")) display->frame_rate = 40;
         else if (is(v, n, "30")) display->frame_rate = 30;
         else return PW_ERR_UNSUPPORTED;
-        *seen |= 64u;
+        *seen |= 128u;
         return PW_OK;
     }
     if (is(key, key_length, "opengl_thread")) {
@@ -580,8 +602,14 @@ size_t pw_game_graphics_env(const PwGameProfile *profile, PwGameEnv *env)
             opted |= !strcmp(profile->debug_env[i].name, "PW_VK_DEFER_DESCRIPTORS");
         if (!opted) env[count++] = (PwGameEnv){ "PW_VK_DEFER_DESCRIPTORS", "1" };
     }
-    if (profile->display.show_fps)
-        env[count++] = zink ? (PwGameEnv){ "GALLIUM_HUD", "simple,fps" } : (PwGameEnv){ "DXVK_HUD", "fps" };
+    /* DXVK's HUD draws the frame rate and the title's menu (its "menu" item,
+     * which an upstream DXVK ignores); Mesa's has no menu. */
+    if (zink) {
+        if (profile->display.show_fps) env[count++] = (PwGameEnv){ "GALLIUM_HUD", "simple,fps" };
+    } else if (profile->display.show_fps || profile->display.menu) {
+        env[count++] = (PwGameEnv){ "DXVK_HUD", !profile->display.menu ? "fps" :
+                                                profile->display.show_fps ? "fps,menu" : "menu" };
+    }
     return count;
 }
 
@@ -610,8 +638,8 @@ int pw_game_profile_parse(const uint8_t *bytes, size_t length, PwGameProfile *pr
         return status;
     if ((status = pw_app_profile_parse(bytes, application_end, &parsed.app)) != PW_OK)
         return status;
-    /* show_fps sets the HUD variable itself (pw_game_graphics_env). */
-    for (size_t i = 0; parsed.display.show_fps && i < parsed.debug_env_count; i++)
+    /* show_fps and menu set the HUD variable themselves (pw_game_graphics_env). */
+    for (size_t i = 0; (parsed.display.show_fps || parsed.display.menu) && i < parsed.debug_env_count; i++)
         if (!strcmp(parsed.debug_env[i].name, "DXVK_HUD") || !strcmp(parsed.debug_env[i].name, "GALLIUM_HUD"))
             return PW_ERR_UNSUPPORTED;
     /* A variable is set by one section only: [debug] env or [environment]. */

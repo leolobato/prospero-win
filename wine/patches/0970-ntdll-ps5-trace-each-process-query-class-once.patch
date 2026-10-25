@@ -6,8 +6,8 @@ Subject: [PATCH] ntdll: Trace each process query class once on PS5.
 The title's default WINEDEBUG keeps +process for process creation and
 exit. NtQueryInformationProcess traced every call, and a game that asks
 for ProcessAffinityMask every frame (Call of Juarez Gunslinger, 60 times
-a second) filled both 1 MB title log segments with that one line, so the
-+loaddll lines that place a crash address were gone.
+a second) filled the title log with that one line, so the +loaddll
+lines that place a crash address were gone.
 
 Each class below 128, which covers every class Windows defines, is now
 traced the first time it is queried. Wine's own classes above that keep

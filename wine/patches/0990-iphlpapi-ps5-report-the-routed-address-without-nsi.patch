@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sun, 25 Oct 2026 12:00:00 +0200
+Subject: [PATCH] iphlpapi: Report the routed IPv4 address as an adapter
+ without NSI.
+
+GetAdaptersAddresses reads the network adapters from the NSI tables,
+which Wine's nsiproxy driver serves through \\.\Nsi. A PS5 title runs no
+driver host (patch 0550), so the device does not open and the call
+fails: a game sees no adapter at all. P2P libraries that gather their
+local addresses from it (EOS P2P, libwebrtc) then have no ICE host
+candidate, open no UDP socket and never connect; joining another
+player's session waits until it times out.
+
+When the NSI interface table cannot be read, GetAdaptersAddresses now
+reports one up Ethernet adapter with the IPv4 address the system sends
+from: a UDP socket connected to a public address (which sends nothing)
+and getsockname. Nothing changes where NSI works.
+---
+ dlls/iphlpapi/iphlpapi_main.c | 94 ++++++++++++++++++++++++++++++++++-
+ 1 file changed, 93 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/iphlpapi/iphlpapi_main.c b/dlls/iphlpapi/iphlpapi_main.c
+--- a/dlls/iphlpapi/iphlpapi_main.c
++++ b/dlls/iphlpapi/iphlpapi_main.c
+@@ -1246,6 +1246,99 @@
+     return ERROR_SUCCESS;
+ }
+ 
++/* Without the nsiproxy driver (a PS5 title runs no driver host, so \\.\Nsi does not open) there is no NSI table to
++ * read and a game would see no adapter at all: P2P libraries then gather no local address and never connect. Report
++ * the IPv4 address the system sends from as one Ethernet adapter instead. Connecting a UDP socket sends nothing; it
++ * only picks the route. */
++static DWORD fallback_adapters_alloc( ULONG family, ULONG flags, IP_ADAPTER_ADDRESSES **info, ULONG *count )
++{
++    static const char guid[] = "{6E1B1C36-2F0A-4A43-9C5B-3E4F50534555}";
++    static const WCHAR name[] = L"Ethernet";
++    SOCKADDR_IN local = { 0 }, remote = { 0 };
++    IP_ADAPTER_UNICAST_ADDRESS *addr;
++    IP_ADAPTER_ADDRESSES *aa;
++    int len = sizeof(local);
++    WSADATA data;
++    SOCKET s;
++    char *str;
++
++    if (family != AF_UNSPEC && family != AF_INET) return ERROR_NO_DATA;
++    if (WSAStartup( MAKEWORD( 2, 2 ), &data )) return ERROR_NO_DATA;
++    remote.sin_family = AF_INET;
++    remote.sin_port = htons( 53 );
++    remote.sin_addr.s_addr = htonl( 0x08080808 );
++    s = socket( AF_INET, SOCK_DGRAM, IPPROTO_UDP );
++    if (s == INVALID_SOCKET || connect( s, (SOCKADDR *)&remote, sizeof(remote) ) ||
++        getsockname( s, (SOCKADDR *)&local, &len ) || !local.sin_addr.s_addr)
++    {
++        WARN( "no NSI tables and no routed IPv4 address, error %d\n", WSAGetLastError() );
++        if (s != INVALID_SOCKET) closesocket( s );
++        WSACleanup();
++        return ERROR_NO_DATA;
++    }
++    closesocket( s );
++    WSACleanup();
++
++    aa = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*aa) + ((sizeof(guid) + 1) & ~1) + 2 * sizeof(name) );
++    if (!aa) return ERROR_NOT_ENOUGH_MEMORY;
++    str = (char *)(aa + 1);
++    aa->Length = sizeof(*aa);
++    aa->IfIndex = 1;
++    memcpy( str, guid, sizeof(guid) );
++    aa->AdapterName = str;
++    str += (sizeof(guid) + 1) & ~1;
++    memcpy( str, name, sizeof(name) );
++    aa->Description = (WCHAR *)str;
++    str += sizeof(name);
++    memcpy( str, name, sizeof(name) );
++    aa->FriendlyName = (WCHAR *)str;
++    aa->DnsSuffix = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(WCHAR) );
++    if (!aa->DnsSuffix)
++    {
++        HeapFree( GetProcessHeap(), 0, aa );
++        return ERROR_NOT_ENOUGH_MEMORY;
++    }
++    aa->PhysicalAddressLength = 6;
++    aa->PhysicalAddress[0] = 0x02; /* locally administered */
++    memcpy( aa->PhysicalAddress + 2, &local.sin_addr, 4 );
++    aa->Mtu = 1500;
++    aa->IfType = IF_TYPE_ETHERNET_CSMACD;
++    aa->OperStatus = IfOperStatusUp;
++    aa->TransmitLinkSpeed = aa->ReceiveLinkSpeed = 1000000000;
++    aa->Luid.Info.IfType = IF_TYPE_ETHERNET_CSMACD;
++    aa->Luid.Info.NetLuidIndex = 1;
++    aa->ConnectionType = NET_IF_CONNECTION_DEDICATED;
++    aa->Ipv4Enabled = TRUE;
++    aa->Ipv4Metric = 25;
++
++    if (!(flags & GAA_FLAG_SKIP_UNICAST))
++    {
++        addr = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*addr) + sizeof(SOCKADDR_IN) );
++        if (!addr)
++        {
++            adapters_addresses_free( aa );
++            return ERROR_NOT_ENOUGH_MEMORY;
++        }
++        addr->Length = sizeof(*addr);
++        addr->Address.lpSockaddr = (SOCKADDR *)(addr + 1);
++        addr->Address.iSockaddrLength = sizeof(SOCKADDR_IN);
++        ((SOCKADDR_IN *)addr->Address.lpSockaddr)->sin_family = AF_INET;
++        ((SOCKADDR_IN *)addr->Address.lpSockaddr)->sin_addr = local.sin_addr;
++        addr->PrefixOrigin = IpPrefixOriginDhcp;
++        addr->SuffixOrigin = IpSuffixOriginDhcp;
++        addr->DadState = IpDadStatePreferred;
++        addr->ValidLifetime = addr->PreferredLifetime = addr->LeaseLifetime = ~0u;
++        addr->OnLinkPrefixLength = 24;
++        addr->Flags = IP_ADAPTER_ADDRESS_DNS_ELIGIBLE;
++        aa->FirstUnicastAddress = addr;
++    }
++
++    TRACE( "no NSI tables: one adapter with %s\n", debugstr_a( inet_ntoa( local.sin_addr ) ) );
++    *info = aa;
++    *count = 1;
++    return ERROR_SUCCESS;
++}
++
+ static DWORD adapters_addresses_alloc( ULONG family, ULONG flags, IP_ADAPTER_ADDRESSES **info, ULONG *count )
+ {
+     IP_ADAPTER_ADDRESSES *aa = NULL;
+@@ -1260,7 +1353,7 @@
+     err = NsiAllocateAndGetTable( 1, &NPI_MS_NDIS_MODULEID, NSI_NDIS_IFINFO_TABLE, (void **)&luids, sizeof(*luids),
+                                   (void **)&rw, sizeof(*rw), (void **)&dyn, sizeof(*dyn),
+                                   (void **)&stat, sizeof(*stat), count, 0 );
+-    if (err) return err;
++    if (err) return fallback_adapters_alloc( family, flags, info, count );
+ 
+     if (!*count)
+     {
+-- 
+2.43.0

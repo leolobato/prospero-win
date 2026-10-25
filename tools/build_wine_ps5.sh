@@ -97,6 +97,9 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # xinput1_4. quartz: its renderers wait for a state change without the filter
 # lock (patch 0700). winevulkan: emit its PE thunks alongside the Unix side so command-stream
 # hooks and dispatch table capability checks come from the same source.
+# xaudio2_* and xactengine*: they link Wine's static FAudio, whose resampler
+# wrote past its buffer (patch 0972).
+# kernelbase: no debugger start in a title (patch 0971).
 # ntoskrnl.exe, winebus.sys and setupapi: the game hosts the controller's HID
 # drivers and installs them without a service manager (patches 0951-0954).
 # A module with no extension is a .dll. wow64win (x86_64 only): a 32-bit
@@ -108,7 +111,7 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # wrote past its buffer (patch 0972).
 # wined3d: it carries vkd3d-shader, which d3dcompiler uses to compile D3DX
 # effects with samplers and in-pass shaders (patches 0959-0963).
-PE_MODULES="ntdll win32u rtworkq xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan ntoskrnl.exe winebus.sys setupapi gdi32 kernelbase wined3d"
+PE_MODULES="ntdll win32u rtworkq xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan ntoskrnl.exe winebus.sys setupapi gdi32 kernelbase wined3d iphlpapi nsi ws2_32"
 PE_MODULES="$PE_MODULES xaudio2_0 xaudio2_1 xaudio2_2 xaudio2_3 xaudio2_4 xaudio2_5 xaudio2_6 xaudio2_7 xaudio2_8 xaudio2_9 xactengine2_0 xactengine2_4 xactengine2_7 xactengine2_9 xactengine3_0 xactengine3_1 xactengine3_2 xactengine3_3 xactengine3_4 xactengine3_5 xactengine3_6 xactengine3_7"
 # Everything optional but FreeType (built below) is off: the console has none
 # of these libraries, and a configure-time probe against the payload SDK must
@@ -284,6 +287,8 @@ python3 "$root/tools/stage_vk_batch.py" --source "$tree" --repo "$root" ||
 # Stage the pointer-free shared-clock ABI used by PE32 and the provider.
 cp "$root/wine/ps5/time/pw_qpc_clock.h" "$tree/dlls/ntdll/pw_qpc_clock.h" ||
     fail "cannot stage shared-clock ABI"
+cp "$root/wine/ps5/menu/pw_title_menu.h" "$tree/dlls/ntdll/pw_title_menu.h" ||
+    fail "cannot stage title-menu ABI"
 cp "$root/wine/ps5/input/pw_key_shared.h" "$tree/dlls/win32u/pw_key_shared.h" ||
     fail "cannot stage shared-input ABI"
 
@@ -302,7 +307,8 @@ stamp=$(
         "${GSTREAMER_CFLAGS:-}" "${GSTREAMER_LIBS:-}"
       for patch in $ordered; do cat "$patches/$patch"; done
       cat "$root/tools/stage_vk_batch.py" "$root/tools/generate_vk_codecs.py" "$root"/wine/ps5/pw_vk_*.[ch] \
-          "$root"/wine/ps5/vulkan/*.[ch] "$root/wine/ps5/time/pw_qpc_clock.h" "$root/wine/ps5/input/pw_key_shared.h"; } | sha256sum | cut -c1-64)
+          "$root"/wine/ps5/vulkan/*.[ch] "$root/wine/ps5/time/pw_qpc_clock.h" "$root/wine/ps5/input/pw_key_shared.h" \
+          "$root/wine/ps5/menu/pw_title_menu.h"; } | sha256sum | cut -c1-64)
 build=$work/build
 if [ ! -f "$build/Makefile" ] || [ "$(cat "$build/.prospero-stamp" 2>/dev/null)" != "$stamp" ]; then
     rm -rf "$build"
