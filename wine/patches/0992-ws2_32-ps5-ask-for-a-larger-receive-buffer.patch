@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sun, 25 Oct 2026 14:00:00 +0200
+Subject: [PATCH] ws2_32: Ask for a receive buffer of at least 1 MiB.
+
+A game sets SO_RCVBUF to 32 KiB on its UDP socket and stops reading it
+while it loads a map. The PS5's BSD network stack drops datagrams that
+do not fit, counting each one's whole storage against the limit; Windows
+and Linux leave more room. An Unreal Engine game joining a dedicated
+server loses the replication data the server sends during the load, and
+the server gives up on the connection: the join times out.
+
+setsockopt( SO_RCVBUF ) now asks for at least 1 MiB, and sets the
+requested size as before if the system refuses that.
+---
+ dlls/ws2_32/socket.c | 17 ++++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/dlls/ws2_32/socket.c b/dlls/ws2_32/socket.c
+--- a/dlls/ws2_32/socket.c
++++ b/dlls/ws2_32/socket.c
+@@ -3300,7 +3300,10 @@
+     else
+         return n;
+ }
++
+ 
++/* The smallest receive buffer setsockopt( SO_RCVBUF ) asks for. */
++#define MIN_RCVBUF (1024 * 1024)
+ 
+ static int server_setsockopt( SOCKET s, ULONG code, const char *optval, int optlen )
+ {
+@@ -3392,6 +3395,20 @@
+ 
+         case SO_RCVBUF:
+             if (optlen < 0) optlen = 4;
++            /* A BSD stack drops what does not fit the buffer, counting each datagram's whole storage against it,
++             * where Windows and Linux leave more room. A game that asks for a small buffer and then stops reading
++             * while it loads loses the server's data. Ask for at least MIN_RCVBUF; keep the game's size if the
++             * system refuses. */
++            if (optval && optlen >= sizeof(value))
++            {
++                memcpy( &value, optval, sizeof(value) );
++                if (value < MIN_RCVBUF)
++                {
++                    value = MIN_RCVBUF;
++                    if (!server_setsockopt( s, IOCTL_AFD_WINE_SET_SO_RCVBUF, (char *)&value, sizeof(value) ))
++                        return 0;
++                }
++            }
+             return server_setsockopt( s, IOCTL_AFD_WINE_SET_SO_RCVBUF, optval, optlen );
+ 
+         case SO_RCVTIMEO:
