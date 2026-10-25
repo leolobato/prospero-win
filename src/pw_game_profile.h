@@ -11,6 +11,9 @@
  *   view = window          ; window: show the game's windows; desktop: all of it
  *   show_fps = true        ; a frame-rate counter in the top left (default: true):
  *                          ; DXVK's HUD, or Mesa's for graphics = opengl
+ *   menu = true            ; L3+R3 opens prospero-win's menu over the game
+ *                          ; (pw_game_menu; drawn by DXVK's HUD, so DXVK games
+ *                          ; only); default false
  *   refresh = 120          ; the video output's rate, 60 or 120 (default 60):
  *                          ; 120 needs a 120 Hz TV; a game that counts time
  *                          ; in frames runs too fast (PS5_VIDEOOUT_REFRESH)
@@ -29,6 +32,8 @@
  *   mouse_speed = 1200     ; pointer pixels per second at full tilt
  *   cross = space          ; <button> = <key> | mouse_left | mouse_right |
  *   r2 = mouse_left        ;            mouse_middle | vk:0xNN | none
+ *   player2 = pinball-p2   ; a keyboard preset for a second DualSense, the pad
+ *                          ; of another signed-in user (local multiplayer)
  *
  *   [debug]
  *   winedebug = +seh,+virtual   ; Wine's debug channels for this game (default:
@@ -39,7 +44,7 @@
  *                               ; and may not be one the title sets itself
  *                               ; (PW_VK_BATCH, PW_INPUT_SHARED_FAST,
  *                               ; PW_QPC_TSC_*, GALLIUM_DRIVER, and DXVK_HUD
- *                               ; or GALLIUM_HUD while show_fps is on);
+ *                               ; or GALLIUM_HUD while show_fps or menu is on);
  *                               ; values: letters, digits and _ + - , . = : /
  *
  *   [environment]
@@ -111,6 +116,7 @@ typedef struct PwGameInput {
     uint32_t mouse_speed;
     PwGameBinding bindings[PW_GAME_BUTTON_COUNT];   /* in PW_GAME_BUTTON order */
     char preset[PW_APP_ID_CAPACITY];
+    char player2[PW_APP_ID_CAPACITY];   /* the second pad's preset, profile only */
     uint32_t set;       /* which of mode/mouse/mouse_speed a file set (overlay) */
 } PwGameInput;
 
@@ -119,6 +125,7 @@ typedef struct PwGameDisplay {
     PwGameScaling scaling;
     PwGameView view;            /* window by default: a small game fills the TV */
     int show_fps;               /* the graphics backend's frame-rate counter */
+    int menu;                   /* the in-game menu (pw_game_menu) */
     uint32_t refresh;           /* the output's rate: 60 or 120 */
     uint32_t frame_rate;        /* a cap: 0 (none), 120, 60, 40 or 30 */
     int opengl_thread;          /* parsed but unused since Zink */

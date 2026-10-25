@@ -34,6 +34,7 @@
 #include "../src/pw_title_id.h"
 #include "../src/pw_title_session.h"
 #include "../src/pw_wine_launch.h"
+#include "../src/pw_game_menu.h"
 #include "pw_data_mount.h"
 #include "pw_audio_ps5.h"
 #include "pw_pad_ps5.h"
@@ -493,6 +494,32 @@ static int wine_present(void *context, const void *bgra, uint32_t width, uint32_
  * output (patch 0460), which the title must close first. The main thread
  * owns the title's, so the driver's request waits for it to be closed. */
 static int display_request, display_closed;
+enum { PW_WINE64_QUIESCE_MS = 500 };
+
+/* Wine's dlsym, for the exports of the modules it loaded (libvulkan.prx). */
+static void *(*wine_dlsym_fn)(void *, const char *);
+
+/* Once the display is Vulkan's, the game's last flips are still on their
+ * way when Wine exits: RADV's own flip thread submits them after the game's
+ * threads are gone. A process replaced with such a flip queued stayed at
+ * the system's "Closing" screen (Project Eagle, 2026-10-12). libvulkan.prx
+ * drains them (pw_videoout_quiesce); an older driver has no such export. */
+static void display_quiesce(const char *reason)
+{
+    int (*quiesce)(unsigned, unsigned *, int *);
+    unsigned waited = 0;
+    int pending = 0, status;
+
+    if (!__atomic_load_n(&display_closed, __ATOMIC_ACQUIRE) || !wine_dlsym_fn) return;
+    quiesce = (int (*)(unsigned, unsigned *, int *))(uintptr_t)wine_dlsym_fn(NULL, "pw_videoout_quiesce");
+    if (!quiesce) {
+        PS5LOG_LOG("PW_WINE64 display quiesce reason=%s status=unavailable", reason);
+        return;
+    }
+    status = quiesce(PW_WINE64_QUIESCE_MS, &waited, &pending);
+    PS5LOG_LOG("PW_WINE64 display quiesce reason=%s status=%d waited_ms=%u pending=%d", reason, status,
+               waited, pending);
+}
 
 static int wine_release_display(void *context)
 {
@@ -757,6 +784,7 @@ static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reas
         return;
     }
     snprintf(sandbox_eboot, sizeof(sandbox_eboot), "%s/eboot.bin", sandbox_app0);
+    display_quiesce(reason);
     for (size_t i = 0; i < sizeof(eboots) / sizeof(eboots[0]); i++) {
         PS5LOG_LOG("PW_WINE64 restart to=%s cycle=%u reason=%s eboot=%s", app ? app->id : "launcher",
                    (unsigned)cycle, reason, eboots[i]);
@@ -1294,12 +1322,21 @@ int main(int argc, char **argv)
     static PwPadPs5 pad;
     static PwHidPs5 hid;
     static PwGameInput game_input;
+    /* [input] player2: a second signed-in user's DualSense as more keys. */
+    static PwPadPs5 pad2;
+    static PwGameInput game_input2;
+    int player2 = 0, pad2_status = PW_ERR_NOT_FOUND;
+    uint64_t pad2_seen = 0;   /* the tick pad 2 last reported a controller */
     const PwGameProfile *game = NULL;
     int scaling = PW_PRESENT_SCALE_FIT;
     PwWinePointer pointer = { 0, 0 };
     int (*post_input)(const PwWineInput *) = NULL;
     void (*set_pad)(const PwWinePad *) = NULL;
     int (*rumble)(uint32_t *, uint32_t *) = NULL;
+    /* [display] menu: L3+R3 opens the menu, DXVK's HUD draws it (patch 0973). */
+    void (*set_menu)(const struct pw_title_menu *) = NULL;
+    static PwGameMenu game_menu;
+    static PwPadPs5 game_pad;   /* the pad as the game sees it while the menu has it */
     uint64_t vibrations = 0;
     int pad_seen = -1;
     uint64_t shown_sequence = 0, shown = 0, posted = 0, refused = 0;
@@ -1418,6 +1455,11 @@ int main(int argc, char **argv)
         } else {
             input_status = pw_wine_library_input(game, library_root, &game_input);
         }
+        int input2_status = pw_wine_library_player2_input(game, library_root, &game_input2);
+        player2 = input2_status == PW_OK;
+        if (input2_status != PW_ERR_NOT_FOUND)
+            PS5LOG_LOG("PW_WINE64 player2 preset=%s input=%s", game->input.player2,
+                       pw_result_name(input2_status));
         scaling = (int)game->display.scaling;
         if (game->display.view == PW_GAME_VIEW_DESKTOP) snprintf(view, sizeof(view), "desktop");
         if (game->display.width) {
@@ -1632,6 +1674,8 @@ int main(int argc, char **argv)
                start.segment_count, start.module_start_result, start.adopted != NULL,
                start.virtual_stats != NULL);
     install_early_fault_report(&start);
+    if (status == PW_OK)
+        wine_dlsym_fn = (void *(*)(void *, const char *))(uintptr_t)pw_prx_lookup(start.descriptor, "dlsym");
     atexit(on_exit_report);
     if (status == PW_OK) {
         void (*set_sink)(void (*)(const char *, size_t)) = (void (*)(void (*)(const char *, size_t)))
@@ -1650,11 +1694,19 @@ int main(int argc, char **argv)
             rumble = (int (*)(uint32_t *, uint32_t *))
                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_rumble");
         }
+        if (game && game->display.menu) {
+            set_menu = (void (*)(const struct pw_title_menu *))
+                (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_menu");
+            PS5LOG_LOG("PW_WINE64 menu=%s", set_menu ? "l3+r3" : "unavailable");
+        }
         video_status = pw_videoout_ps5_open(&video);
         pad_status = pw_pad_ps5_platform_ops(&pad_ops);
         if (pad_status == PW_OK)
             pad_status = pw_pad_ps5_open(&pad, &pad_ops, pad_open_map,
                                          sizeof(pad_open_map) / sizeof(pad_open_map[0]));
+        if (player2 && pad_status == PW_OK)
+            pad2_status = pw_pad_ps5_open_other(&pad2, &pad, -1, pad_open_map,
+                                                sizeof(pad_open_map) / sizeof(pad_open_map[0]));
         /* A USB keyboard and mouse, the foreground user's, as the pad's. */
         if (post_input) {
             int32_t user = pad_status == PW_OK ? pad.user_id : -1;
@@ -1683,6 +1735,9 @@ int main(int argc, char **argv)
                    set_pad != NULL,
                    pw_result_name(video_status),
                    pw_result_name(pad_status), pw_result_name(hid_status));
+        if (player2)
+            PS5LOG_LOG("PW_WINE64 pad2 status=%s user=%d", pw_result_name(pad2_status),
+                       (int)pad2.user_id);
         {
             void (*set_audio)(PwWineAudioSink, void *) = (void (*)(PwWineAudioSink, void *))
                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_audio_sink");
@@ -1805,12 +1860,33 @@ int main(int argc, char **argv)
                        (unsigned long long)pad.intercepted_samples, (unsigned long long)pad.disconnected_samples,
                        (unsigned long long)pad.read_errors, (unsigned)pad.last_generation);
         }
+        /* The menu takes the pad while it is open: the game then sees it
+         * idle, and the buttons that closed it stay the menu's until they
+         * are let go. Closing the game below still reads the real pad. */
+        const PwPadPs5 *seen = &pad;
+        if (pad_read && set_menu) {
+            struct pw_title_menu shown;
+            PwGameMenuView view;
+            pw_game_menu_tick(&game_menu, pad.core.previous_buttons, pad.core.pressed_edges,
+                              pad.core.released_edges, &shown, &view);
+            set_menu(&shown);
+            game_pad = pad;
+            game_pad.core.previous_buttons = view.held;
+            game_pad.core.pressed_edges = view.pressed;
+            game_pad.core.released_edges = view.released;
+            if (view.neutral) {
+                game_pad.left_stick.x = game_pad.left_stick.y = 0x80;
+                game_pad.right_stick.x = game_pad.right_stick.y = 0x80;
+                game_pad.l2 = game_pad.r2 = 0;
+            }
+            seen = &game_pad;
+        }
         /* XInput controller 0: the DualSense, and in a script build the
          * macro's controller added to it, every frame, so a scripted press
          * stays down until its release. */
         if (set_pad) {
             PwWinePad state;
-            int connected = pw_wine_game_pad(pad_read ? &pad : NULL, &state), scripted = 0;
+            int connected = pw_wine_game_pad(pad_read ? seen : NULL, &state), scripted = 0;
 #if PW_WINE64_SCRIPT
             scripted = script_input.pad_events != 0;
             connected = pw_wine_script_pad(&state, connected, &script_pad, scripted);
@@ -1818,12 +1894,12 @@ int main(int argc, char **argv)
             if (pad_read || scripted) set_pad(connected ? &state : NULL);
         }
         if (pad_read) {
-            size_t count = pw_wine_game_inputs(&game_input, pad.core.pressed_edges,
-                                               pad.core.released_edges, events,
+            size_t count = pw_wine_game_inputs(&game_input, seen->core.pressed_edges,
+                                               seen->core.released_edges, events,
                                                sizeof(events) / sizeof(events[0]) - 1);
             if (game_input.mouse != PW_GAME_STICK_NONE) {
                 const PwPadPs5Stick *stick = game_input.mouse == PW_GAME_STICK_LEFT ?
-                                             &pad.left_stick : &pad.right_stick;
+                                             &seen->left_stick : &seen->right_stick;
                 count += (size_t)pw_wine_pointer_step(&pointer, stick->x, stick->y,
                                                       game_input.mouse_speed,
                                                       PW_WINE64_TICK_US, &events[count]);
@@ -1840,6 +1916,40 @@ int main(int argc, char **argv)
                 if (!vibrations++ || vibrate != PW_OK)
                     PS5LOG_LOG("PW_WINE64 rumble left=%u right=%u status=%s rc=%d", (unsigned)left,
                                (unsigned)right, pw_result_name(vibrate), pad.vibration_rc);
+            }
+        }
+        /* The second player's pad: keys only, through its own preset, read
+         * whether or not the first pad's read worked. A user who signs in
+         * later is found by a retry every few seconds; a pick that shows no
+         * controller for that long, or loses it, is closed and the next
+         * signed-in user tried. Closing the game and rumble stay the first
+         * pad's. */
+        if (player2 && post_input) {
+            const uint64_t retry = 3 * PW_WINE64_TICKS_PER_S;
+            if (pad2_status == PW_OK && pw_pad_ps5_read(&pad2) == PW_OK) {
+                if (pad2.core.connected) pad2_seen = tick;
+                size_t count2 = pw_wine_game_inputs(&game_input2, pad2.core.pressed_edges,
+                                                    pad2.core.released_edges, events,
+                                                    sizeof(events) / sizeof(events[0]) - 1);
+                for (size_t i = 0; i < count2; i++) {
+                    if (post_input(&events[i]) == 0) posted++;
+                    else refused++;
+                }
+            }
+            int32_t after = -1;
+            if (pad2_status == PW_OK && !pad2.core.connected && tick - pad2_seen >= retry) {
+                after = pad2.user_id;
+                (void)pw_pad_ps5_close(&pad2);
+                pad2_status = PW_ERR_NOT_FOUND;
+            }
+            if (pad2_status != PW_OK && pad2_status != PW_ERR_UNSUPPORTED &&
+                (after >= 0 || tick % retry == 0)) {
+                pad2_status = pw_pad_ps5_open_other(&pad2, &pad, after, pad_open_map,
+                                                    sizeof(pad_open_map) / sizeof(pad_open_map[0]));
+                pad2_seen = tick;
+                if (pad2_status == PW_OK && pad2.user_id != after)
+                    PS5LOG_LOG("PW_WINE64 pad2 status=%s user=%d", pw_result_name(pad2_status),
+                               (int)pad2.user_id);
             }
         }
         if (__atomic_load_n(&display_request, __ATOMIC_ACQUIRE) &&

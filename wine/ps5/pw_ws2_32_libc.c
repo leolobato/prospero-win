@@ -477,7 +477,9 @@ struct hostent *gethostbyname(const char *name)
 /* A reverse lookup through getnameinfo. */
 struct hostent *gethostbyaddr(const void *address, socklen_t length, int family)
 {
-    struct sockaddr_storage storage;
+    /* Zeroed: pw_sockaddr() fills it while getnameinfo()'s arguments are
+     * evaluated, which Clang 21 cannot see (-Wuninitialized-const-pointer). */
+    struct sockaddr_storage storage = {0};
     struct pw_ws2_address answer = { family, {0} };
     char name[NI_MAXHOST];
 

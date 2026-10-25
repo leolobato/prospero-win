@@ -166,7 +166,7 @@ game_slug: test-game
 runner: wine
 prospero:
   display: {desktop: 1920x1080, scaling: fit, show_fps: true, refresh: 120, frame_rate: 60, opengl_thread: true}
-  input: {preset: mouse}
+  input: {preset: mouse, player2: mouse-p2}
 script:
   game:
     exe: drive_c/Games/Test/game.exe
@@ -210,6 +210,10 @@ def check_dxvk_releases() -> None:
     assert url == ("https://github.com/mpereiraesaa/dxvk/releases/download/"
                    "v2.6.2-prospero2/dxvk-2.6.2-prospero2.tar.gz")
     assert digest == "c00c1cd7df7ce70e89130b61c1fcd2d3a18ac473f274a219da4478147e4f3c90"
+    url, digest = pw_install.dxvk_release("2.6.2-prospero3")
+    assert url == ("https://github.com/mpereiraesaa/dxvk/releases/download/"
+                   "v2.6.2-prospero3/dxvk-2.6.2-prospero3.tar.gz")
+    assert digest == "e1596b4fd763c5f770634b133f798b5ef7df235cfbbbabc245050b4cca514d6b"
     # install_dxvk reads dxvk-<version>/x32 and x64 from an archive named
     # after the release, upstream's layout, which every pinned one follows.
     for version, (url, digest) in pw_install.DXVK_RELEASES.items():
@@ -294,7 +298,7 @@ def main() -> int:
                      "working_directory = C:\\Games\\Test", "arguments = -window -opengl",
                      "dll_overrides = d3d8,d3d9,d3d10core,d3d11,dxgi,ddraw=n", "prefix = test-game",
                      "runtime = wine-wow64", "architecture = pe32", "graphics = dxvk",
-                     "[display]", "desktop = 1920x1080", "scaling = fit", "show_fps = true", "refresh = 120", "frame_rate = 60", "opengl_thread = true", "[input]", "preset = mouse"):
+                     "[display]", "desktop = 1920x1080", "scaling = fit", "show_fps = true", "refresh = 120", "frame_rate = 60", "opengl_thread = true", "[input]", "preset = mouse", "player2 = mouse-p2"):
             assert line in profile.splitlines(), (line, profile)
 
         # A PS5 backend choice overrides Lutris's DXVK setting for this game.

@@ -103,12 +103,48 @@ preset instead. Keyboard and mouse input through DirectInput should work,
 since it comes from the same place as normal Windows input, but it hasn't
 been tested.
 
+### A second player
+
+A game that two people play on one PC keyboard, each with their own keys,
+can give the second player a DualSense too. The profile names a second
+keyboard preset in its `[input]` section:
+
+```ini
+[input]
+preset = atomic-bomberman
+player2 = atomic-bomberman-p2
+```
+
+The second DualSense has to be signed in as another PS5 user (a second
+account or a guest): the app opens the pad of a signed-in user other than
+the one who started it, and looks again every few seconds while there is
+none, so the second player can sign in after the game has started. With
+more users signed in, a pick that shows no controller for a few seconds,
+or loses it, makes way for the next user. Its buttons send keys through
+`player2`'s preset only: it never acts as an Xbox controller, the preset's
+mouse buttons and `mouse` stick are ignored, and closing the game with
+Options + Create stays the first player's.
+
 ## Closing a game
 
 Hold **Options + Create** for a second on the DualSense. The game is asked
 to close as with Alt+F4, and you return to the launcher; if it doesn't close
 within a few seconds, the app leaves it. From a keyboard, Alt+F4 or the
 game's own quit option do the same.
+
+## The in-game menu
+
+A profile with `menu = true` in its `[display]` section opens prospero-win's
+menu over the game when you press **L3 + R3** (both sticks) together. While
+it is open the game sees the DualSense idle: the d-pad moves the cursor,
+Cross picks a line and Circle or L3 + R3 closes it. Buttons still held as it
+closes stay away from the game until you let go of them. Closing the game
+with Options + Create works with the menu open.
+
+DXVK's HUD draws the menu, so it appears in Direct3D games only, and only
+with the DXVK build that has the `menu` item (`2.6.2-prospero3` and later;
+an older DXVK draws nothing, and the pad is still the menu's while it is
+open). The menu has no entries of its own yet.
 
 ## Writing a preset
 

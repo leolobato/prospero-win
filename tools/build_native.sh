@@ -247,7 +247,7 @@ sources=(
     src/pw_title_publication.c src/pw_publication_sha256.c
     third_party/mbedtls-publication/library/sha256.c
     src/pw_app_profile.c src/pw_profile_catalog.c src/pw_launcher_render.c src/pw_present.c
-    src/pw_pad.c src/pw_hid.c src/pw_spinner.c src/pw_script_input.c src/pw_tsc_calibrate.c
+    src/pw_pad.c src/pw_game_menu.c src/pw_hid.c src/pw_spinner.c src/pw_script_input.c src/pw_tsc_calibrate.c
     wine/ps5/pw_wine_prx.c
 )
 objects=()

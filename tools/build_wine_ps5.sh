@@ -97,6 +97,9 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # xinput1_4. quartz: its renderers wait for a state change without the filter
 # lock (patch 0700). winevulkan: emit its PE thunks alongside the Unix side so command-stream
 # hooks and dispatch table capability checks come from the same source.
+# xaudio2_* and xactengine*: they link Wine's static FAudio, whose resampler
+# wrote past its buffer (patch 0972).
+# kernelbase: no debugger start in a title (patch 0971).
 # ntoskrnl.exe, winebus.sys and setupapi: the game hosts the controller's HID
 # drivers and installs them without a service manager (patches 0951-0954).
 # A module with no extension is a .dll. wow64win (x86_64 only): a 32-bit
@@ -284,6 +287,8 @@ python3 "$root/tools/stage_vk_batch.py" --source "$tree" --repo "$root" ||
 # Stage the pointer-free shared-clock ABI used by PE32 and the provider.
 cp "$root/wine/ps5/time/pw_qpc_clock.h" "$tree/dlls/ntdll/pw_qpc_clock.h" ||
     fail "cannot stage shared-clock ABI"
+cp "$root/wine/ps5/menu/pw_title_menu.h" "$tree/dlls/ntdll/pw_title_menu.h" ||
+    fail "cannot stage title-menu ABI"
 cp "$root/wine/ps5/input/pw_key_shared.h" "$tree/dlls/win32u/pw_key_shared.h" ||
     fail "cannot stage shared-input ABI"
 
@@ -302,7 +307,8 @@ stamp=$(
         "${GSTREAMER_CFLAGS:-}" "${GSTREAMER_LIBS:-}"
       for patch in $ordered; do cat "$patches/$patch"; done
       cat "$root/tools/stage_vk_batch.py" "$root/tools/generate_vk_codecs.py" "$root"/wine/ps5/pw_vk_*.[ch] \
-          "$root"/wine/ps5/vulkan/*.[ch] "$root/wine/ps5/time/pw_qpc_clock.h" "$root/wine/ps5/input/pw_key_shared.h"; } | sha256sum | cut -c1-64)
+          "$root"/wine/ps5/vulkan/*.[ch] "$root/wine/ps5/time/pw_qpc_clock.h" "$root/wine/ps5/input/pw_key_shared.h" \
+          "$root/wine/ps5/menu/pw_title_menu.h"; } | sha256sum | cut -c1-64)
 build=$work/build
 if [ ! -f "$build/Makefile" ] || [ "$(cat "$build/.prospero-stamp" 2>/dev/null)" != "$stamp" ]; then
     rm -rf "$build"

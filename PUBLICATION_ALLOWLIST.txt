@@ -74,6 +74,8 @@ src/pw_audio_mix.c
 src/pw_audio_mix.h
 src/pw_pad.c
 src/pw_pad.h
+src/pw_game_menu.c
+src/pw_game_menu.h
 src/pw_guest_call.c
 src/pw_guest_call.h
 tests/test_native_profile_split.py
@@ -81,6 +83,7 @@ tests/test_pw_audio_ps5.c
 tests/test_pw_audio_mix.c
 tests/test_pw_app_profile.c
 tests/test_pw_pad.c
+tests/test_pw_game_menu.c
 tests/test_pw_pad_ps5.c
 tests/test_status_vocabulary.py
 tests/test_classify_x86.py
@@ -196,6 +199,7 @@ wine/patches/0110-server-run-in-process-on-ps5.patch
 wine/patches/0120-server-ps5-default-audio-driver.patch
 wine/patches/0130-ntdll-ps5-report-main-exe-load-failure.patch
 wine/patches/0140-ntdll-ps5-list-directory-by-name.patch
+wine/patches/0145-ntdll-ps5-resolve-names-under-a-root-directory.patch
 wine/patches/0150-server-ps5-save-the-registry-in-1mib-writes.patch
 wine/patches/0160-ntdll-ps5-keep-listings-of-searched-directories.patch
 wine/patches/0111-ntdll-connect-to-the-in-process-server.patch
@@ -312,6 +316,7 @@ tests/test_pw_lapy_elevation.c
 tests/test_pw_wine_cwd.c
 tests/test_pw_wine_cwd_listing.c
 tests/test_wine_lookup_misses.py
+tests/test_wine_root_directory.py
 wine/ps5/pw_wine_cwd.c
 wine/ps5/pw_wine_cwd.h
 wine/ps5/pw_wine_cwd_libc.c
@@ -364,7 +369,6 @@ docs/SHARED_MUTEX_BACKEND.md
 wine/patches/0820-ntdll-ps5-shared-mutex-client.patch
 tests/fixtures/wine_shared_mutex_client.c
 tests/test_wine_shared_mutex_client.py
-
 wine/patches/0880-wine-ps5-runtime-defaults.patch
 wine/patches/0870-server-ps5-release-image-view-fds.patch
 tests/fixtures/wine_image_view_fds.c
@@ -475,7 +479,6 @@ wine/patches/0614-wow64-ps5-translator-when-the-native-cpu-does-not-start.patch
 tests/test_native_slow_syscall_events.py
 tests/test_package_mesa_zink.py
 tools/package_mesa_zink.py
-
 # Shared clock and input fast-path contracts
 docs/shared-clock-fastpath.md
 tests/test_pw_qpc_clock.c
@@ -487,6 +490,7 @@ wine/patches/0901-win32u-ps5-shared-key-state-fastpath.patch
 wine/patches/0902-win32u-ps5-send-extended-keys-as-extended.patch
 wine/patches/0903-ntdll-ps5-keep-the-fs-base-of-a-resumed-64-bit-thread.patch
 wine/ps5/input/pw_key_shared.h
+wine/ps5/menu/pw_title_menu.h
 tests/lab/pw_qpc_bridge.c
 tests/lab/pw_key_bridge.c
 tools/test_wine_qpc_bridge.py
@@ -494,28 +498,20 @@ tools/test_wine_key_bridge.py
 tools/generate_vk_codecs.py
 wine/ps5/vulkan/pw_vk_codec.c
 wine/ps5/vulkan/pw_vk_codec.h
-
 docs/vulkan-generated-codecs.md
 tests/lab/vk_codecs_runtime.py
 tests/test_vk_codec.c
 tests/test_vk_codecs.py
-
 wine/ps5/vulkan/pw_vk_retire.c
 wine/ps5/vulkan/pw_vk_retire.h
-
 tests/test_vk_retire.py
-
 tests/test_vk_generated_stage.py
-
 tests/lab/vk_generated_replay.c
-
 tests/lab/vk_batch_owned.c
-
 wine/ps5/pw_vk_spsc.c
 wine/ps5/pw_vk_spsc.h
 tests/test_vk_spsc.c
 docs/vulkan-spsc-append.md
-
 wine/ps5/pw_vk_replay.c
 wine/ps5/pw_vk_replay.h
 tests/test_vk_replay.c
@@ -524,29 +520,16 @@ tests/lab/vk_multidraw_stride.c
 tools/stage_vk_replay_lifecycle.py
 tests/lab/vk_replay_lifecycle.py
 docs/vulkan-replay-lifecycle.md
-
-
 tools/generate_vk_replay_dispatch.py
 tests/test_vk_replay_dispatch.py
 docs/vulkan-replay-dispatch.md
 tools/stage_vk_replay_barriers.py
 tests/lab/vk_replay_barriers.py
 docs/vulkan-async-pe-boundary.md
-
 tests/lab/wine_worker_desktop.c
 tests/lab/wine_worker_desktop.py
 docs/wine-worker-desktop.md
-
-
-
-
-
-
 wine/patches/0910-win32u-ps5-worker-desktop-cache.patch
-
-
-
-
 # Actual native pipeline transport proof
 tests/test_vk_radv_profile.c
 tests/test_vk_radv_profile.py
@@ -567,6 +550,11 @@ wine/patches/0878-crypt32-ps5-root-certificates-beside-the-runtime.patch
 wine/ps5/pw_gnutls_libc.c
 wine/patches/0877-secur32-log-gnutls-errors-and-the-clock-on-handshake-failure.patch
 tests/test_build_tls_ps5.py
+wine/patches/0965-win32u-ps5-no-pixel-format-message-loop-on-the-desktop.patch
+wine/patches/0970-ntdll-ps5-trace-each-process-query-class-once.patch
+wine/patches/0971-kernelbase-ps5-no-debugger-in-a-title.patch
+wine/patches/0972-faudio-keep-resampling-taps-within-the-samples.patch
+wine/patches/0973-ntdll-ps5-title-menu-snapshot.patch
 wine/patches/0950-win32u-ps5-scale-the-cursor-with-a-scaled-swapchain.patch
 wine/patches/0951-winebus-ps5-title-controller-as-hid-gamepad.patch
 wine/patches/0952-ntoskrnl-ps5-host-the-hid-drivers-in-the-game.patch
@@ -581,7 +569,6 @@ wine/patches/0960-vkd3d-shader-fx-write-sampler-state-initializers-for-fx-2-0.pa
 wine/patches/0961-vkd3d-shader-fx-accept-true-and-false-for-any-fx-2-0-state.patch
 wine/patches/0962-vkd3d-shader-fx-write-null-shader-and-texture-states-for-fx-2-0.patch
 wine/patches/0963-vkd3d-shader-hlsl-compile-ps-1-x-effect-shaders-as-ps-2-0.patch
-
 # Playden fork (feat/playden-ps5) only: lets `make all` audit this branch.
 # Not a decision to publish these upstream; see Playden Gitea #79.
 docs/FIRMWARE_13_60.md
@@ -665,10 +652,6 @@ tests/test_mf_probe_handles.py
 wine/patches/0482-rtworkq-cleanup-groups.patch
 wine/patches/0964-ntdll-ps5-retire-thread-alert-kqueues.patch
 tests/test_wine_alert_kqueue.py
-wine/patches/0965-win32u-ps5-no-pixel-format-message-loop-on-the-desktop.patch
-wine/patches/0970-ntdll-ps5-trace-each-process-query-class-once.patch
-wine/patches/0971-kernelbase-ps5-no-debugger-in-a-title.patch
-wine/patches/0972-faudio-keep-resampling-taps-within-the-samples.patch
 wine/patches/0981-win32u-register-builtin-classes-without-waiting.patch
 wine/patches/0980-server-ps5-dump-long-waiting-stacks-in-the-watchdog.patch
 wine/patches/0982-ntdll-ps5-high-area-as-large-as-the-kernel-grants.patch
