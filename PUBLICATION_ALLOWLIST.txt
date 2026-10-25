@@ -657,3 +657,6 @@ wine/patches/0980-server-ps5-dump-long-waiting-stacks-in-the-watchdog.patch
 wine/patches/0982-ntdll-ps5-high-area-as-large-as-the-kernel-grants.patch
 wine/patches/0983-win32u-ps5-report-the-120-hz-output-rate.patch
 wine/patches/0984-win32u-ps5-tell-windows-when-the-controller-comes-or-goes.patch
+wine/patches/0990-iphlpapi-ps5-report-the-routed-address-without-nsi.patch
+wine/patches/0991-nsi-ps5-keep-change-requests-pending-without-nsi.patch
+wine/patches/0992-ws2-32-ps5-ask-for-a-larger-receive-buffer.patch
