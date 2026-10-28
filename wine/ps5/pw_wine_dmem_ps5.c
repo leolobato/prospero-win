@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <sys/mman.h>
 
@@ -172,13 +173,16 @@ static int self_check(uintptr_t address)
  * instead, up to heap_spill_cap; past that it takes direct memory again.
  * Free direct memory is the largest free block as last read from the
  * kernel, less what the heap took since; it is read again once the heap has
- * grown by HEAP_RESYNC net, so allocating and freeing costs no extra call. */
+ * grown by HEAP_RESYNC net, so allocating and freeing costs no extra call.
+ * The table of blocks is itself direct memory, taken when the backing is
+ * installed: in the module's .bss it would be 1.5 MiB of the flexible
+ * memory this saves. */
 #ifndef PW_WINE_HEAP_SLOTS
 #define PW_WINE_HEAP_SLOTS (1 << 16)
 #endif
 enum { HEAP_SLOTS = PW_WINE_HEAP_SLOTS, HEAP_RESYNC = 16 << 20 };
 typedef struct HeapBlock { uintptr_t address; size_t bytes; int64_t offset; } HeapBlock;
-static HeapBlock heap_blocks[HEAP_SLOTS];
+static HeapBlock *heap_blocks;
 static unsigned heap_block_count;
 static uint64_t heap_direct_bytes, heap_spilled_bytes;
 static size_t heap_headroom, heap_spill_cap, heap_free_estimate;
@@ -275,6 +279,21 @@ static size_t heap_megabytes(const char *name, size_t fallback)
 static void heap_use_direct_memory(void)
 {
     static const PwWineHeapBacking backing = { NULL, heap_map, heap_unmap };
+    size_t table = ((size_t)HEAP_SLOTS * sizeof(HeapBlock) + PAGE - 1) & ~(size_t)(PAGE - 1);
+    int64_t offset;
+    void *at = NULL;
+
+    if (allocate(NULL, table, &offset)) {
+        fprintf(stderr, "wine-ps5: heap stays in flexible memory (no direct memory for its table)\n");
+        return;
+    }
+    if (sceKernelMapDirectMemory(&at, table, map_protection, 0, offset, PAGE) || !at) {
+        release(NULL, offset, table);
+        fprintf(stderr, "wine-ps5: heap stays in flexible memory (its table could not be mapped)\n");
+        return;
+    }
+    memset(at, 0, table);   /* direct memory is not handed out zeroed */
+    heap_blocks = at;
     heap_headroom = heap_megabytes("WINE_PS5_HEAP_HEADROOM_MB", 256);
     heap_spill_cap = heap_megabytes("WINE_PS5_HEAP_SPILL_MB", 128);
     pw_wine_heap_set_backing(&backing);

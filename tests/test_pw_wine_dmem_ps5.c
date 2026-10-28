@@ -139,11 +139,14 @@ int sceKernelReleaseDirectMemory(int64_t offset, size_t bytes)
     return 0;
 }
 
+/* Direct memory in use, less the heap's table of blocks, which it holds
+ * from the moment its backing is installed. */
+static unsigned table_pages;
 static unsigned used(void)
 {
     unsigned count = 0;
     for (unsigned p = 0; p < PHYS_PAGES; p++) count += allocated[p];
-    return count;
+    return count - table_pages;
 }
 /* Nothing at all is mapped at [address, +bytes). */
 static int free_space(uint8_t *address, size_t bytes)
@@ -306,7 +309,10 @@ int main(void)
     assert(!sceKernelReserveVirtualRange((void **)&base, 8 * PAGE, 0x90, PAGE));
     cpu_only_refused = 1;  /* the self-check finds the GPU-bits variant */
     __wine_ps5_dmem_region(base, 8 * PAGE);
-    assert(used() == 0);   /* the self-check gave its page back */
+    /* The self-check gave its page back; the heap's table (16 slots here)
+     * took one, for good. */
+    assert(used() == 1);
+    table_pages = 1;
 
     /* A fixed anonymous mapping is direct memory, zeroed. */
     assert(__wine_ps5_mmap(base, 2 * PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
