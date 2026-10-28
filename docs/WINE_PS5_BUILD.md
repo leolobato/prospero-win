@@ -151,13 +151,25 @@ Where new spans and large blocks come from is pluggable
 (`pw_wine_heap_set_backing`). On the console, once direct memory passes its
 self-check (see [Direct memory](#direct-memory)), `ntdll`'s heap takes them
 from main direct memory, mapped where the kernel chooses, and freeing a
-large block releases it; the log says `wine-ps5: heap in direct memory`.
-They stay anonymous mappings of flexible memory until then, whenever the
-backing refuses (its table of blocks is half full or direct memory is
-short), and always with `WINE_PS5_HEAP_FLEXIBLE` set. With every block in
-flexible memory, OpenGL games used up the title's ~440 MiB through this
-heap: Slay the Spire 2 held 276 MiB of heap when flexible memory reached 0. `wineserver`'s own copy of
-the heap is unchanged.
+large block releases it; the log says `wine-ps5: heap in direct memory`
+with the headroom and spill cap below. With every block in flexible
+memory, OpenGL games used up the title's ~440 MiB through this heap: Slay
+the Spire 2 held 276 MiB of heap when flexible memory reached 0.
+`wineserver`'s own copy of the heap is unchanged.
+
+Direct memory is shared with `ntdll`'s committed memory and the GPU driver,
+which can fill it on their own (Over the Hill at 4K: Wine 6.2 GiB, the GPU
+5.5 GiB of 12). So the heap leaves headroom: when the largest free block
+would drop below 256 MiB (`WINE_PS5_HEAP_HEADROOM_MB`), a new block is an
+anonymous mapping of flexible memory instead, up to 128 MiB of such blocks
+(`WINE_PS5_HEAP_SPILL_MB`); past that, direct memory again. The heap also
+falls back to flexible memory when its table of direct blocks is half full
+(32,768 blocks) or the kernel refuses, and for every block with
+`WINE_PS5_HEAP_FLEXIBLE` set. The largest free block is read from the
+kernel, then kept as a running estimate of what the heap took and gave back
+since; it is read again once the heap has grown by 16 MiB net, so allocating
+and freeing adds no kernel call. The title's `PW_WINE64 memory` line reports
+the heap's direct and spilled bytes as `heap_dmem` and `heap_spill`.
 
 `wine/ps5/pw_wine_heap_libc.c` binds `malloc`, `calloc`, `realloc`, `free`,
 `strdup`, `strndup`, `asprintf` and `vasprintf` to that heap. The build links

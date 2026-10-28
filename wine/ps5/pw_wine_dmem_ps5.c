@@ -164,14 +164,41 @@ static int self_check(uintptr_t address)
  * ~440 MiB of flexible memory, and GL drivers drained it (Slay the Spire 2:
  * 237 MiB of heap spans, then 4 fps and a crash). Each block is main direct
  * memory mapped where the kernel chooses; its offset is kept here so free can
- * release it. Called with the heap's lock held. */
-enum { HEAP_SLOTS = 1 << 17 };
+ * release it. Called with the heap's lock held.
+ *
+ * The pool is shared with ntdll's committed memory and the GPU driver, which
+ * can fill it (Over the Hill at 4K: Wine 6.2 GiB, the GPU 5.5). Below
+ * heap_headroom of free direct memory the heap spills to flexible memory
+ * instead, up to heap_spill_cap; past that it takes direct memory again.
+ * Free direct memory is the largest free block as last read from the
+ * kernel, less what the heap took since; it is read again once the heap has
+ * grown by HEAP_RESYNC net, so allocating and freeing costs no extra call. */
+#ifndef PW_WINE_HEAP_SLOTS
+#define PW_WINE_HEAP_SLOTS (1 << 16)
+#endif
+enum { HEAP_SLOTS = PW_WINE_HEAP_SLOTS, HEAP_RESYNC = 16 << 20 };
 typedef struct HeapBlock { uintptr_t address; size_t bytes; int64_t offset; } HeapBlock;
 static HeapBlock heap_blocks[HEAP_SLOTS];
 static unsigned heap_block_count;
-static uint64_t heap_direct_bytes;
+static uint64_t heap_direct_bytes, heap_spilled_bytes;
+static size_t heap_headroom, heap_spill_cap, heap_free_estimate;
+static int64_t heap_growth = HEAP_RESYNC;  /* net, since the last reading */
 
 static size_t heap_slot(uintptr_t address) { return (size_t)((address / PAGE) * 0x9e3779b97f4a7c15ull >> 47) & (HEAP_SLOTS - 1); }
+
+/* The largest free block of the title's pool; nonzero if it cannot be read. */
+static int largest_free_block(size_t pool, size_t *bytes)
+{
+    int64_t where = 0;
+    *bytes = 0;
+    return pool ? sceKernelAvailableDirectMemorySize(0, (int64_t)pool, PAGE, &where, bytes) : -1;
+}
+
+static void *heap_spill(size_t span)
+{
+    heap_spilled_bytes += span;
+    return NULL;
+}
 
 static void *heap_map(void *context, size_t bytes)
 {
@@ -179,23 +206,33 @@ static void *heap_map(void *context, size_t bytes)
     int64_t offset;
     void *at = NULL;
     (void)context;
-    if (heap_block_count >= HEAP_SLOTS / 2) return NULL;
-    if (allocate(NULL, span, &offset)) return NULL;
+    if (heap_growth >= HEAP_RESYNC) {
+        /* Unreadable: no headroom, as before it was checked. */
+        if (largest_free_block(sceKernelGetDirectMemorySize(), &heap_free_estimate)) heap_free_estimate = SIZE_MAX;
+        heap_growth = 0;
+    }
+    heap_growth += (int64_t)span;
+    if (heap_block_count >= HEAP_SLOTS / 2) return heap_spill(span);
+    if (heap_free_estimate < span + heap_headroom && heap_spilled_bytes + span <= heap_spill_cap)
+        return heap_spill(span);
+    if (allocate(NULL, span, &offset)) return heap_spill(span);
     if (sceKernelMapDirectMemory(&at, span, map_protection, 0, offset, PAGE) || !at) {
         release(NULL, offset, span);
-        return NULL;
+        return heap_spill(span);
     }
     for (slot = heap_slot((uintptr_t)at); heap_blocks[slot].address; slot = (slot + 1) & (HEAP_SLOTS - 1)) {}
     heap_blocks[slot] = (HeapBlock){ (uintptr_t)at, span, offset };
     heap_block_count++;
     heap_direct_bytes += span;
+    if (heap_free_estimate != SIZE_MAX) heap_free_estimate = heap_free_estimate > span ? heap_free_estimate - span : 0;
     return at;
 }
 
 static int heap_unmap(void *context, void *address, size_t bytes)
 {
     size_t slot, hole, next;
-    (void)context; (void)bytes;
+    (void)context;
+    heap_growth -= (int64_t)bytes;
     for (slot = heap_slot((uintptr_t)address); heap_blocks[slot].address; slot = (slot + 1) & (HEAP_SLOTS - 1)) {
         HeapBlock block = heap_blocks[slot];
         if (block.address != (uintptr_t)address) continue;
@@ -203,6 +240,7 @@ static int heap_unmap(void *context, void *address, size_t bytes)
         release(NULL, block.offset, block.bytes);
         heap_block_count--;
         heap_direct_bytes -= block.bytes;
+        if (heap_free_estimate != SIZE_MAX) heap_free_estimate += block.bytes;
         /* Linear-probe deletion: move later entries of the run back. */
         heap_blocks[slot].address = 0;
         for (hole = slot, next = (slot + 1) & (HEAP_SLOTS - 1); heap_blocks[next].address;
@@ -216,14 +254,32 @@ static int heap_unmap(void *context, void *address, size_t bytes)
         }
         return 0;
     }
-    return 1;  /* not ours: an anonymous mapping from before direct memory */
+    /* Not ours: spilled, or an anonymous mapping from before direct memory. */
+    heap_spilled_bytes = heap_spilled_bytes > bytes ? heap_spilled_bytes - bytes : 0;
+    return 1;
+}
+
+/* WINE_PS5_HEAP_HEADROOM_MB and WINE_PS5_HEAP_SPILL_MB override the
+ * defaults, 256 and 128 MiB. */
+static size_t heap_megabytes(const char *name, size_t fallback)
+{
+    const char *value = getenv(name);
+    char *end;
+    unsigned long megabytes;
+
+    if (!value || !*value) return fallback;
+    megabytes = strtoul(value, &end, 10);
+    return *end ? fallback : (size_t)megabytes << 20;
 }
 
 static void heap_use_direct_memory(void)
 {
     static const PwWineHeapBacking backing = { NULL, heap_map, heap_unmap };
+    heap_headroom = heap_megabytes("WINE_PS5_HEAP_HEADROOM_MB", 256);
+    heap_spill_cap = heap_megabytes("WINE_PS5_HEAP_SPILL_MB", 128);
     pw_wine_heap_set_backing(&backing);
-    fprintf(stderr, "wine-ps5: heap in direct memory\n");
+    fprintf(stderr, "wine-ps5: heap in direct memory (headroom %zu MiB, spill %zu MiB)\n", heap_headroom >> 20,
+            heap_spill_cap >> 20);
 }
 
 /* ntdll's reserved area [base, +size), already reserved: backed by direct
@@ -326,13 +382,14 @@ int __wine_ps5_mprotect(void *address, size_t bytes, int protection)
 
 /* For the title's log, as __wine_virtual_stats: direct memory backed now and
  * at most, its runs and refused calls, the heap's mapped and peak mapped
- * bytes, then the direct memory backed below 4 GiB now and at most. Returns
- * how many counters there are. */
+ * bytes, the direct memory backed below 4 GiB now and at most, then the
+ * heap's bytes in direct memory and spilled to flexible memory. Returns how
+ * many counters there are. */
 unsigned int __wine_ps5_memory_stats(uint64_t *out, unsigned int count)
 {
     PwWineDmemStats dmem_stats = { 0 };
     PwWineHeapStats heap_stats;
-    uint64_t values[8];
+    uint64_t values[10];
 
     if (state > 0) pw_wine_dmem_stats(&dmem, &dmem_stats);
     pw_wine_heap_stats(&heap_stats);
@@ -344,8 +401,10 @@ unsigned int __wine_ps5_memory_stats(uint64_t *out, unsigned int count)
     values[5] = heap_stats.peak_mapped_bytes;
     values[6] = dmem_stats.low_backed_bytes;
     values[7] = dmem_stats.peak_low_backed_bytes;
-    for (unsigned int i = 0; i < count && i < 8; i++) out[i] = values[i];
-    return 8;
+    values[8] = heap_direct_bytes;
+    values[9] = heap_spilled_bytes;
+    for (unsigned int i = 0; i < count && i < 10; i++) out[i] = values[i];
+    return 10;
 }
 
 /* Wine patch 0603 uses the title's direct-memory pool as physical memory.
@@ -357,9 +416,8 @@ void __wine_ps5_memory_budget(unsigned long long *total, unsigned long long *ava
 {
     enum { GIB = 1024 * 1024 * 1024 };
     static int logged;
-    size_t pool = sceKernelGetDirectMemorySize(), free_bytes = 0;
-    int64_t where = 0;
-    int status = pool ? sceKernelAvailableDirectMemorySize(0, (int64_t)pool, PAGE, &where, &free_bytes) : -1;
+    size_t pool = sceKernelGetDirectMemorySize(), free_bytes;
+    int status = largest_free_block(pool, &free_bytes);
 
     if (status) free_bytes = 0;
     if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED))
