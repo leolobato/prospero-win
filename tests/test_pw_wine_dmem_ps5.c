@@ -283,6 +283,36 @@ static void test_heap(void)
     budget_from_pages = 0;
 }
 
+/* Neither variable set: 256 MiB of headroom, more than this 16 MiB pool,
+ * so the heap's first block is flexible memory. */
+static void test_heap_defaults(void)
+{
+    pid_t child = fork();
+    int status;
+
+    if (!child) {
+        uint8_t *base = space_for(8);
+        uint64_t direct, spilled;
+        void *block;
+
+        assert(!getenv("WINE_PS5_HEAP_HEADROOM_MB") && !getenv("WINE_PS5_HEAP_SPILL_MB"));
+        budget_pool = (size_t)PHYS_PAGES * PAGE;
+        budget_from_pages = 1;
+        budget_status = 0;
+        assert(!sceKernelReserveVirtualRange((void **)&base, 8 * PAGE, 0x90, PAGE));
+        __wine_ps5_dmem_region(base, 8 * PAGE);
+        table_pages = used();
+        assert(table_pages == 1);
+        block = pw_wine_heap_malloc(2 << 20);
+        assert(block && used() == 0);
+        heap_counters(&direct, &spilled);
+        assert(direct == 0 && spilled == (2 << 20) + PAGE);
+        pw_wine_heap_free(block);
+        _exit(0);
+    }
+    assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
+}
+
 int main(void)
 {
     uint8_t *base, *outside, *view;
@@ -290,11 +320,12 @@ int main(void)
     int file;
 
     test_memory_budget();
-    setenv("WINE_PS5_HEAP_HEADROOM_MB", "4", 1);
-    setenv("WINE_PS5_HEAP_SPILL_MB", "3", 1);
     phys_fd = memfd_create("pw_wine_dmem_ps5", 0);
     assert(phys_fd >= 0 && !ftruncate(phys_fd, (off_t)PHYS_PAGES * PAGE));
     test_refused();
+    test_heap_defaults();
+    setenv("WINE_PS5_HEAP_HEADROOM_MB", "4", 1);
+    setenv("WINE_PS5_HEAP_SPILL_MB", "3", 1);
 
     /* Before any region every call is the host's. */
     outside = space_for(16);

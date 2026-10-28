@@ -265,15 +265,17 @@ static int heap_unmap(void *context, void *address, size_t bytes)
 
 /* WINE_PS5_HEAP_HEADROOM_MB and WINE_PS5_HEAP_SPILL_MB override the
  * defaults, 256 and 128 MiB. */
-static size_t heap_megabytes(const char *name, size_t fallback)
+static size_t heap_megabytes(const char *name, unsigned long megabytes)
 {
     const char *value = getenv(name);
     char *end;
-    unsigned long megabytes;
+    unsigned long set;
 
-    if (!value || !*value) return fallback;
-    megabytes = strtoul(value, &end, 10);
-    return *end ? fallback : (size_t)megabytes << 20;
+    if (value && *value) {
+        set = strtoul(value, &end, 10);
+        if (!*end) megabytes = set;
+    }
+    return (size_t)megabytes << 20;
 }
 
 static void heap_use_direct_memory(void)
