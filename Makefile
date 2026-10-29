@@ -322,7 +322,8 @@ check-whitespace:
 # Keep sanitizer objects in their own tree: no stale normal binary can satisfy
 # the instrumented gate, and subsequent sanitizer runs can reuse its objects.
 sanitize:
-	ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 $(MAKE) test BUILD=build/sanitize CC=clang CFLAGS='-O1 -g -std=c11 -Wall -Wextra -Werror -fno-omit-frame-pointer -fsanitize=address,undefined'
+	ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 $(MAKE) test BUILD=build/sanitize CC=clang CFLAGS='-O1 -g -std=c11 -Wall -Wextra -Werror -fno-omit-frame-pointer -fsanitize=address,undefined' \
+		CXX=clang++ CXXFLAGS='-O1 -g -std=c++17 -Wall -Wextra -Werror -fno-omit-frame-pointer -fsanitize=address,undefined'
 
 native: test
 	$(MAKE) audit check-whitespace
