@@ -98,7 +98,8 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # hooks and dispatch table capability checks come from the same source.
 # xaudio2_* and xactengine*: they link Wine's static FAudio, whose resampler
 # wrote past its buffer (patch 0972).
-# kernelbase: no debugger start in a title (patch 0971).
+# kernelbase: no debugger start in a title (patch 0971), and the computer
+# name without wineboot's volatile key (patch 0957).
 PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan kernelbase"
 PE_MODULES="$PE_MODULES xaudio2_0 xaudio2_1 xaudio2_2 xaudio2_3 xaudio2_4 xaudio2_5 xaudio2_6 xaudio2_7 xaudio2_8 xaudio2_9 xactengine2_0 xactengine2_4 xactengine2_7 xactengine2_9 xactengine3_0 xactengine3_1 xactengine3_2 xactengine3_3 xactengine3_4 xactengine3_5 xactengine3_6 xactengine3_7"
 # Everything optional but FreeType (built below) is off: the console has none
