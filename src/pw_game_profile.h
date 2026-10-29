@@ -38,6 +38,8 @@
  *                          ; when nothing is bound, keyboard otherwise
  *   mouse = right_stick    ; a stick moves the pointer: left_stick, right_stick, none
  *   mouse_speed = 1200     ; pointer pixels per second at full tilt
+ *   rumble = 50            ; how strongly the DualSense vibrates for the
+ *                          ; game, 0 (off) to 100 (the default)
  *   cross = space          ; <button> = <key> | mouse_left | mouse_right |
  *   r2 = mouse_left        ;            mouse_middle | vk:0xNN | none
  *   player2 = pinball-p2   ; a keyboard preset for a second DualSense, the pad
@@ -101,6 +103,7 @@ enum {
     PW_GAME_DESKTOP_MIN_W = 320, PW_GAME_DESKTOP_MIN_H = 200,
     PW_GAME_DESKTOP_MAX_W = 3840, PW_GAME_DESKTOP_MAX_H = 2160,
     PW_GAME_MOUSE_SPEED_DEFAULT = 1200, PW_GAME_MOUSE_SPEED_MAX = 20000,
+    PW_GAME_RUMBLE_MAX = 100,
     PW_GAME_WINEDEBUG_CAPACITY = 128,
     PW_GAME_DEBUG_ENV_MAX = 5, PW_GAME_DEBUG_ENV_NAME = 48, PW_GAME_DEBUG_ENV_VALUE = 96,
     PW_GAME_ENVIRONMENT_MAX = 8, PW_GAME_ENVIRONMENT_NAME = 64, PW_GAME_ENVIRONMENT_VALUE = 128,
@@ -124,10 +127,11 @@ typedef struct PwGameInput {
     PwGameInputMode mode;
     PwGameStick mouse;
     uint32_t mouse_speed;
+    uint32_t rumble;    /* percent of the game's vibration, 0..PW_GAME_RUMBLE_MAX */
     PwGameBinding bindings[PW_GAME_BUTTON_COUNT];   /* in PW_GAME_BUTTON order */
     char preset[PW_APP_ID_CAPACITY];
     char player2[PW_APP_ID_CAPACITY];   /* the second pad's preset, profile only */
-    uint32_t set;       /* which of mode/mouse/mouse_speed a file set (overlay) */
+    uint32_t set;       /* which of mode/mouse/mouse_speed/rumble a file set (overlay) */
 } PwGameInput;
 
 typedef struct PwGameDisplay {
@@ -235,7 +239,7 @@ size_t pw_game_debug_env(const PwGameProfile *profile, PwGameEnv *env);
  * PW_GAME_ENVIRONMENT_MAX; how many, in file order. The strings live in
  * profile. The title sets them after its own variables. */
 size_t pw_game_environment_env(const PwGameProfile *profile, PwGameEnv *env);
-/* An input with nothing bound, keyboard mode, no pointer. */
+/* An input with nothing bound, keyboard mode, no pointer, full rumble. */
 void pw_game_input_init(PwGameInput *input);
 /* Parse an input preset file (one [input] section, no preset= line) into
  * input, overriding what it sets. PW_OK or a PW_ERR_* status. */

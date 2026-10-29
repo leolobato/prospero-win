@@ -86,7 +86,9 @@ Games from the Xbox 360 era and later read a controller through XInput. With
 
 The touchpad's left half gives Back without Create, whose press also opens
 the PS5's capture menu; the half is the one the click began on. Rumble
-works: the game's vibration drives the DualSense's motors. The
+works: the game's vibration drives the DualSense's motors, and L2 and R2
+vibrate with them. `rumble = 50` in `[input]` makes it half as strong, and
+`rumble = 0` turns it off (0 to 100, default 100). The
 `gamepad.input` preset is exactly this. You can still add button lines in an
 XInput preset to send keys as well.
 

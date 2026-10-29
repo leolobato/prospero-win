@@ -154,14 +154,14 @@ static void test_profile(void)
     assert(!p.input.set && p.input.bindings[CROSS].kind == PW_GAME_BIND_UNSET);
 
     assert(parse(APP "; comments and blank lines\n\n[display]\ndesktop = 1024x768\nscaling = Integer\n"
-                 "[input]\npreset = pinball\nmode = keyboard\nmouse = right_stick\nmouse_speed = 900\n"
+                 "[input]\npreset = pinball\nmode = keyboard\nmouse = right_stick\nmouse_speed = 900\nrumble = 40\n"
                  "cross = space\nL1 = z\nr1 = slash\nr2 = mouse_left\nl2 = mouse_right\n"
                  "r3 = mouse_middle\noptions = f3\nsquare = F12\ntriangle = vk:0x5B\n"
                  "circle = 7\ntouchpad = none\nup = up\n", &p) == PW_OK);
     assert(p.display.width == 1024 && p.display.height == 768);
     assert(p.display.scaling == PW_GAME_SCALING_INTEGER);
     assert(!strcmp(p.input.preset, "pinball") && p.input.mouse == PW_GAME_STICK_RIGHT);
-    assert(p.input.mouse_speed == 900 && p.input.mode == PW_GAME_INPUT_KEYBOARD);
+    assert(p.input.mouse_speed == 900 && p.input.mode == PW_GAME_INPUT_KEYBOARD && p.input.rumble == 40);
     assert(p.input.bindings[CROSS].kind == PW_GAME_BIND_KEY && p.input.bindings[CROSS].code == 0x20);
     assert(p.input.bindings[CROSS].mask == 0x4000u && p.input.bindings[L1].code == 'Z');
     assert(p.input.bindings[R1].code == 0xbf && p.input.bindings[OPTIONS].code == 0x72);
@@ -428,6 +428,10 @@ static void test_refusals(void)
         APP "[input]\nmouse_speed = fast\n",
         APP "[input]\nmouse_speed = 10\nmouse_speed = 10\n",
         APP "[input]\nmouse_speed = 1234567890\n",
+        APP "[input]\nrumble = 101\n",
+        APP "[input]\nrumble = -1\n",
+        APP "[input]\nrumble = strong\n",
+        APP "[input]\nrumble = 0\nrumble = 0\n",
         APP "[input]\ncross = space\ncross = enter\n",
         APP "[input]\ncross = hyperspace\n",
         APP "[input]\ncross = f0\n",
@@ -468,6 +472,7 @@ static void test_presets(void)
 
     pw_game_input_init(&input);
     assert(input.mouse_speed == PW_GAME_MOUSE_SPEED_DEFAULT && input.mode == PW_GAME_INPUT_KEYBOARD);
+    assert(input.rumble == PW_GAME_RUMBLE_MAX);
     assert(input.bindings[L1].mask == 0x400u && input.bindings[L1].kind == PW_GAME_BIND_UNSET);
     assert(preset("# shared pinball keys\n[input]\nl1 = z\nr1 = slash\ncross = space\n"
                   "mouse = right_stick\n", &input) == PW_OK);
@@ -483,6 +488,15 @@ static void test_presets(void)
     overrides.set = 0;
     pw_game_input_overlay(&input, &overrides);
     assert(input.mouse_speed == 400);
+
+    /* rumble = 0 turns it off; a preset's value stays unless the profile sets one. */
+    assert(preset("[input]\nrumble = 60\n", &input) == PW_OK && input.rumble == 60);
+    assert(parse(APP "[input]\npreset = pinball\n", &p) == PW_OK);
+    pw_game_input_overlay(&input, &p.input);
+    assert(input.rumble == 60);
+    assert(parse(APP "[input]\npreset = pinball\nrumble = 0\n", &p) == PW_OK);
+    pw_game_input_overlay(&input, &p.input);
+    assert(input.rumble == 0);
 
     /* A second pad's preset is named by the profile alone. */
     assert(parse(APP "[input]\npreset = bomb\nplayer2 = bomb-p2\n", &p) == PW_OK);

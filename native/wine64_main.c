@@ -1701,13 +1701,13 @@ int main(int argc, char **argv)
             PS5LOG_LOG("PW_WINE64 ignored display opengl_thread=%d (no longer supported)",
                        game->display.opengl_thread);
         PS5LOG_LOG("PW_WINE64 profile id=%s prefix=%s desktop=%s scaling=%d view=%s show_fps=%d framegen=%u "
-                   "input=%s preset=%s mode=%s mouse=%d dll_overrides=%s", game->app.id, prefix,
+                   "input=%s preset=%s mode=%s mouse=%d rumble=%u dll_overrides=%s", game->app.id, prefix,
                    desktop[0] ? desktop : "default",
                    scaling, view, game->display.show_fps, game->display.framegen,
                    pw_result_name(input_status),
                    game->input.preset[0] ? game->input.preset : "-",
                    game_input.mode == PW_GAME_INPUT_XINPUT ? "xinput" : "keyboard", (int)game_input.mouse,
-                   effective_dll_overrides[0] ? effective_dll_overrides : "-");
+                   (unsigned)game_input.rumble, effective_dll_overrides[0] ? effective_dll_overrides : "-");
         /* What Wine gives the game as NumberOfProcessors. */
         PS5LOG_LOG("PW_WINE64 cpus online=%ld", sysconf(_SC_NPROCESSORS_ONLN));
         {
@@ -2023,14 +2023,16 @@ int main(int argc, char **argv)
                 else refused++;
             }
             /* The rumble the game asked for: XInput's left motor is the
-             * DualSense's large one, speeds 0..65535 become 0..255. */
+             * DualSense's large one, speeds 0..65535 become 0..255, scaled
+             * by the profile's [input] rumble (the triggers follow them). */
             uint32_t left, right;
             if (rumble && rumble(&left, &right) == 1) {
-                int vibrate = pw_pad_ps5_vibrate(&pad, (uint8_t)(left >> 8), (uint8_t)(right >> 8));
+                int vibrate = pw_pad_ps5_vibrate(&pad, (uint8_t)((left >> 8) * game_input.rumble / PW_GAME_RUMBLE_MAX),
+                                                 (uint8_t)((right >> 8) * game_input.rumble / PW_GAME_RUMBLE_MAX));
                 if (!vibrations++ || vibrate != PW_OK)
-                    PS5LOG_LOG("PW_WINE64 rumble left=%u right=%u status=%s rc=%d trigger_rc=%d",
-                               (unsigned)left, (unsigned)right, pw_result_name(vibrate),
-                               pad.vibration_rc, pad.trigger_rc);
+                    PS5LOG_LOG("PW_WINE64 rumble left=%u right=%u scale=%u status=%s rc=%d trigger_rc=%d",
+                               (unsigned)left, (unsigned)right, (unsigned)game_input.rumble,
+                               pw_result_name(vibrate), pad.vibration_rc, pad.trigger_rc);
             }
         }
         /* The console's own keyboard: the two-finger click or the menu's
