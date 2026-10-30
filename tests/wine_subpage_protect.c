@@ -4,11 +4,13 @@
  * 16 KiB), and those neighbours keep working without faults the program sees.
  * Emulators that recompile code protect the 4 KiB pages holding it and expect
  * the fault that tells them the code changed (DuckStation, for one). */
+#include <winsock2.h>
 #include <windows.h>
 #include <stdio.h>
+#include <string.h>
 
 #define PAGE 4096
-#define PAGES 24
+#define PAGES 40
 
 static unsigned char *base;
 static volatile LONG faults, fault_page, fault_write;
@@ -39,6 +41,17 @@ static int protect(int page, DWORD prot)
     return 0;
 }
 
+/* Reads PAGE bytes of a file into a page, as a game loads its data: the kernel
+ * writes the buffer, so no fault is raised for Wine to step over. Returns whether
+ * ReadFile succeeded. */
+static int read_file_into(HANDLE file, unsigned char *buffer)
+{
+    DWORD got = 0;
+
+    SetFilePointer(file, 0, NULL, FILE_BEGIN);
+    return ReadFile(file, buffer, PAGE, &got, NULL) && got == PAGE;
+}
+
 /* Writes one byte to each page in turn; returns how many faults the program saw. */
 static LONG write_pages(int first, int count, unsigned char value)
 {
@@ -58,8 +71,17 @@ static int expect(const char *what, LONG got, LONG want)
 int main(void)
 {
     LARGE_INTEGER freq, start, end;
+    char folder[MAX_PATH], path[MAX_PATH], data[PAGE], message[100];
+    HANDLE file;
+    DWORD written;
+    WSADATA wsa;
+    SOCKET udp;
+    struct sockaddr_in where;
+    int where_size = sizeof(where), timeout = 3000;
     volatile unsigned char sink;
     LONG got;
+    const char *report_env = getenv("PW_SUBPAGE_REPORT");
+    int report = report_env && !strcmp(report_env, "1");
     int i, ok;
 
     base = VirtualAlloc(NULL, PAGES * PAGE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -88,9 +110,11 @@ int main(void)
     ok = ok && expect("read of the inaccessible page", faults - got, 1) && fault_page == 9 && !fault_write;
     (void)sink;
 
-    /* Many writes beside a protected page: the first ones are stepped over unseen;
-     * when they keep coming, Wine reports one write to the protected page itself
-     * (the handler then makes it writable, as an emulator does), and none after. */
+    /* Many writes beside a protected page: the first ones are stepped over unseen.
+     * When they keep coming, Wine keeps the host page writable and none is seen;
+     * with PW_SUBPAGE_REPORT=1 it reports one write to the protected page itself
+     * instead (the handler then makes it writable, as an emulator does), and none
+     * after (patch 0989). */
     ok = ok && protect(13, PAGE_READONLY);
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&start);
@@ -98,8 +122,9 @@ int main(void)
     for (i = 0; i < 20000; i++) ((volatile unsigned char *)base)[12 * PAGE + (i & 4095)] = (unsigned char)i;
     QueryPerformanceCounter(&end);
     got = faults - got;
-    printf("subpage 20000 writes beside a read-only page: %ld fault(s), expected at most 1 on that page\n", got);
-    ok = ok && (got == 0 || (got == 1 && fault_page == 13 && fault_write));
+    printf("subpage 20000 writes beside a read-only page: %ld fault(s), expected %s\n", got,
+           report ? "at most 1 on that page" : "0");
+    ok = ok && (got == 0 || (report && got == 1 && fault_page == 13 && fault_write));
     printf("subpage neighbour writes: %.2f us each\n",
            (double)(end.QuadPart - start.QuadPart) * 1e6 / freq.QuadPart / 20000);
     ok = ok && base[12 * PAGE + 19999 % 4096] == (unsigned char)19999;
@@ -146,6 +171,51 @@ int main(void)
     ok = ok && protect(21, PAGE_READWRITE) && protect(21, PAGE_EXECUTE_READ);
     got = write_pages(21, 1, 9);
     ok = ok && expect("write to the code page protected again", got, 1) && fault_page == 21 && fault_write;
+
+    /* A file read into a writable page beside a read-only one succeeds, as on
+     * Windows; a read into the read-only page itself fails, and that page still
+     * faults afterwards (patch 0988). */
+    memset(data, 'f', sizeof(data));
+    ok = ok && GetTempPathA(MAX_PATH, folder) && GetTempFileNameA(folder, "sub", 0, path);
+    file = ok ? CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_FLAG_DELETE_ON_CLOSE, NULL)
+              : INVALID_HANDLE_VALUE;
+    for (i = 0; i < 4; i++)  /* four pages of file */
+        ok = ok && file != INVALID_HANDLE_VALUE && WriteFile(file, data, sizeof(data), &written, NULL) && written == sizeof(data);
+    ok = ok && protect(25, PAGE_READONLY);
+    got = read_file_into(file, base + 24 * PAGE) && base[24 * PAGE + 7] == 'f';
+    printf("subpage file read beside a read-only page: %s\n", got ? "read" : "failed");
+    ok = ok && got;
+    got = read_file_into(file, base + 25 * PAGE);
+    printf("subpage file read into the read-only page: %s\n", got ? "read" : "refused");
+    ok = ok && !got && base[25 * PAGE + 7] != 'f';
+    ok = ok && expect("write to the read-only page after the reads", write_pages(25, 1, 10), 1) && fault_page == 25;
+    /* A read from a host page nobody protected into a writable page of one beside a
+     * read-only page: the kernel stops short at that host page, and the read is
+     * finished, not returned short as if the file ended. */
+    ok = ok && protect(33, PAGE_READONLY);
+    SetFilePointer(file, 0, NULL, FILE_BEGIN);
+    written = 0;
+    got = ReadFile(file, base + 29 * PAGE, 4 * PAGE, &written, NULL) && written == 4 * PAGE && base[32 * PAGE + 4095] == 'f';
+    printf("subpage file read into a protected host page: %lu of %u bytes\n", written, 4 * PAGE);
+    ok = ok && got;
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+
+    /* A datagram received into a writable page beside a read-only one arrives whole:
+     * a receive whose copy fails loses the datagram, so the buffer is opened first. */
+    ok = ok && protect(37, PAGE_READONLY) && !WSAStartup(MAKEWORD(2, 2), &wsa);
+    udp = ok ? socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) : INVALID_SOCKET;
+    memset(&where, 0, sizeof(where));
+    where.sin_family = AF_INET;
+    where.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ok = ok && udp != INVALID_SOCKET && !bind(udp, (struct sockaddr *)&where, sizeof(where)) &&
+         !getsockname(udp, (struct sockaddr *)&where, &where_size) &&
+         !setsockopt(udp, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout));
+    memset(message, 'u', sizeof(message));
+    ok = ok && sendto(udp, message, sizeof(message), 0, (struct sockaddr *)&where, sizeof(where)) == sizeof(message);
+    got = ok ? recv(udp, (char *)base + 36 * PAGE, sizeof(message), 0) : -1;
+    printf("subpage datagram beside a read-only page: %ld of %u bytes\n", got, (unsigned)sizeof(message));
+    ok = ok && got == sizeof(message) && !memcmp(base + 36 * PAGE, message, sizeof(message));
+    if (udp != INVALID_SOCKET) closesocket(udp);
 
     printf("subpage verdict=%s\n", ok ? "pass" : "fail");
     fflush(stdout);

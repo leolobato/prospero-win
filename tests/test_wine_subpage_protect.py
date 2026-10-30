@@ -5,7 +5,9 @@ page is larger and its neighbours stay writable, and the neighbours work
 without faults the program sees, in 64-bit and WoW64 processes
 (wine/patches/0974); accesses that keep coming beside an inaccessible page stop
 being stepped over (0986); writes that keep coming beside a code page are not
-reported to the program (0987).
+reported to the program (0987); a file read into a page beside a protected one
+succeeds, also when it starts in a host page nobody protected, and so does a
+datagram received there (0988); hot writes are reported only with PW_SUBPAGE_REPORT=1 (0989).
 
 Needs the host Wine from tools/build_host_wine.sh (PROSPERO_HOST_WINE, default
 .deps/wine-host/install/usr/bin/wine) and the mingw compilers; without them
@@ -36,15 +38,20 @@ def main() -> int:
         env = dict(os.environ, WINEPREFIX=str(Path(directory) / "pfx"), WINEDEBUG="-all",
                    WINEDLLOVERRIDES="winemenubuilder.exe=d")
         env.pop("WINE_HOST_PAGE_SIZE", None)  # the native run keeps the PC's own host pages
+        env.pop("PW_SUBPAGE_REPORT", None)
         for compiler in compilers:
             exe = Path(directory) / f"subpage-{Path(compiler).name.split('-')[0]}.exe"
-            subprocess.run([compiler, "-O1", "-o", str(exe), str(SOURCE)], check=True)
-            for host_page in ("", "16384"):
+            subprocess.run([compiler, "-O1", "-o", str(exe), str(SOURCE), "-lws2_32"], check=True)
+            for host_page, report in (("", ""), ("16384", ""), ("16384", "1")):
                 run_env = dict(env, WINE_HOST_PAGE_SIZE=host_page) if host_page else env
+                if report:
+                    run_env = dict(run_env, PW_SUBPAGE_REPORT=report)
                 done = subprocess.run([wine, str(exe)], capture_output=True, text=True, env=run_env)
-                label = f"{exe.name} host pages {host_page or 'native'}"
+                label = f"{exe.name} host pages {host_page or 'native'}{' PW_SUBPAGE_REPORT=1' if report else ''}"
                 assert done.returncode == 0, f"{label}: {done.stdout}{done.stderr}"
                 assert "subpage verdict=pass" in done.stdout, f"{label}: {done.stdout}"
+                if report:  # the emulator's case: one write reported to the read-only page
+                    assert "20000 writes beside a read-only page: 1 fault(s)" in done.stdout, f"{label}: {done.stdout}"
     print("wine subpage protect passed: protected pages fault, their neighbours do not")
     return 0
 
