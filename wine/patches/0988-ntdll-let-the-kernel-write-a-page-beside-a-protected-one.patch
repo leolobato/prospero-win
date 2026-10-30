@@ -1,0 +1,281 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Fri, 30 Oct 2026 12:00:00 +0100
+Subject: [PATCH] ntdll: Let the kernel write a page beside a protected one.
+
+Patch 0974 takes writing away from a whole host page when one of its
+pages is read-only or inaccessible, and steps over the writes to the
+other pages when they fault. The kernel's own writes don't fault: a
+read() into a writable page beside a protected one failed with EFAULT,
+and ReadFile returned ERROR_NOACCESS for a buffer Windows would fill.
+
+check_write_access now opens such a host page for the write, after
+checking that every page written allows it, and restore_write_access
+protects it again afterwards, as write watches already do. Reads,
+server replies, socket receives and NtWriteVirtualMemory's copy go
+through it. A read that starts in a host page nobody protected stops
+short at such a page instead of failing: it is finished with the page
+open. A socket receive whose copy fails loses its datagram, so a
+receive into such a page opens it before receiving. A thread that
+faults again on the host page it is stepping over, because another
+thread protected it again meanwhile, has it opened again.
+---
+ dlls/ntdll/unix/virtual.c | 144 +++++++++++++++++++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 122 insertions(+), 22 deletions(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 2c7556af19..15a6946406 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5350,7 +5350,11 @@ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec,
+                 ret = STATUS_SUCCESS;
+         }
+     }
+-    if (ret == STATUS_ACCESS_VIOLATION && host_page_size != page_size && !data->subpage_step)
++    /* A thread can fault again on the host page it is stepping over when another thread
++     * protects that page again first (restore_write_access, virtual_subpage_step_done):
++     * it is opened again for the same instruction. */
++    if (ret == STATUS_ACCESS_VIOLATION && host_page_size != page_size &&
++        (!data->subpage_step || data->subpage_step == page))
+     {
+         /* The page itself allows the access and the host page only refuses it for a
+          * neighbour's sake: open the host page for one instruction, and close it
+@@ -5468,11 +5472,16 @@ void *virtual_setup_exception( struct thread_data *data, void *stack_ptr, size_t
+  *           check_write_access
+  *
+  * Check if the memory range is writable, temporarily disabling write watches if necessary.
++ * A host page that lost writing only because another page in it is protected
++ * (get_host_page_unix_prot) is opened for the write too (*subpage): the kernel writes
++ * the range itself, and a write it makes cannot be stepped over in virtual_handle_fault.
++ * restore_write_access protects the range again.
+  */
+-static NTSTATUS check_write_access( void *base, size_t size, BOOL *has_write_watch )
++static NTSTATUS check_write_access( void *base, size_t size, BOOL *has_write_watch, BOOL *subpage )
+ {
+     size_t i;
+     char *addr = ROUND_ADDR( base, host_page_mask );
++    char *page, *end = (char *)base + size;
+ 
+     size = ROUND_SIZE( base, size, host_page_mask );
+     for (i = 0; i < size; i += host_page_size)
+@@ -5482,12 +5491,58 @@ static NTSTATUS check_write_access( void *base, size_t size, BOOL *has_write_wat
+         if (!(get_unix_prot( vprot & ~VPROT_WRITEWATCH ) & PROT_WRITE))
+             return STATUS_INVALID_USER_BUFFER;
+     }
++    /* the pages written must allow it themselves, not only their host page */
++    if (host_page_size != page_size)
++        for (page = ROUND_ADDR( base, page_mask ); page < end; page += page_size)
++            if (!(get_unix_prot( get_page_vprot( page ) & ~VPROT_WRITEWATCH ) & PROT_WRITE))
++                return STATUS_INVALID_USER_BUFFER;
+     if (*has_write_watch)
+         mprotect_range( addr, size, 0, VPROT_WRITEWATCH );  /* temporarily enable write access */
++    for (i = 0; host_page_size != page_size && i < size; i += host_page_size)
++    {
++        if (get_host_page_unix_prot( addr + i, ROUND_ADDR( base, page_mask ), end, 0, VPROT_WRITEWATCH ) & PROT_WRITE)
++            continue;
++        if (!mprotect_exec( addr + i, host_page_size, get_unix_prot( get_host_page_vprot( addr + i ) & ~VPROT_WRITEWATCH ) ))
++            *subpage = TRUE;
++    }
+     return STATUS_SUCCESS;
+ }
+ 
+ 
++/***********************************************************************
++ *           subpage_write_split
++ *
++ * Whether a range touches a host page that refuses writing only because another page
++ * in it is protected (get_host_page_unix_prot), where the kernel can't write. The caller
++ * holds virtual_mutex.
++ */
++static BOOL subpage_write_split( const void *base, size_t size )
++{
++    char *addr = ROUND_ADDR( base, host_page_mask );
++    size_t i;
++
++    if (host_page_size == page_size || !size) return FALSE;
++    size = ROUND_SIZE( base, size, host_page_mask );
++    for (i = 0; i < size; i += host_page_size)
++        if ((get_unix_prot( get_host_page_vprot( addr + i ) & ~VPROT_WRITEWATCH ) & PROT_WRITE) &&
++            !(get_host_page_unix_prot( addr + i, NULL, NULL, 0, VPROT_WRITEWATCH ) & PROT_WRITE))
++            return TRUE;
++    return FALSE;
++}
++
++
++/***********************************************************************
++ *           restore_write_access
++ *
++ * Protect a range again after check_write_access and the write it allowed.
++ */
++static void restore_write_access( void *base, size_t size, size_t accessed_size, BOOL has_write_watch, BOOL subpage )
++{
++    if (has_write_watch) update_write_watches( base, size, accessed_size );
++    else if (subpage) mprotect_range( base, size, 0, 0 );
++}
++
++
+ /***********************************************************************
+  *           virtual_locked_server_call
+  */
+@@ -5497,16 +5552,16 @@ unsigned int virtual_locked_server_call( void *req_ptr )
+     sigset_t sigset;
+     void *addr = req->reply_data;
+     data_size_t size = req->u.req.request_header.reply_size;
+-    BOOL has_write_watch = FALSE;
++    BOOL has_write_watch = FALSE, subpage = FALSE;
+     unsigned int ret;
+ 
+     if (!size) return wine_server_call( req_ptr );
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+-    if (!(ret = check_write_access( addr, size, &has_write_watch )))
++    if (!(ret = check_write_access( addr, size, &has_write_watch, &subpage )))
+     {
+         ret = server_call_unlocked( req );
+-        if (has_write_watch) update_write_watches( addr, size, wine_server_reply_size( req ));
++        restore_write_access( addr, size, wine_server_reply_size( req ), has_write_watch, subpage );
+     }
+     else memset( &req->u.reply, 0, sizeof(req->u.reply) );
+     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+@@ -5520,18 +5575,34 @@ unsigned int virtual_locked_server_call( void *req_ptr )
+ ssize_t virtual_locked_read( int fd, void *addr, size_t size )
+ {
+     sigset_t sigset;
+-    BOOL has_write_watch = FALSE;
++    BOOL has_write_watch = FALSE, subpage = FALSE;
+     int err = EFAULT;
+ 
+     ssize_t ret = read( fd, addr, size );
+-    if (ret != -1 || use_kernel_writewatch || errno != EFAULT) return ret;
++    if (ret > 0 && (size_t)ret < size && host_page_size != page_size)
++    {
++        /* the kernel stops short at a page beside a protected one: finish the read with it open */
++        char *rest = (char *)addr + ret;
++        BOOL more_watch = FALSE, more_subpage = FALSE;
++
++        server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++        if (subpage_write_split( rest, 1 ) && !check_write_access( rest, size - ret, &more_watch, &more_subpage ))
++        {
++            ssize_t more = read( fd, rest, size - ret );
++            restore_write_access( rest, size - ret, max( 0, more ), more_watch, more_subpage );
++            if (more > 0) ret += more;
++        }
++        server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++        return ret;
++    }
++    if (ret != -1 || (use_kernel_writewatch && host_page_size == page_size) || errno != EFAULT) return ret;
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+-    if (!check_write_access( addr, size, &has_write_watch ))
++    if (!check_write_access( addr, size, &has_write_watch, &subpage ))
+     {
+         ret = read( fd, addr, size );
+         err = errno;
+-        if (has_write_watch) update_write_watches( addr, size, max( 0, ret ));
++        restore_write_access( addr, size, max( 0, ret ), has_write_watch, subpage );
+     }
+     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+     errno = err;
+@@ -5545,18 +5616,34 @@ ssize_t virtual_locked_read( int fd, void *addr, size_t size )
+ ssize_t virtual_locked_pread( int fd, void *addr, size_t size, off_t offset )
+ {
+     sigset_t sigset;
+-    BOOL has_write_watch = FALSE;
++    BOOL has_write_watch = FALSE, subpage = FALSE;
+     int err = EFAULT;
+ 
+     ssize_t ret = pread( fd, addr, size, offset );
+-    if (ret != -1 || use_kernel_writewatch || errno != EFAULT) return ret;
++    if (ret > 0 && (size_t)ret < size && host_page_size != page_size)
++    {
++        /* the kernel stops short at a page beside a protected one: finish the read with it open */
++        char *rest = (char *)addr + ret;
++        BOOL more_watch = FALSE, more_subpage = FALSE;
++
++        server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++        if (subpage_write_split( rest, 1 ) && !check_write_access( rest, size - ret, &more_watch, &more_subpage ))
++        {
++            ssize_t more = pread( fd, rest, size - ret, offset + ret );
++            restore_write_access( rest, size - ret, max( 0, more ), more_watch, more_subpage );
++            if (more > 0) ret += more;
++        }
++        server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++        return ret;
++    }
++    if (ret != -1 || (use_kernel_writewatch && host_page_size == page_size) || errno != EFAULT) return ret;
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+-    if (!check_write_access( addr, size, &has_write_watch ))
++    if (!check_write_access( addr, size, &has_write_watch, &subpage ))
+     {
+         ret = pread( fd, addr, size, offset );
+         err = errno;
+-        if (has_write_watch) update_write_watches( addr, size, max( 0, ret ));
++        restore_write_access( addr, size, max( 0, ret ), has_write_watch, subpage );
+     }
+     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+     errno = err;
+@@ -5571,23 +5658,36 @@ ssize_t virtual_locked_recvmsg( int fd, struct msghdr *hdr, int flags )
+ {
+     sigset_t sigset;
+     size_t i;
+-    BOOL has_write_watch = FALSE;
++    BOOL has_write_watch = FALSE, subpage = FALSE, split = FALSE;
+     int err = EFAULT;
++    ssize_t ret = -1;
+ 
+-    ssize_t ret = recvmsg( fd, hdr, flags );
+-    if (ret != -1 || use_kernel_writewatch || errno != EFAULT) return ret;
++    if (host_page_size != page_size)
++    {
++        /* a datagram whose copy fails is gone: a buffer beside a protected page is opened
++         * before the first receive, not after it */
++        server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++        for (i = 0; i < hdr->msg_iovlen && !split; i++)
++            split = subpage_write_split( hdr->msg_iov[i].iov_base, hdr->msg_iov[i].iov_len );
++        server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++    }
++    if (!split)
++    {
++        ret = recvmsg( fd, hdr, flags );
++        if (ret != -1 || (use_kernel_writewatch && host_page_size == page_size) || errno != EFAULT) return ret;
++    }
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+     for (i = 0; i < hdr->msg_iovlen; i++)
+-        if (check_write_access( hdr->msg_iov[i].iov_base, hdr->msg_iov[i].iov_len, &has_write_watch ))
++        if (check_write_access( hdr->msg_iov[i].iov_base, hdr->msg_iov[i].iov_len, &has_write_watch, &subpage ))
+             break;
+     if (i == hdr->msg_iovlen)
+     {
+         ret = recvmsg( fd, hdr, flags );
+         err = errno;
+     }
+-    if (has_write_watch)
+-        while (i--) update_write_watches( hdr->msg_iov[i].iov_base, hdr->msg_iov[i].iov_len, 0 );
++    if (has_write_watch || subpage)
++        while (i--) restore_write_access( hdr->msg_iov[i].iov_base, hdr->msg_iov[i].iov_len, 0, has_write_watch, subpage );
+ 
+     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+     errno = err;
+@@ -5724,17 +5824,17 @@ SIZE_T virtual_uninterrupted_read_memory( const void *addr, void *buffer, SIZE_T
+  */
+ NTSTATUS virtual_uninterrupted_write_memory( void *addr, const void *buffer, SIZE_T size )
+ {
+-    BOOL has_write_watch = FALSE;
++    BOOL has_write_watch = FALSE, subpage = FALSE;
+     sigset_t sigset;
+     NTSTATUS ret;
+ 
+     if (!size) return STATUS_SUCCESS;
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+-    if (!(ret = check_write_access( addr, size, &has_write_watch )))
++    if (!(ret = check_write_access( addr, size, &has_write_watch, &subpage )))
+     {
+         memcpy( addr, buffer, size );
+-        if (has_write_watch) update_write_watches( addr, size, size );
++        restore_write_access( addr, size, size, has_write_watch, subpage );
+     }
+     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+     return ret;

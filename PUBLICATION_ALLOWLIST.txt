@@ -737,3 +737,4 @@ wine/patches/0983-win32u-ps5-report-the-120-hz-output-rate.patch
 wine/patches/0984-win32u-ps5-tell-windows-when-the-controller-comes-or-goes.patch
 wine/patches/0986-ntdll-keep-a-host-page-whole-when-accesses-beside-an-inaccessible-page-run-hot.patch
 wine/patches/0987-ntdll-report-hot-writes-only-beside-a-read-only-data-page.patch
+wine/patches/0988-ntdll-let-the-kernel-write-a-page-beside-a-protected-one.patch
