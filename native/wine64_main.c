@@ -41,6 +41,7 @@
 #include "../src/pw_wine_launch.h"
 #include "../src/pw_game_menu.h"
 #include "pw_data_mount.h"
+#include "pw_file_limits.h"
 #include "pw_audio_ps5.h"
 #include "pw_pad_ps5.h"
 #include "pw_hid_ps5.h"
@@ -1850,6 +1851,21 @@ int main(int argc, char **argv)
         }
         status = pw_wine_start_environment(&start, &config, &ops);
         PS5LOG_LOG("PW_WINE64 environment status=%d", status);
+    }
+    if (status == PW_OK) {
+        /* What the title may open, for logs of games that keep many files
+         * open: RLIMIT_NOFILE before and after raising it to the hard limit,
+         * and the server's file budget (wine/patches/0993) when the
+         * environment overrides it ("-" for the default). */
+        PwFileLimits file_limits;
+        const char *park_files = getenv("WINE_PS5_PARK_FILES");
+        const char *cached_files = getenv("WINE_PS5_CACHED_FILES");
+        (void)pw_file_limits_raise(&file_limits);
+        PS5LOG_LOG("PW_WINE64 files nofile_soft=%lld nofile_hard=%lld after_soft=%lld after_hard=%lld "
+                   "get_errno=%d set_errno=%d park_files=%s cached_files=%s",
+                   file_limits.soft_before, file_limits.hard_before, file_limits.soft_after,
+                   file_limits.hard_after, file_limits.get_errno, file_limits.set_errno,
+                   park_files && *park_files ? park_files : "-", cached_files && *cached_files ? cached_files : "-");
     }
     if (status == PW_OK) {
         status = pw_wine_start_run(&start, &config, &ops);

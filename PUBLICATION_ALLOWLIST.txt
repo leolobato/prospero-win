@@ -320,6 +320,9 @@ tests/test_pw_osk_ps5.c
 native/pw_data_mount.h
 tests/test_pw_data_mount.c
 tests/test_pw_data_mount_native.c
+native/pw_file_limits.c
+native/pw_file_limits.h
+tests/test_pw_file_limits.c
 tests/test_pw_lapy_elevation.c
 tests/test_pw_wine_cwd.c
 tests/test_pw_wine_cwd_listing.c
@@ -429,6 +432,8 @@ tests/test_wine_directory_changes.py
 tests/wine_directory_changes.c
 tests/test_wine_directory_handles.py
 tests/wine_directory_handles.c
+tests/test_wine_file_handles.py
+tests/wine_file_handles.c
 tests/test_wine_fiber_stacks.py
 tests/wine_fiber_stacks.c
 tests/test_d3d12_control.py
@@ -739,3 +744,4 @@ wine/patches/0986-ntdll-keep-a-host-page-whole-when-accesses-beside-an-inaccessi
 wine/patches/0987-ntdll-report-hot-writes-only-beside-a-read-only-data-page.patch
 wine/patches/0988-ntdll-let-the-kernel-write-a-page-beside-a-protected-one.patch
 wine/patches/0989-ntdll-report-hot-writes-beside-a-read-only-page-only-on-request.patch
+wine/patches/0993-server-ps5-park-read-only-file-descriptors.patch
