@@ -3,7 +3,7 @@
 #include <string.h>
 
 enum { SET_MODE = 1u << 0, SET_MOUSE = 1u << 1, SET_SPEED = 1u << 2, SET_PRESET = 1u << 3,
-       SET_PLAYER2 = 1u << 4 };
+       SET_PLAYER2 = 1u << 4, SET_RUMBLE = 1u << 5 };
 
 /* DualSense buttons in PW_GAME_BUTTON order, with their scePadRead bits. */
 static const struct { const char *name; uint32_t mask; } buttons[PW_GAME_BUTTON_COUNT] = {
@@ -151,6 +151,14 @@ static int input_field(PwGameInput *input, const uint8_t *key, size_t key_length
             return PW_ERR_MALFORMED;
         input->mouse_speed = speed;
         input->set |= SET_SPEED;
+        return PW_OK;
+    }
+    if (is(key, key_length, "rumble")) {
+        uint32_t rumble;
+        if ((input->set & SET_RUMBLE) || number(v, n, &rumble) != PW_OK || rumble > PW_GAME_RUMBLE_MAX)
+            return PW_ERR_MALFORMED;
+        input->rumble = rumble;
+        input->set |= SET_RUMBLE;
         return PW_OK;
     }
     for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++) {
@@ -508,6 +516,7 @@ void pw_game_input_init(PwGameInput *input)
     if (!input) return;
     memset(input, 0, sizeof(*input));
     input->mouse_speed = PW_GAME_MOUSE_SPEED_DEFAULT;
+    input->rumble = PW_GAME_RUMBLE_MAX;
     for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++) input->bindings[i].mask = buttons[i].mask;
 }
 
@@ -561,7 +570,8 @@ void pw_game_input_overlay(PwGameInput *base, const PwGameInput *overrides)
     if (overrides->set & SET_MODE) base->mode = overrides->mode;
     if (overrides->set & SET_MOUSE) base->mouse = overrides->mouse;
     if (overrides->set & SET_SPEED) base->mouse_speed = overrides->mouse_speed;
-    base->set |= overrides->set & (SET_MODE | SET_MOUSE | SET_SPEED);
+    if (overrides->set & SET_RUMBLE) base->rumble = overrides->rumble;
+    base->set |= overrides->set & (SET_MODE | SET_MOUSE | SET_SPEED | SET_RUMBLE);
     for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++)
         if (overrides->bindings[i].kind != PW_GAME_BIND_UNSET) base->bindings[i] = overrides->bindings[i];
 }
