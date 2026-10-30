@@ -8,7 +8,7 @@
 #include <stdio.h>
 
 #define PAGE 4096
-#define PAGES 20
+#define PAGES 24
 
 static unsigned char *base;
 static volatile LONG faults, fault_page, fault_write;
@@ -124,6 +124,28 @@ int main(void)
     got = faults;
     sink = base[17 * PAGE + 9];
     ok = ok && expect("read of the inaccessible page protected again", faults - got, 1) && fault_page == 17;
+
+    /* Many writes beside a code page, as .NET's stubs: a code page and the data
+     * page its code reads, side by side. The program never asked to learn of
+     * writes there and has no handler for them (an access violation ends the
+     * process), so none is reported; the host page keeps the union of its pages'
+     * protections and the code still runs. */
+    base[21 * PAGE] = 0xc3;  /* ret */
+    ok = ok && protect(21, PAGE_EXECUTE_READ);
+    QueryPerformanceCounter(&start);
+    got = faults;
+    for (i = 0; i < 20000; i++) ((volatile unsigned char *)base)[20 * PAGE + (i & 4095)] = (unsigned char)i;
+    QueryPerformanceCounter(&end);
+    ok = ok && expect("20000 writes beside a code page", faults - got, 0);
+    printf("subpage writes beside a code page: %.2f us each\n",
+           (double)(end.QuadPart - start.QuadPart) * 1e6 / freq.QuadPart / 20000);
+    ok = ok && base[20 * PAGE + 19999 % 4096] == (unsigned char)19999;
+    /* A reported write left the code page writable, not executable: call it only when none was. */
+    if (ok) ((void (*)(void))(base + 21 * PAGE))();
+    /* Protecting the code page again splits the host page: a write to it faults again. */
+    ok = ok && protect(21, PAGE_READWRITE) && protect(21, PAGE_EXECUTE_READ);
+    got = write_pages(21, 1, 9);
+    ok = ok && expect("write to the code page protected again", got, 1) && fault_page == 21 && fault_write;
 
     printf("subpage verdict=%s\n", ok ? "pass" : "fail");
     fflush(stdout);

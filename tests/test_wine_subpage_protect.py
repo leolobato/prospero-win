@@ -4,7 +4,8 @@
 page is larger and its neighbours stay writable, and the neighbours work
 without faults the program sees, in 64-bit and WoW64 processes
 (wine/patches/0974); accesses that keep coming beside an inaccessible page stop
-being stepped over (0986).
+being stepped over (0986); writes that keep coming beside a code page are not
+reported to the program (0987).
 
 Needs the host Wine from tools/build_host_wine.sh (PROSPERO_HOST_WINE, default
 .deps/wine-host/install/usr/bin/wine) and the mingw compilers; without them
@@ -34,6 +35,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as directory:
         env = dict(os.environ, WINEPREFIX=str(Path(directory) / "pfx"), WINEDEBUG="-all",
                    WINEDLLOVERRIDES="winemenubuilder.exe=d")
+        env.pop("WINE_HOST_PAGE_SIZE", None)  # the native run keeps the PC's own host pages
         for compiler in compilers:
             exe = Path(directory) / f"subpage-{Path(compiler).name.split('-')[0]}.exe"
             subprocess.run([compiler, "-O1", "-o", str(exe), str(SOURCE)], check=True)
