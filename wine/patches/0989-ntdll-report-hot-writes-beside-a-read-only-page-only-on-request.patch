@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Fri, 30 Oct 2026 12:00:00 +0100
+Subject: [PATCH] ntdll: Report hot writes beside a read-only page only on
+ request.
+
+Patch 0974 reports the 256th stepped write beside a read-only page to
+the program as a write to that page. An emulator that protects pages to
+learn when they change catches it and drops the protection. A program
+that doesn't handle it, as most games, ends with an access violation it
+did not cause.
+
+The report is now made only with PW_SUBPAGE_REPORT=1 in the
+environment. Otherwise a hot write beside a read-only page gives the
+host page the union of its pages' protections until one of them
+changes, as hot accesses beside an inaccessible page or a code page
+already do.
+---
+ dlls/ntdll/unix/virtual.c | 26 +++++++++++++++++---------
+ 1 file changed, 17 insertions(+), 9 deletions(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 15a6946406..d94da42187 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -1529,6 +1529,10 @@ static SIZE_T get_vprot_range_size( char *base, SIZE_T size, BYTE mask, BYTE *vp
+  * protections until one of them changes. */
+ static struct { const char *page; unsigned int steps; BOOL whole; } subpage_heat[64];
+ 
++/* PW_SUBPAGE_REPORT=1: hot writes beside a read-only data page are reported to the
++ * program (subpage_hot), for emulators that drop recompiled code when told. */
++static BOOL subpage_report;
++
+ /***********************************************************************
+  *           subpage_forget
+  *
+@@ -4245,6 +4249,10 @@ void virtual_init(void)
+     host_page_mask = host_page_size - 1;
+     TRACE( "host page size: %uk\n", (UINT)host_page_size / 1024 );
+ #endif
++    {
++        const char *env = getenv( "PW_SUBPAGE_REPORT" );
++        subpage_report = env && !strcmp( env, "1" );
++    }
+ 
+ #ifdef _WIN64
+     host_addr_space_limit = get_host_addr_space_limit();
+@@ -5254,14 +5262,14 @@ static NTSTATUS grow_thread_stack_to( struct thread_data *data, char *page, stru
+  *
+  * Counts an access stepped over in a host page because a page in it is read-only
+  * or inaccessible. Returns FALSE to step this one, until the host page has had
+- * SUBPAGE_HOT_STEPS of them. Then a write beside a read-only page that holds no
+- * code is reported there instead (*report): the count starts again, so a program
+- * that keeps the page read-only gets one report per SUBPAGE_HOT_STEPS writes and
+- * the rest are stepped, not a loop. Any other hot access cannot be reported to
+- * the program (a read, a write beside an inaccessible page that the program never
+- * touches, as a garbage collector's heap, or a write beside a code page, as .NET's
+- * stubs, whose data page sits next to their code): the host page keeps the union
+- * of its pages' protections, as without this scheme, until one of them changes.
++ * SUBPAGE_HOT_STEPS of them. With PW_SUBPAGE_REPORT=1, a write beside a read-only
++ * page that holds no code is then reported there instead (*report): the count
++ * starts again, so a program that keeps the page read-only gets one report per
++ * SUBPAGE_HOT_STEPS writes and the rest are stepped, not a loop. That only helps a
++ * program that handles the report, such as an emulator, and ends one that doesn't,
++ * as most games. Any other hot access (all of them without PW_SUBPAGE_REPORT, a
++ * read, a write beside an inaccessible page or a code page) gives the host page the
++ * union of its pages' protections, as without this scheme, until one of them changes.
+  */
+ static BOOL subpage_hot( char *page, BOOL write, char **report )
+ {
+@@ -5278,7 +5286,7 @@ static BOOL subpage_hot( char *page, BOOL write, char **report )
+     if (++subpage_heat[slot].steps < SUBPAGE_HOT_STEPS) return FALSE;
+     subpage_heat[slot].steps = 0;
+     *report = NULL;
+-    for (i = 0; write && i < host_page_size && !*report; i += page_size)
++    for (i = 0; write && subpage_report && i < host_page_size && !*report; i += page_size)
+     {
+         vprot = get_page_vprot( page + i );
+         if ((vprot & VPROT_COMMITTED) && !(vprot & (VPROT_GUARD | VPROT_WRITEWATCH | VPROT_EXEC)) &&
