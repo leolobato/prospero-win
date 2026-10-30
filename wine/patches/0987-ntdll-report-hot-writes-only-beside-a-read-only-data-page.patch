@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Fri, 30 Oct 2026 09:00:00 +0100
+Subject: [PATCH] ntdll: Report hot writes only beside a read-only data page.
+
+Patch 0986 reports a hot write beside a read-only page to the program,
+as a write to that page, so that a program that protects pages to learn
+when they change drops the protection. A code page counted as read-only
+too. .NET's stubs keep a code page and the data page its code reads side
+by side, and the runtime writes that data page all the time: after 256
+writes in a host page, the next one was reported as an access violation
+on the code page. .NET has no handler for it and ended the process
+(Slay the Spire 2, a Godot .NET game, at its first Godot.Image).
+
+A hot write beside an executable page is now treated as one beside an
+inaccessible page: the host page keeps the union of its pages'
+protections until one of them changes. Writes beside a read-only data
+page are still reported.
+---
+ dlls/ntdll/unix/virtual.c | 19 ++++++++++---------
+ 1 file changed, 10 insertions(+), 9 deletions(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 1608c38fc2..2c7556af19 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5254,13 +5254,14 @@ static NTSTATUS grow_thread_stack_to( struct thread_data *data, char *page, stru
+  *
+  * Counts an access stepped over in a host page because a page in it is read-only
+  * or inaccessible. Returns FALSE to step this one, until the host page has had
+- * SUBPAGE_HOT_STEPS of them. Then a write beside a read-only page is reported
+- * there instead (*report): the count starts again, so a program that keeps the
+- * page read-only gets one report per SUBPAGE_HOT_STEPS writes and the rest are
+- * stepped, not a loop. Any other hot access cannot be reported to the program
+- * (a read, or a write beside an inaccessible page that the program never touches,
+- * as a garbage collector's heap): the host page keeps the union of its pages'
+- * protections, as without this scheme, until one of them changes.
++ * SUBPAGE_HOT_STEPS of them. Then a write beside a read-only page that holds no
++ * code is reported there instead (*report): the count starts again, so a program
++ * that keeps the page read-only gets one report per SUBPAGE_HOT_STEPS writes and
++ * the rest are stepped, not a loop. Any other hot access cannot be reported to
++ * the program (a read, a write beside an inaccessible page that the program never
++ * touches, as a garbage collector's heap, or a write beside a code page, as .NET's
++ * stubs, whose data page sits next to their code): the host page keeps the union
++ * of its pages' protections, as without this scheme, until one of them changes.
+  */
+ static BOOL subpage_hot( char *page, BOOL write, char **report )
+ {
+@@ -5280,7 +5281,7 @@ static BOOL subpage_hot( char *page, BOOL write, char **report )
+     for (i = 0; write && i < host_page_size && !*report; i += page_size)
+     {
+         vprot = get_page_vprot( page + i );
+-        if ((vprot & VPROT_COMMITTED) && !(vprot & (VPROT_GUARD | VPROT_WRITEWATCH)) &&
++        if ((vprot & VPROT_COMMITTED) && !(vprot & (VPROT_GUARD | VPROT_WRITEWATCH | VPROT_EXEC)) &&
+             (get_unix_prot( vprot ) & PROT_READ) && !(get_unix_prot( vprot ) & PROT_WRITE))
+             *report = page + i;
+     }
+@@ -5368,7 +5369,7 @@ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec,
+         else if (subpage_hot( page, err == EXCEPTION_WRITE_FAULT, &protected_page ))
+         {
+             /* Accesses beside a protected page come too often to step each one. Beside a
+-             * read-only page, report a write to that page instead, as if this one had
++             * read-only data page, report a write to that page instead, as if this one had
+              * touched it: a program that protects pages to learn when they change (an
+              * emulator's recompiled code) then drops its protection, and the host page is
+              * writable again. Otherwise give the host page the union of its pages'
