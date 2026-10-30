@@ -633,6 +633,9 @@ wine/patches/0971-kernelbase-ps5-no-debugger-in-a-title.patch
 wine/patches/0972-faudio-keep-resampling-taps-within-the-samples.patch
 wine/patches/0973-ntdll-ps5-title-menu-snapshot.patch
 wine/patches/0974-ntdll-fault-on-protected-pages-that-share-a-host-page.patch
+wine/patches/0981-win32u-register-builtin-classes-without-waiting.patch
+tests/test_wine_builtin_classes.py
+tests/wine_builtin_classes.c
 wine/patches/0982-ntdll-ps5-high-area-as-large-as-the-kernel-grants.patch
 wine/patches/0986-ntdll-keep-a-host-page-whole-when-accesses-beside-an-inaccessible-page-run-hot.patch
 tests/test_wine_mouse_wheel.py
