@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Fri, 30 Oct 2026 03:40:00 +0100
+Subject: [PATCH] ntoskrnl: Wait for a PS5 title's DualShock 4 by its HID
+ interface.
+
+A game hosting the HID drivers waits up to a timeout (patch 0952) for the
+title's gamepad, so that it finds the controller when it first looks. It
+waits for winexinput's &XI_ interface, which a DualShock 4 (patch 0990)
+never gets: every game then waited the whole second. With
+WINE_PS5_PAD=dualshock4 it waits for the HID interface instead, which the
+DualShock 4 is found by, and as many of them as patch 0966's count says.
+---
+ dlls/ntoskrnl.exe/ntoskrnl.c | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 571ba5c..b9ae9f1 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -4389,10 +4389,14 @@ static LONG host_gamepads = 1;
+ 
+ /* The &XI_ gamepad interface winexinput.sys makes for a HID gamepad. */
+ static const GUID GUID_DEVINTERFACE_WINEXINPUT = {0x6c53d5fd, 0x6480, 0x440f, {0xb6, 0x18, 0x47, 0x67, 0x50, 0xc5, 0xe1, 0xa6}};
++/* The HID interface: a DualShock 4 (WINE_PS5_PAD=dualshock4) is no XInput
++ * gamepad and gets no &XI_ partner, so games find it by this one. */
++static const GUID hid_interface_class = {0x4d1e55b2, 0xf16f, 0x11cf, {0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30}};
++static const GUID *host_gamepad_class = &GUID_DEVINTERFACE_WINEXINPUT;
+ 
+ void hosted_interface_enabled( const GUID *interface_class )
+ {
+-    if (host_gamepad && IsEqualGUID( interface_class, &GUID_DEVINTERFACE_WINEXINPUT ) &&
++    if (host_gamepad && IsEqualGUID( interface_class, host_gamepad_class ) &&
+         InterlockedDecrement( &host_gamepads ) <= 0)
+         SetEvent( host_gamepad );
+ }
+@@ -4414,15 +4418,19 @@ NTSTATUS CDECL wine_ntoskrnl_host_start( const WCHAR *driver_name, DWORD timeout
+ {
+     static LONG state;  /* 0: not started, 1: starting, 2: started */
+     HANDLE stop_event = NULL, thread = NULL;
+-    WCHAR path[MAX_PATH];
++    WCHAR path[MAX_PATH], pad[16];
+     UNICODE_STRING name;
+     NTSTATUS status;
+-    DWORD start;
++    DWORD start, length;
+ 
+     if (!hosted) return STATUS_NOT_SUPPORTED;
+     if (wcslen( servicesW ) + wcslen( driver_name ) >= ARRAY_SIZE(path)) return STATUS_INVALID_PARAMETER;
+     if (InterlockedCompareExchange( &state, 1, 0 )) return STATUS_IMAGE_ALREADY_LOADED;
+ 
++    length = GetEnvironmentVariableW( L"WINE_PS5_PAD", pad, ARRAY_SIZE(pad) );
++    host_gamepad_class = length && length < ARRAY_SIZE(pad) && !wcscmp( pad, L"dualshock4" )
++                         ? &hid_interface_class : &GUID_DEVINTERFACE_WINEXINPUT;
++
+     status = STATUS_NO_MEMORY;
+     if (!(stop_event = CreateEventW( NULL, TRUE, FALSE, NULL ))) goto failed;
+     if (!(host_ready = CreateEventW( NULL, TRUE, FALSE, NULL ))) goto failed;
+-- 
+2.56.0
+

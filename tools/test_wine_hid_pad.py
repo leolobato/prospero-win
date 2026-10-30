@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Host test of the PS5 title's controller as a HID gamepad (Wine patches
-0951-0953), as DirectInput and winmm find it.
+0951-0953), as DirectInput and winmm find it, or with --dualshock4 as a
+DualShock 4 (0990-0992), as games that read a PlayStation controller's
+reports find it.
 
 Builds tests/lab/pw_hid_pad_sink.c (the title's pad calls, served from a
 text file) and tests/lab/pw_hid_pad.c (a program that sets the pad through
@@ -8,12 +10,13 @@ that file and reads it back), then runs the program under a host Wine built
 with the patch series (tools/build_host_wine.sh), with the sink preloaded.
 By default winebus runs in winedevice. With --hosted, a PE32 and a PE64
 program each host the HID drivers themselves, with services.exe disabled
-and the gamepad never installed before, as in a PS5 title.
+and the gamepad never installed before, as in a PS5 title. --dualshock4
+runs tests/lab/pw_hid_ds4.c instead, with WINE_PS5_PAD=dualshock4.
 
 It is not part of `make test`: it needs the host Wine build and mingw, on
 x86_64 Linux (Rosetta's signal handling asserts in Wine).
 
-Usage: tools/test_wine_hid_pad.py --wine WORK/install/usr/bin/wine [--hosted] [--output DIR]
+Usage: tools/test_wine_hid_pad.py --wine WORK/install/usr/bin/wine [--hosted] [--dualshock4] [--output DIR]
 """
 import argparse
 import os
@@ -29,17 +32,22 @@ def main():
     parser.add_argument('--hosted', action='store_true',
                         help='run the HID drivers in the test program (WINE_NTOSKRNL_HOSTED), 32- and 64-bit, '
                              'as a PS5 title does: without services.exe or winedevice')
+    parser.add_argument('--dualshock4', action='store_true',
+                        help='make the controller a DualShock 4 (WINE_PS5_PAD=dualshock4) and check its HID reports')
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     output = (args.output or Path(tempfile.mkdtemp(prefix='wine-hid-pad-'))).resolve()
     output.mkdir(parents=True, exist_ok=True)
 
-    programs = {'pe32': ('i686-w64-mingw32-gcc', output / 'pw_hid_pad.exe')}
+    name = 'pw_hid_ds4' if args.dualshock4 else 'pw_hid_pad'
+    libraries = (['-lsetupapi', '-lhid', '-lxinput', '-ldinput8', '-ldxguid'] if args.dualshock4 else
+                 ['-ldinput8', '-ldxguid', '-lwinmm', '-lruntimeobject'])
+    programs = {'pe32': ('i686-w64-mingw32-gcc', output / f'{name}.exe')}
     if args.hosted:
-        programs['pe64'] = ('x86_64-w64-mingw32-gcc', output / 'pw_hid_pad64.exe')
+        programs['pe64'] = ('x86_64-w64-mingw32-gcc', output / f'{name}64.exe')
     for compiler, exe in programs.values():
         subprocess.run([compiler, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
-                        str(root / 'tests/lab/pw_hid_pad.c'), '-o', str(exe), '-ldinput8', '-ldxguid', '-lwinmm', '-lruntimeobject'],
+                        str(root / f'tests/lab/{name}.c'), '-o', str(exe)] + libraries,
                        check=True, timeout=60)
     sink = output / 'pw_hid_pad_sink.so'
     subprocess.run(['gcc', '-shared', '-fPIC', '-O2', '-Wall', '-Wextra', '-Werror',
@@ -57,6 +65,8 @@ def main():
     plain.update(WINEPREFIX=str(output / 'prefix'), WINEDEBUG=plain.get('WINEDEBUG', '-all'),
                  WINEDLLOVERRIDES='mscoree,mshtml=', WINESERVER=wineserver)
     with_pad = dict(plain, LD_PRELOAD=str(sink), PW_PAD_FILE=str(pad), PW_RUMBLE_FILE=str(rumble))
+    if args.dualshock4:
+        with_pad['WINE_PS5_PAD'] = 'dualshock4'
     windows_pad = 'Z:' + str(pad).replace('/', '\\')
     windows_rumble = 'Z:' + str(rumble).replace('/', '\\')
 

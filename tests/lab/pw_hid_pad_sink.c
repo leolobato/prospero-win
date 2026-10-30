@@ -4,7 +4,8 @@
  * tools/test_wine_hid_pad.py so that winebus's PS5 bus starts in winedevice.
  * The pad's state is the text in $PW_PAD_FILE, re-read on every call:
  * "connected buttons left_trigger right_trigger lx ly rx ry" in decimal
- * (buttons are XINPUT_GAMEPAD_* bits). A missing or unreadable file is a
+ * (buttons are XINPUT_GAMEPAD_* bits), optionally followed by the extras
+ * "buttons touching x y" (PW_WINE_PAD_* bits). A missing or unreadable file is a
  * disconnected pad. Each rumble request is appended to $PW_RUMBLE_FILE as
  * "left right". The test program writes the pad file through Wine's Z:
  * drive and reads the rumble file the same way. Controllers 1..3 are the same
@@ -22,7 +23,14 @@ typedef struct PwWinePad {
     int16_t thumb_lx,thumb_ly,thumb_rx,thumb_ry;
 } PwWinePad;
 
+typedef struct PwWinePadExtra {
+    uint32_t buttons;
+    uint32_t touching;
+    uint16_t touch_x,touch_y;
+} PwWinePadExtra;
+
 int pw_wine_pad(PwWinePad *pad);
+void pw_wine_pad_extra_at(uint32_t index,PwWinePadExtra *extra);
 void pw_wine_set_rumble(uint32_t left,uint32_t right);
 int pw_wine_pad_peek(uint32_t index,PwWinePad *pad);
 void pw_wine_set_rumble_at(uint32_t index,uint32_t left,uint32_t right);
@@ -60,6 +68,31 @@ int pw_wine_pad_peek(uint32_t index,PwWinePad *pad)
 int pw_wine_pad(PwWinePad *pad)
 {
     return pw_wine_pad_peek(0,pad);
+}
+
+void pw_wine_pad_extra_at(uint32_t index,PwWinePadExtra *extra)
+{
+    const char *base=getenv("PW_PAD_FILE");
+    char path[4096];
+    unsigned connected,buttons,lt,rt,extra_buttons,touching,x,y;
+    int lx,ly,rx,ry;
+    FILE *f;
+
+    extra->buttons=extra->touching=0;
+    extra->touch_x=extra->touch_y=0;
+    if(!base)return;
+    if(index)snprintf(path,sizeof(path),"%s.%u",base,index);
+    else snprintf(path,sizeof(path),"%s",base);
+    f=fopen(path,"r");
+    if(!f)return;
+    if(fscanf(f,"%u %u %u %u %d %d %d %d %u %u %u %u",&connected,&buttons,&lt,&rt,&lx,&ly,&rx,&ry,
+              &extra_buttons,&touching,&x,&y)==12) {
+        extra->buttons=extra_buttons;
+        extra->touching=touching;
+        extra->touch_x=(uint16_t)x;
+        extra->touch_y=(uint16_t)y;
+    }
+    fclose(f);
 }
 
 void pw_wine_set_rumble_at(uint32_t index,uint32_t left,uint32_t right)

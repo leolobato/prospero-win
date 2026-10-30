@@ -1,0 +1,494 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Fri, 30 Oct 2026 02:00:00 +0100
+Subject: [PATCH] winebus: Show the PS5 title's controllers as DualShock 4s on
+ request.
+
+Games that pick their button prompts from the controller they find show
+Xbox prompts with the Xbox 360 controller the PS5 bus makes (patch
+0951), even though the player holds a DualSense. Games that read a
+PlayStation controller find it by its own reports: SDL's HIDAPI driver
+and Unity's Input System parse a DualShock 4's input report by byte
+offset, and SDL reads its calibration and address feature reports.
+
+With WINE_PS5_PAD=dualshock4 in the environment, the PS5 bus makes
+wired DualShock 4s (054c:09cc, "Wireless Controller") instead, one per
+controller as patch 0966 has it, each with its own address and serial
+number: a raw HID device with the controller's report descriptor and USB
+reports.
+- Input report 0x01 (64 bytes), sent when it changes, as the Xbox
+  controller's is, and every 100 ms otherwise so that its counter and
+  timestamp move (the drivers that read it need no steady stream over
+  USB): the sticks (y down), the hat and face buttons, the shoulders, Share,
+  Options and the stick clicks, the touchpad's click with the report
+  counter, the triggers, a timestamp, a level still controller, a wired
+  full battery and the first finger on the touchpad (scaled to the
+  DualShock 4's 1920 x 943). The touchpad's click, Share and the finger
+  come from a second sink call (pw_wine_pad_extra_at), since the gamepad
+  state is XInput's and has no bits for them.
+- Output report 0x05: when its flags ask for rumble, byte 4 (the small
+  motor) and byte 5 (the large one) go to that controller's rumble as XInput's
+  right and left motors, and stay until the next report. The light bar
+  is accepted and ignored.
+- Feature reports 0x02 (calibration with no bias and a scale of 1),
+  0x12 (pairing: a fixed, locally administered address), 0x81 (the
+  address) and 0xa3 (firmware).
+A DualShock 4 is not a gamepad to winexinput, so it gets no XInput partner
+and no &IG_ interface: on Windows it has none either. Without the
+variable nothing changes.
+---
+ dlls/winebus.sys/bus_ps5.c | 372 ++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 369 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/winebus.sys/bus_ps5.c b/dlls/winebus.sys/bus_ps5.c
+index 97bed10..cf342b5 100644
+--- a/dlls/winebus.sys/bus_ps5.c
++++ b/dlls/winebus.sys/bus_ps5.c
+@@ -1,5 +1,5 @@
+ /*
+- * The PS5 title's controller, as a HID gamepad
++ * The PS5 title's controller, as a HID gamepad or a DualShock 4
+  *
+  * Copyright 2026 prospero-win
+  *
+@@ -70,15 +70,154 @@ struct title_pad_state
+     INT16 thumb_lx, thumb_ly, thumb_rx, thumb_ry;
+ };
+ 
++/* What a PlayStation controller has beside the XInput state: the touchpad's
++ * click, Share and the first finger on the touchpad (PwWinePadExtra). */
++struct title_pad_extra
++{
++    UINT32 buttons;
++    UINT32 touching;
++    UINT16 touch_x, touch_y;   /* 0..1919, 0..1079 */
++};
++
++#define TITLE_PAD_TOUCHPAD 0x1
++#define TITLE_PAD_SHARE    0x2
++
+ static int (*title_pad)(struct title_pad_state *state);
+ static void (*title_rumble)(UINT32 left, UINT32 right);
+ static int (*title_pad_peek)(UINT32 index, struct title_pad_state *state);
+ static void (*title_rumble_at)(UINT32 index, UINT32 left, UINT32 right);
+ static void (*title_pads_ask)(UINT32 mask);
+ static void (*title_pad_notify)(void);
++static void (*title_pad_extra)(UINT32 index, struct title_pad_extra *extra);
++
++/* With WINE_PS5_PAD=dualshock4 the device is instead a wired DualShock 4
++ * (054c:09cc), a raw HID device that sends the controller's own reports, as
++ * on Windows: games that read a PlayStation controller by its reports (SDL's
++ * HIDAPI driver, Unity's Input System) find it and show its buttons. It is
++ * not a gamepad to winexinput, so it has no XInput partner; xinput reports
++ * no controller then (patch 0991), as Windows does beside a DualShock 4. */
++static BOOL ps5_dualshock4;
++
++/* A DualShock 4's USB reports: input 0x01 (64 bytes with its ID), output
++ * 0x05 (32: rumble and light bar) and the features the drivers read: 0x02
++ * the motion calibration, 0x12 the pairing (the controller's address), 0x81
++ * the address alone and 0xa3 the firmware's. */
++#define DS4_INPUT_REPORT_SIZE 64
++
++static const BYTE ds4_report_descriptor[] =
++{
++    0x05, 0x01,        /* Usage Page (Generic Desktop) */
++    0x09, 0x05,        /* Usage (Game Pad) */
++    0xa1, 0x01,        /* Collection (Application) */
++    0x85, 0x01,        /*   Report ID (1) */
++    0x09, 0x30,        /*   Usage (X) */
++    0x09, 0x31,        /*   Usage (Y) */
++    0x09, 0x32,        /*   Usage (Z) */
++    0x09, 0x35,        /*   Usage (Rz) */
++    0x15, 0x00,        /*   Logical Minimum (0) */
++    0x26, 0xff, 0x00,  /*   Logical Maximum (255) */
++    0x75, 0x08,        /*   Report Size (8) */
++    0x95, 0x04,        /*   Report Count (4) */
++    0x81, 0x02,        /*   Input (Data,Var,Abs) */
++    0x09, 0x39,        /*   Usage (Hat switch) */
++    0x15, 0x00,        /*   Logical Minimum (0) */
++    0x25, 0x07,        /*   Logical Maximum (7) */
++    0x35, 0x00,        /*   Physical Minimum (0) */
++    0x46, 0x3b, 0x01,  /*   Physical Maximum (315) */
++    0x65, 0x14,        /*   Unit (Degrees) */
++    0x75, 0x04,        /*   Report Size (4) */
++    0x95, 0x01,        /*   Report Count (1) */
++    0x81, 0x42,        /*   Input (Data,Var,Abs,Null State) */
++    0x65, 0x00,        /*   Unit (None) */
++    0x05, 0x09,        /*   Usage Page (Button) */
++    0x19, 0x01,        /*   Usage Minimum (1) */
++    0x29, 0x0e,        /*   Usage Maximum (14) */
++    0x15, 0x00,        /*   Logical Minimum (0) */
++    0x25, 0x01,        /*   Logical Maximum (1) */
++    0x75, 0x01,        /*   Report Size (1) */
++    0x95, 0x0e,        /*   Report Count (14) */
++    0x81, 0x02,        /*   Input (Data,Var,Abs) */
++    0x06, 0x00, 0xff,  /*   Usage Page (Vendor Defined 0xff00) */
++    0x09, 0x20,        /*   Usage (0x20) */
++    0x75, 0x06,        /*   Report Size (6) */
++    0x95, 0x01,        /*   Report Count (1) */
++    0x15, 0x00,        /*   Logical Minimum (0) */
++    0x25, 0x7f,        /*   Logical Maximum (127) */
++    0x81, 0x02,        /*   Input (Data,Var,Abs): the report counter */
++    0x05, 0x01,        /*   Usage Page (Generic Desktop) */
++    0x09, 0x33,        /*   Usage (Rx) */
++    0x09, 0x34,        /*   Usage (Ry) */
++    0x15, 0x00,        /*   Logical Minimum (0) */
++    0x26, 0xff, 0x00,  /*   Logical Maximum (255) */
++    0x75, 0x08,        /*   Report Size (8) */
++    0x95, 0x02,        /*   Report Count (2) */
++    0x81, 0x02,        /*   Input (Data,Var,Abs) */
++    0x06, 0x00, 0xff,  /*   Usage Page (Vendor Defined 0xff00) */
++    0x09, 0x21,        /*   Usage (0x21) */
++    0x95, 0x36,        /*   Report Count (54) */
++    0x81, 0x02,        /*   Input (Data,Var,Abs): motion, battery, touch */
++    0x85, 0x05,        /*   Report ID (5) */
++    0x09, 0x22,        /*   Usage (0x22) */
++    0x95, 0x1f,        /*   Report Count (31) */
++    0x91, 0x02,        /*   Output (Data,Var,Abs) */
++    0x85, 0x02,        /*   Report ID (2) */
++    0x09, 0x24,        /*   Usage (0x24) */
++    0x95, 0x24,        /*   Report Count (36) */
++    0xb1, 0x02,        /*   Feature (Data,Var,Abs) */
++    0x85, 0x12,        /*   Report ID (18) */
++    0x06, 0x02, 0xff,  /*   Usage Page (Vendor Defined 0xff02) */
++    0x09, 0x21,        /*   Usage (0x21) */
++    0x95, 0x0f,        /*   Report Count (15) */
++    0xb1, 0x02,        /*   Feature (Data,Var,Abs) */
++    0x06, 0x80, 0xff,  /*   Usage Page (Vendor Defined 0xff80) */
++    0x85, 0x81,        /*   Report ID (129) */
++    0x09, 0x21,        /*   Usage (0x21) */
++    0x95, 0x06,        /*   Report Count (6) */
++    0xb1, 0x02,        /*   Feature (Data,Var,Abs) */
++    0x85, 0xa3,        /*   Report ID (163) */
++    0x09, 0x43,        /*   Usage (0x43) */
++    0x95, 0x30,        /*   Report Count (48) */
++    0xb1, 0x02,        /*   Feature (Data,Var,Abs) */
++    0xc0,              /* End Collection */
++};
++
++/* Controller 0's address, a locally administered one, low byte first as the
++ * feature reports carry it; the serial number is the same address. Each other
++ * controller adds its index to the low byte. */
++static const BYTE ds4_address[6] = {0x01, 0x00, 0x35, 0x53, 0x50, 0x02};
++
++/* Motion calibration (USB order): no bias, and ranges for which the drivers'
++ * formulas give a scale of 1, so a still controller reads as still. */
++static const BYTE ds4_calibration[37] =
++{
++    0x02,
++    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* gyro pitch, yaw, roll bias */
++    0xc0, 0x21, 0x40, 0xde,              /* pitch +8640, -8640 */
++    0xc0, 0x21, 0x40, 0xde,              /* yaw */
++    0xc0, 0x21, 0x40, 0xde,              /* roll */
++    0x1c, 0x02, 0x1c, 0x02,              /* gyro speed +540, -540 */
++    0x00, 0x20, 0x00, 0xe0,              /* accel x +8192, -8192 */
++    0x00, 0x20, 0x00, 0xe0,              /* y */
++    0x00, 0x20, 0x00, 0xe0,              /* z */
++    0x00, 0x00,
++};
++
++/* Firmware: build date and time, then the hardware and firmware versions. */
++static const BYTE ds4_firmware[49] =
++{
++    0xa3,
++    'S','e','p',' ','2','1',' ','2','0','1','8', 0, 0, 0, 0, 0,
++    '0','4',':','5','0',':','5','1', 0, 0, 0, 0, 0, 0, 0, 0,
++    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++};
+ 
+ /* How often the pad is read: the title updates it once per frame or so. */
+ #define PS5_POLL_NS (4 * 1000 * 1000)
++/* How often a DualShock 4 reports a state that did not change, so that its
++ * counter and timestamp move; changes are reported at once. The controller
++ * itself reports every 4 ms, which would pass every poll through the game's
++ * HID stack for nothing. */
++#define DS4_IDLE_NS (100 * 1000 * 1000)
+ 
+ static pthread_mutex_t ps5_cs = PTHREAD_MUTEX_INITIALIZER;
+ static pthread_cond_t ps5_wake = PTHREAD_COND_INITIALIZER;
+@@ -93,6 +232,14 @@ struct ps5_device
+     struct title_pad_state last;
+     UINT64 rumble_until;  /* CLOCK_MONOTONIC ns when the rumble stops; 0: until told */
+     UINT32 slot;          /* the controller's index in the title's sink */
++    /* DualShock 4: its report counter, and the touch number of the finger
++     * on the touchpad (a new one for each touch) */
++    BYTE counter;
++    BYTE touch_id;
++    BOOL touching;
++    struct title_pad_extra last_extra;
++    UINT64 last_report_ns;
++    BYTE report[DS4_INPUT_REPORT_SIZE];
+ };
+ 
+ static struct ps5_device *ps5_pad;
+@@ -265,6 +412,177 @@ static const struct hid_device_vtbl ps5_device_vtbl =
+     ps5_device_physical_effect_update,
+ };
+ 
++static NTSTATUS ds4_get_report_descriptor(struct unix_device *iface, BYTE *buffer, UINT length,
++                                          UINT *out_length)
++{
++    *out_length = sizeof(ds4_report_descriptor);
++    if (length < sizeof(ds4_report_descriptor)) return STATUS_BUFFER_TOO_SMALL;
++    memcpy(buffer, ds4_report_descriptor, sizeof(ds4_report_descriptor));
++    return STATUS_SUCCESS;
++}
++
++/* Output report 0x05: when its flags ask for rumble, byte 4 is the small
++ * (high-frequency) motor and byte 5 the large one. The motors keep their
++ * speeds until the next report, as a DualShock 4's do; the light bar and
++ * its flashing have nothing to drive. */
++static void ds4_set_output_report(struct unix_device *iface, HID_XFER_PACKET *packet, IO_STATUS_BLOCK *io)
++{
++    struct ps5_device *impl = impl_from_unix_device(iface);
++    const BYTE *report = packet->reportBuffer;
++
++    if (packet->reportId != 0x05 || packet->reportBufferLen < 6 || report[0] != 0x05)
++    {
++        io->Information = 0;
++        io->Status = STATUS_NOT_IMPLEMENTED;
++        return;
++    }
++    TRACE("flags %#x, small %u, large %u\n", report[1], report[4], report[5]);
++    if ((report[1] & 0x01) && title_rumble)
++    {
++        pthread_mutex_lock(&ps5_cs);
++        ps5_rumble(impl, report[5] * 257, report[4] * 257);
++        pthread_mutex_unlock(&ps5_cs);
++    }
++    io->Information = packet->reportBufferLen;
++    io->Status = STATUS_SUCCESS;
++}
++
++static void ds4_get_feature_report(struct unix_device *iface, HID_XFER_PACKET *packet, IO_STATUS_BLOCK *io)
++{
++    struct ps5_device *impl = impl_from_unix_device(iface);
++    BYTE pairing[16] = {0x12};
++    BYTE address[7] = {0x81};
++    const BYTE *report;
++    UINT size;
++
++    switch (packet->reportId)
++    {
++    case 0x02: report = ds4_calibration; size = sizeof(ds4_calibration); break;
++    case 0x12:
++        /* the controller's address, then the host's (none paired) */
++        memcpy(pairing + 1, ds4_address, sizeof(ds4_address));
++        pairing[1] += impl->slot;
++        pairing[7] = 0x08;
++        pairing[8] = 0x25;
++        report = pairing; size = sizeof(pairing);
++        break;
++    case 0x81:
++        memcpy(address + 1, ds4_address, sizeof(ds4_address));
++        address[1] += impl->slot;
++        report = address; size = sizeof(address);
++        break;
++    case 0xa3: report = ds4_firmware; size = sizeof(ds4_firmware); break;
++    default:
++        WARN("unknown feature report %#x\n", packet->reportId);
++        io->Information = 0;
++        io->Status = STATUS_NOT_IMPLEMENTED;
++        return;
++    }
++    if (size > packet->reportBufferLen) size = packet->reportBufferLen;
++    memcpy(packet->reportBuffer, report, size);
++    io->Information = size;
++    io->Status = STATUS_SUCCESS;
++}
++
++/* Settings a driver sends are accepted and have no effect. */
++static void ds4_set_feature_report(struct unix_device *iface, HID_XFER_PACKET *packet, IO_STATUS_BLOCK *io)
++{
++    TRACE("feature report %#x, %u bytes\n", packet->reportId, packet->reportBufferLen);
++    io->Information = packet->reportBufferLen;
++    io->Status = STATUS_SUCCESS;
++}
++
++static const struct raw_device_vtbl ds4_device_vtbl =
++{
++    ps5_device_destroy,
++    ps5_device_start,
++    ps5_device_stop,
++    ds4_get_report_descriptor,
++    ds4_set_output_report,
++    ds4_get_feature_report,
++    ds4_set_feature_report,
++};
++
++/* A stick axis, -32768..32767 with y up as in XInput, as a DualShock 4's
++ * 0..255, centre 0x80, with y down. */
++static BYTE ds4_axis(INT16 value, BOOL invert)
++{
++    int axis = ((int)value * 128 + (value >= 0 ? 16384 : -16384)) / 32768;
++
++    if (invert) axis = -axis;
++    axis += 0x80;
++    return axis < 0 ? 0 : axis > 255 ? 255 : axis;
++}
++
++/* The d-pad as the DualShock 4's hat: 0 up, clockwise to 7, 8 centred. */
++static BYTE ds4_hat(UINT16 buttons)
++{
++    static const BYTE hats[3][3] = {{7, 0, 1}, {6, 8, 2}, {5, 4, 3}};
++    int x = (buttons & 0x0008 ? 1 : 0) - (buttons & 0x0004 ? 1 : 0);
++    int y = (buttons & 0x0002 ? 1 : 0) - (buttons & 0x0001 ? 1 : 0);
++
++    return hats[y + 1][x + 1];
++}
++
++/* Input report 0x01 from the pad, its extras and the clock: sticks, hat
++ * and face buttons, shoulders and the rest, PS and the touchpad's click with
++ * the counter, triggers, a timestamp in 16/3 us, a level still controller,
++ * a wired full battery and one touch frame with the finger, if any. */
++static void ds4_set_report(struct ps5_device *impl, const struct title_pad_state *state,
++                           const struct title_pad_extra *extra, UINT64 now)
++{
++    BYTE *report = impl->report;
++    UINT16 buttons = state->buttons;
++    UINT16 timestamp = (UINT16)(now * 3 / 16000);
++
++    memset(report, 0, sizeof(impl->report));
++    report[0] = 0x01;
++    report[1] = ds4_axis(state->thumb_lx, FALSE);
++    report[2] = ds4_axis(state->thumb_ly, TRUE);
++    report[3] = ds4_axis(state->thumb_rx, FALSE);
++    report[4] = ds4_axis(state->thumb_ry, TRUE);
++    report[5] = ds4_hat(buttons);
++    if (buttons & 0x4000) report[5] |= 0x10;  /* square (X) */
++    if (buttons & 0x1000) report[5] |= 0x20;  /* cross (A) */
++    if (buttons & 0x2000) report[5] |= 0x40;  /* circle (B) */
++    if (buttons & 0x8000) report[5] |= 0x80;  /* triangle (Y) */
++    if (buttons & 0x0100) report[6] |= 0x01;  /* L1 */
++    if (buttons & 0x0200) report[6] |= 0x02;  /* R1 */
++    if (state->left_trigger) report[6] |= 0x04;
++    if (state->right_trigger) report[6] |= 0x08;
++    if (extra->buttons & TITLE_PAD_SHARE) report[6] |= 0x10;
++    if (buttons & 0x0010) report[6] |= 0x20;  /* options (start) */
++    if (buttons & 0x0040) report[6] |= 0x40;  /* L3 */
++    if (buttons & 0x0080) report[6] |= 0x80;  /* R3 */
++    if (extra->buttons & TITLE_PAD_TOUCHPAD) report[7] |= 0x02;
++    report[7] |= (impl->counter++ & 0x3f) << 2;
++    report[8] = state->left_trigger;
++    report[9] = state->right_trigger;
++    report[10] = timestamp & 0xff;
++    report[11] = timestamp >> 8;
++    /* gyro 13..18 stays 0; accelerometer 19..24: 1 g along y */
++    report[21] = 0x00;
++    report[22] = 0x20;
++    report[30] = 0x1b;  /* cable, full */
++    report[33] = 1;     /* touch frames */
++    report[34] = (BYTE)(timestamp >> 8);
++    if (extra->touching && !impl->touching) impl->touch_id = (impl->touch_id + 1) & 0x7f;
++    impl->touching = !!extra->touching;
++    if (extra->touching)
++    {
++        /* The DualShock 4's touchpad is 1920 x 943 */
++        UINT x = extra->touch_x < 1920 ? extra->touch_x : 1919;
++        UINT y = (extra->touch_y < 1080 ? extra->touch_y : 1079) * 943 / 1080;
++
++        report[35] = impl->touch_id;
++        report[36] = x & 0xff;
++        report[37] = ((x >> 8) & 0x0f) | ((y & 0x0f) << 4);
++        report[38] = y >> 4;
++    }
++    else report[35] = 0x80 | impl->touch_id;
++    report[39] = 0x80;  /* no second finger */
++}
++
+ /* XINPUT_GAMEPAD buttons, in the order hid_device_add_gamepad lays them out
+  * (the SDL bus's controller mapping). */
+ static const struct { UINT16 mask; BYTE button; } ps5_buttons[] =
+@@ -307,7 +625,7 @@ static void set_report_from_state(struct unix_device *iface, const struct title_
+ }
+ 
+ /* Stops a device's rumble whose duration ran out, and queues a report when its
+- * state changed. Called with ps5_cs. */
++ * state changed, or now and then for a DualShock 4. Called with ps5_cs. */
+ static void ps5_device_poll(struct ps5_device *impl, const struct title_pad_state *state)
+ {
+     struct unix_device *iface = &impl->unix_device;
+@@ -317,6 +635,24 @@ static void ps5_device_poll(struct ps5_device *impl, const struct title_pad_stat
+         impl->rumble_until = 0;
+         ps5_rumble(impl, 0, 0);
+     }
++    if (ps5_dualshock4)
++    {
++        struct title_pad_extra extra;
++        UINT64 now = monotonic_ns();
++
++        memset(&extra, 0, sizeof(extra));
++        if (state->connected && title_pad_extra) title_pad_extra(impl->slot, &extra);
++        if (impl->have_state && !memcmp(state, &impl->last, sizeof(*state)) &&
++            !memcmp(&extra, &impl->last_extra, sizeof(extra)) && now - impl->last_report_ns < DS4_IDLE_NS)
++            return;
++        impl->last = *state;
++        impl->last_extra = extra;
++        impl->last_report_ns = now;
++        impl->have_state = TRUE;
++        ds4_set_report(impl, state, &extra, now);
++        bus_event_queue_input_report(&event_queue, iface, impl->report, sizeof(impl->report));
++        return;
++    }
+     if (impl->have_state && !memcmp(state, &impl->last, sizeof(*state))) return;
+     impl->last = *state;
+     impl->have_state = TRUE;
+@@ -344,9 +680,34 @@ static struct ps5_device *ps5_device_create(UINT32 slot)
+                     'F','o','r',' ','W','i','n','d','o','w','s',')',0},
+         .serialnumber = {'0','0','0',(WCHAR)('0' + slot),0},
+     };
++    struct device_desc ds4_desc =
++    {
++        .vid = 0x054c,
++        .pid = 0x09cc,
++        .version = 0x0100,
++        .input = 3,
++        .bus_id = 0x030000,  /* USB HID, no boot protocol */
++        .bus_type = BUS_TYPE_USB,
++        .is_hidraw = TRUE,
++        .manufacturer = {'S','o','n','y',' ','I','n','t','e','r','a','c','t','i','v','e',' ',
++                         'E','n','t','e','r','t','a','i','n','m','e','n','t',0},
++        .product = {'W','i','r','e','l','e','s','s',' ','C','o','n','t','r','o','l','l','e','r',0},
++        .serialnumber = {'0','2','5','0','5','3','3','5','0','0','0',(WCHAR)('1' + slot),0},
++    };
+     struct unix_device *iface;
+     struct ps5_device *impl;
+ 
++    if (ps5_dualshock4)
++    {
++        static const struct title_pad_extra none;
++
++        if (!(impl = raw_device_create(&ds4_device_vtbl, sizeof(struct ps5_device)))) return NULL;
++        impl->slot = slot;
++        ds4_set_report(impl, &neutral, &none, monotonic_ns());
++        bus_event_queue_device_created(&event_queue, &impl->unix_device, &ds4_desc);
++        return impl;
++    }
++
+     if (!(impl = hid_device_create(&ps5_device_vtbl, sizeof(struct ps5_device)))) return NULL;
+     iface = &impl->unix_device;
+     impl->slot = slot;
+@@ -422,14 +783,19 @@ static void ps5_poll(void)
+ 
+ NTSTATUS ps5_bus_init(void *args)
+ {
++    const char *identity;
++
+     title_pad = dlsym(RTLD_DEFAULT, "pw_wine_pad");
+     title_rumble = dlsym(RTLD_DEFAULT, "pw_wine_set_rumble");
+     title_pad_peek = dlsym(RTLD_DEFAULT, "pw_wine_pad_peek");
+     title_rumble_at = dlsym(RTLD_DEFAULT, "pw_wine_set_rumble_at");
+     title_pads_ask = dlsym(RTLD_DEFAULT, "pw_wine_pads_ask");
+     title_pad_notify = dlsym(RTLD_DEFAULT, "pw_wine_pad_notify");
++    title_pad_extra = dlsym(RTLD_DEFAULT, "pw_wine_pad_extra_at");
+     if (!title_pad) return STATUS_NOT_SUPPORTED;
+-    TRACE("found the title's controller\n");
++    identity = getenv("WINE_PS5_PAD");
++    ps5_dualshock4 = identity && !strcmp(identity, "dualshock4");
++    TRACE("found the title's controllers, %s\n", ps5_dualshock4 ? "DualShock 4s" : "Xbox 360 controllers");
+ 
+     pthread_mutex_lock(&ps5_cs);
+     ps5_stopping = FALSE;
+-- 
+2.56.0
+

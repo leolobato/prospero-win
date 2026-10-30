@@ -682,6 +682,7 @@ src/pw_title_publication.c
 src/pw_title_publication.h
 src/pw_title_session.c
 src/pw_title_session.h
+tests/lab/pw_hid_ds4.c
 tests/lab/pw_hid_pad.c
 tests/lab/pw_hid_pad_sink.c
 tests/test_playden_kit.py
@@ -758,6 +759,9 @@ wine/patches/0986-ntdll-keep-a-host-page-whole-when-accesses-beside-an-inaccessi
 wine/patches/0987-ntdll-report-hot-writes-only-beside-a-read-only-data-page.patch
 wine/patches/0988-ntdll-let-the-kernel-write-a-page-beside-a-protected-one.patch
 wine/patches/0989-ntdll-report-hot-writes-beside-a-read-only-page-only-on-request.patch
+wine/patches/0990-winebus-ps5-title-controller-as-dualshock-4.patch
+wine/patches/0991-xinput-ps5-no-controller-beside-a-dualshock-4.patch
+wine/patches/0992-ntoskrnl-ps5-wait-for-a-dualshock-4-by-its-hid-interface.patch
 wine/patches/0993-server-ps5-park-read-only-file-descriptors.patch
 wine/patches/0994-ntdll-ps5-run-a-program-a-game-starts-next.patch
 wine/patches/0995-win32u-ps5-show-where-the-pointer-is-and-keep-windows-in-order.patch

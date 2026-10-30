@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Fri, 30 Oct 2026 02:10:00 +0100
+Subject: [PATCH] xinput: Report no PS5 title controller beside a DualShock 4.
+
+When winebus shows the title's controllers as DualShock 4s
+(WINE_PS5_PAD=dualshock4, patch 0990), XInput reading the same
+controllers (patches 0470, 0471) would give a game two controllers, and SDL and
+Unity would pick the Xbox one and its prompts again. Windows has no
+XInput controller for a DualShock 4, so with the variable controllers
+0..3 are never connected, and xinput does not pass rumble on: each DualShock
+4's output report drives its motors. Games that read only XInput see no
+controller, as on Windows with a DualShock 4 alone.
+---
+ dlls/xinput1_3/unixlib.c | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/xinput1_3/unixlib.c b/dlls/xinput1_3/unixlib.c
+index f45becc..9dfda88 100644
+--- a/dlls/xinput1_3/unixlib.c
++++ b/dlls/xinput1_3/unixlib.c
+@@ -24,6 +24,7 @@
+ 
+ #include <dlfcn.h>
+ #include <stdarg.h>
++#include <stdlib.h>
+ #include <string.h>
+ 
+ #include "ntstatus.h"
+@@ -40,11 +41,20 @@
+ static int (*title_pad)( UINT32 index, struct xinput_pad_state *state );
+ static void (*title_rumble)( UINT32 index, UINT32 left, UINT32 right );
+ 
++/* WINE_PS5_PAD=dualshock4: winebus shows the title's controllers as DualShock
++ * 4s, for which Windows has no XInput controllers. Controllers 0..3 are then
++ * never connected, and xinput leaves the motors alone: each DualShock 4's own
++ * output reports drive them. */
++static BOOL title_pad_hidden;
++
+ /* Every signed-in user's DualSense, controllers 0..3. */
+ static NTSTATUS pad_init( void *args )
+ {
++    const char *identity = getenv( "WINE_PS5_PAD" );
++
+     title_pad = dlsym( RTLD_DEFAULT, "pw_wine_pad_at" );
+     title_rumble = dlsym( RTLD_DEFAULT, "pw_wine_set_rumble_at" );
++    title_pad_hidden = identity && !strcmp( identity, "dualshock4" );
+     return title_pad ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+ }
+ 
+@@ -53,7 +63,7 @@ static NTSTATUS pad_state( void *args )
+     struct xinput_pad_params *params = args;
+ 
+     if (!title_pad) return STATUS_NOT_SUPPORTED;
+-    if (!title_pad( params->index, &params->state )) memset( &params->state, 0, sizeof(params->state) );
++    if (title_pad_hidden || !title_pad( params->index, &params->state )) memset( &params->state, 0, sizeof(params->state) );
+     return STATUS_SUCCESS;
+ }
+ 
+@@ -62,7 +72,7 @@ static NTSTATUS pad_rumble( void *args )
+     const struct xinput_rumble_params *params = args;
+ 
+     if (!title_rumble) return STATUS_NOT_SUPPORTED;
+-    title_rumble( params->index, params->left, params->right );
++    if (!title_pad_hidden) title_rumble( params->index, params->left, params->right );
+     return STATUS_SUCCESS;
+ }
+ 
+-- 
+2.56.0
+
