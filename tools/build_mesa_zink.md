@@ -11,7 +11,7 @@ tools in an isolated environment:
 ```sh
 python3 -m venv build/mesa-python
 build/mesa-python/bin/python -m pip install -r tools/mesa_zink_requirements.txt
-git clone https://github.com/mpereiraesaa/PS5_Mesa.git build/mesa-source
+git clone https://github.com/leolobato/PS5_Mesa.git build/mesa-source
 ```
 
 Download `llvm-mingw-20260922-ucrt-ubuntu-22.04-x86_64.tar.xz` from
@@ -19,7 +19,7 @@ Download `llvm-mingw-20260922-ucrt-ubuntu-22.04-x86_64.tar.xz` from
 Its SHA-256 is
 `bb7bb7654b33d5aa8712acb837c963b2e0c56352560c76105270a3268c665c21`.
 The script checks this digest before creating the build directory and exports
-Mesa commit `e4607ef697fe3df8d1ebc329bf1917d041843306` from the supplied clone.
+Mesa commit `4778ff0a643eb7eb45d43c412d4d3d776444060c` from the supplied clone.
 The source checkout is not modified. Subsequent runs validate the exported
 source against a fresh Git archive, including archive export attributes.
 

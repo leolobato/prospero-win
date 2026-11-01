@@ -765,7 +765,10 @@ game (PE) -> DXVK d3d11/dxgi/d3d9/d3d8/d3d10core (PE, beside the game) -> winevu
   stayed black with no menu. Counter-Strike 1.6 under Zink, native CPU with
   batching, showed its menu and cursor and played dust2 at 60 fps with the
   fix (2026-10-09); the old workaround, `hl.exe`'s Direct3D
-  `renderer=no3d` AppDefault, is not needed with it.
+  `renderer=no3d` AppDefault, is not needed with it. A window's swapchain goes
+  when the window does: a context destroyed with `needs_present` set used to
+  keep it, and a game that closed a window and opened another (LÖVE, through
+  SDL) was refused a swapchain.
 - **DLLs.** DXVK's DLLs go beside the game, and its profile sets
   `dll_overrides` (`d3d11,dxgi=n`, `d3d9=n`, `d3d8,d3d9=n` or
   `d3d10core,d3d11,dxgi=n`). The unmodified Win32-WSI DXVK build is the one

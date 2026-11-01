@@ -3,7 +3,7 @@
 # Offline PE32 and PE64 WGL/Zink build. Supply the pinned source and compiler.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-MESA_COMMIT=e4607ef697fe3df8d1ebc329bf1917d041843306
+MESA_COMMIT=4778ff0a643eb7eb45d43c412d4d3d776444060c
 LLVM_MINGW_VERSION=20260922-ucrt
 LLVM_MINGW_SHA256=bb7bb7654b33d5aa8712acb837c963b2e0c56352560c76105270a3268c665c21
 work= mesa= archive= runtime_source= jobs=1
