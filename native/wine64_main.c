@@ -1650,6 +1650,15 @@ int main(int argc, char **argv)
          * program's start fails as before, so one that starts helpers runs on. */
         exec_chain_enabled = game->has_launcher && exec_chain_depth < PW_WINE64_CHAIN_MAX;
         if (exec_chain_enabled) setenv("WINE_PS5_EXEC_CHAIN", exec_chain_request, 1);
+        /* Without it, the first program a game couldn't start is noted, so a
+         * launcher can be told from a game that failed by itself. */
+        {
+            static char refused[sizeof(exec_chain_request) + sizeof("/.pw-exec-refused")];
+
+            snprintf(refused, sizeof(refused), "%s/.pw-exec-refused", prefix);
+            unlink(refused);
+            if (!game->has_launcher) setenv("WINE_PS5_EXEC_REFUSED", refused, 1);
+        }
     }
     if (per_game_mode) {
         char executable_path[PW_TITLE_SESSION_PATH_SIZE];
