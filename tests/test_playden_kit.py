@@ -28,7 +28,7 @@ from tools.package_playden_kit import (
 
 
 WRAPPER_REVISION = "54caac176e86c60c7c407972583b491f67838ed9"
-WINE_REVISION = "3926b275004661f6c8c0dadcb35278eef37d1fc3"
+WINE_REVISION = "2b53efa882f205c6ab386b869d903754dcd0275c"
 HELPER_REVISION = "a8f391b269aa2394f291cd1e670afd4744e35590"
 RULE_HELPER_REVISION = "66ab4f10f9a6c6a5a42d05f1d165230c13ae2ab7"
 TITLE_RULE = {"prefix": "FAKE78", "allow_list": "/data/playden/title-rule/allow-list"}
