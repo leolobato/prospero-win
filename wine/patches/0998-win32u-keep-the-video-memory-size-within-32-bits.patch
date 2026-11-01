@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sun, 1 Nov 2026 23:50:00 +0100
+Subject: [PATCH] win32u: Keep the video memory size within 32 bits.
+
+On the Unix side of a 64-bit build ULONG_MAX is 64 bits wide, so the limit
+never applied and the cast kept only the low 32 bits. A GPU with an exact
+multiple of 4 GiB wrote 0 to HardwareInformation.MemorySize, and WMI then
+reported an AdapterRAM of 0. A launcher that reads it warned that the machine
+was below its minimum requirements. ULONG is always 32 bits, so limit it to
+that.
+---
+ dlls/win32u/sysparams.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -1648,7 +1648,7 @@ static BOOL write_gpu_to_registry( const struct gpu *gpu, const struct pci_id *pci,
+     set_reg_value( hkey, dac_typeW, REG_SZ, ramdacW, sizeof(ramdacW) );
+ 
+     set_reg_value( hkey, qw_memory_sizeW, REG_QWORD, &memory_size, sizeof(memory_size) );
+-    value = (ULONG)min( memory_size, (ULONGLONG)ULONG_MAX );
++    value = (ULONG)min( memory_size, (ULONGLONG)0xffffffff );
+     set_reg_value( hkey, memory_sizeW, REG_DWORD, &value, sizeof(value) );
+ 
+     set_reg_ascii_value( hkey, "DriverVersion", driver_vendor_to_version( pci->vendor ) );
