@@ -56,6 +56,16 @@ size_t pw_wine_launch_argv(const PwWineApp *app, uint32_t cycle, char *storage, 
 int pw_wine_launch_split(const char *text, char *storage, size_t size, const char **words,
                          size_t max);
 
+/* A Windows command line (without the program) as words, split as the
+ * Microsoft C runtime does: spaces and tabs separate words outside quotes;
+ * 2n backslashes before a quote give n backslashes and the quote toggles
+ * quoting, 2n+1 give n backslashes and a literal quote; other backslashes
+ * are literal; "" inside quotes is a literal quote; an unclosed quote ends
+ * at the end of the line. Same storage and return rules as
+ * pw_wine_launch_split. */
+int pw_wine_launch_split_windows(const char *text, char *storage, size_t size, const char **words,
+                                 size_t max);
+
 /* A profile's working directory (a Windows path pw_app_profile validated:
  * drive, backslashes, no "..") as the host directory it names in prefix:
  * C: is the prefix's drive_c and Z: the host root, as in a default prefix.

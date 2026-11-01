@@ -288,6 +288,19 @@ static const char *title_session_argument;
 static int per_game_mode;
 static volatile int per_game_running;
 
+/* Exec chain (Wine patch 0994). A PS5 title is one process, so a program the
+ * game starts (a launcher's Play) is written by Wine to <prefix>/.pw-exec-chain
+ * instead; when the game ends, the title restarts itself with
+ * sceSystemServiceLoadExec and "chain=N", as console games switch programs,
+ * and runs that program in the same prefix with the game's settings. Each
+ * start deletes a request it did not come from; PW_WINE64_CHAIN_MAX ends a
+ * loop of programs starting each other. */
+enum { PW_WINE64_CHAIN_MAX = 4 };
+static char exec_chain_request[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY + sizeof("/.pw-exec-chain")];
+static unsigned exec_chain_depth;           /* N of the chain=N this start came from, 0 for none */
+static char exec_chain_arguments[PW_APP_ARGUMENTS_CAPACITY];
+static char exec_chain_cwd[PW_APP_PATH_CAPACITY];
+
 /* The largest desktop shown: Wine's PS5 driver defaults to 800x600
  * (WINE_PS5_DESKTOP overrides, 1920x1080 for Warcraft III); bigger frames
  * are counted and dropped. */
@@ -450,6 +463,17 @@ static int per_game_argument(int argc, char **argv, char *error, size_t error_si
         }
         argument = argv[i];
     }
+    if (argument && !strncmp(argument, "chain=", 6)) {
+        char *end = NULL;
+        unsigned long depth = strtoul(argument + 6, &end, 10);
+
+        if (!end || *end || depth < 1 || depth > PW_WINE64_CHAIN_MAX) {
+            snprintf(error, error_size, "per-game launch rejects argument %.32s", argument);
+            return -1;
+        }
+        exec_chain_depth = (unsigned)depth;
+        return 0;
+    }
     if (argument && (strncmp(argument, "session=", 8) ||
                      !pw_title_session_id_valid(argument + 8))) {
         snprintf(error, error_size, "per-game launch rejects argument %.32s", argument);
@@ -457,6 +481,62 @@ static int per_game_argument(int argc, char **argv, char *error, size_t error_si
     }
     title_session_argument = argument;
     return 0;
+}
+
+/* Read and delete the request this chained start came from: the Windows
+ * program, its arguments and its working directory, or the program's own
+ * folder when that one does not exist (a launcher may name a relative folder
+ * that never existed, as Batman: Arkham City's does). 0 on success. */
+static int exec_chain_take(const char *prefix, char *executable, size_t executable_size)
+{
+    char text[4096], *line, *save = NULL, host[PW_TITLE_SESSION_PATH_SIZE];
+    int fd = open(exec_chain_request, O_RDONLY | O_CLOEXEC | O_NOFOLLOW), version = 0, image = 0;
+    ssize_t used = fd < 0 ? -1 : read(fd, text, sizeof(text) - 1);
+
+    if (fd >= 0) close(fd);
+    unlink(exec_chain_request);
+    if (used <= 0 || used >= (ssize_t)sizeof(text) - 1) return -1;
+    text[used] = 0;
+    exec_chain_arguments[0] = exec_chain_cwd[0] = 0;
+    for (line = strtok_r(text, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        if (!strcmp(line, "pw-exec-chain 1")) version = 1;
+        else if (!strncmp(line, "image=", 6) && strlen(line + 6) < executable_size) {
+            snprintf(executable, executable_size, "%s", line + 6);
+            image = 1;
+        } else if (!strncmp(line, "args=", 5) && strlen(line + 5) < sizeof(exec_chain_arguments))
+            snprintf(exec_chain_arguments, sizeof(exec_chain_arguments), "%s", line + 5);
+        else if (!strncmp(line, "cwd=", 4) && strlen(line + 4) < sizeof(exec_chain_cwd))
+            snprintf(exec_chain_cwd, sizeof(exec_chain_cwd), "%s", line + 4);
+    }
+    if (!version || !image) return -1;
+    {
+        char storage[PW_APP_ARGUMENTS_CAPACITY];
+        const char *words[PW_WINE_LAUNCH_WORDS];
+
+        if (pw_wine_launch_split_windows(exec_chain_arguments, storage, sizeof(storage), words,
+                                         PW_WINE_LAUNCH_WORDS) < 0) {
+            PS5LOG_LOG("PW_WINE64 chain arguments refused: %s", exec_chain_arguments);
+            return -1;
+        }
+    }
+    if (!exec_chain_cwd[0] || pw_wine_launch_host_dir(prefix, exec_chain_cwd, host, sizeof(host)) != 0 ||
+        !pw_title_path_is_directory(host)) {
+        char *slash;
+
+        PS5LOG_LOG("PW_WINE64 chain cwd=%s missing, using the program's folder",
+                   exec_chain_cwd[0] ? exec_chain_cwd : "-");
+        snprintf(exec_chain_cwd, sizeof(exec_chain_cwd), "%s", executable);
+        if ((slash = strrchr(exec_chain_cwd, '\\')) && slash - exec_chain_cwd >= 2) slash[slash - exec_chain_cwd == 2] = 0;
+    }
+    return 0;
+}
+
+/* The program the game asked for, if it left a request. */
+static int exec_chain_pending(void)
+{
+    struct stat st;
+
+    return exec_chain_request[0] && lstat(exec_chain_request, &st) == 0 && S_ISREG(st.st_mode);
 }
 
 /* ---- Wine stderr -> ps5log, one line per text line -------------------- */
@@ -815,6 +895,28 @@ static void leave_to_home(const char *reason)
     _exit(0);
 }
 
+/* Replace this per-game title with itself and chain=N, to run the program
+ * the game asked for (exec_chain_take). Returns only on failure. */
+static void restart_chain(unsigned depth)
+{
+    static char sandbox_eboot[sizeof(sandbox_app0) + sizeof("/eboot.bin")];
+    static char word[16];
+    const char *const eboots[] = { "/app0/eboot.bin", sandbox_eboot };
+    char *next[] = { word, NULL };
+
+    snprintf(word, sizeof(word), "chain=%u", depth);
+    snprintf(sandbox_eboot, sizeof(sandbox_eboot), "%s/eboot.bin", sandbox_app0);
+    display_quiesce("exec-chain");
+    close_title_publication();
+    for (size_t i = 0; i < sizeof(eboots) / sizeof(eboots[0]); i++) {
+        PS5LOG_LOG("PW_WINE64 chain restart %s eboot=%s", word, eboots[i]);
+        pw_diagnostics_close("exec-chain");
+        int rc = sceSystemServiceLoadExec(eboots[i], next);
+        pw_diagnostics_resume();
+        PS5LOG_LOG("PW_WINE64 chain restart failed rc=0x%08x", (unsigned)rc);
+    }
+}
+
 /* Replace this process with the title again: app's game, or the launcher
  * when app is NULL. /app0 is not visible once /data is granted, so the
  * sandbox's view of the same eboot is tried next. Returns only on failure.
@@ -870,10 +972,19 @@ static void on_exit_report(void)
 {
     PS5LOG_LOG("PW_WINE64 exit sink_calls=%lu", sink_calls);
     if (per_game_mode) {
-        if (__atomic_load_n(&per_game_running, __ATOMIC_ACQUIRE))
-            (void)pw_title_session_exited(&title_session, 0, 0);
+        /* A request means the program ran and handed over to another one,
+         * even a launcher that never showed a frame. */
+        int chain = exec_chain_pending();
+        int running = __atomic_load_n(&per_game_running, __ATOMIC_ACQUIRE);
+
+        if (running || chain) (void)pw_title_session_exited(&title_session, 0, 0);
         else (void)pw_title_session_failed(&title_session, 0, 0);
         pw_title_session_close(&title_session);
+        if (chain) {
+            if (exec_chain_depth < PW_WINE64_CHAIN_MAX) restart_chain(exec_chain_depth + 1);
+            else PS5LOG_LOG("PW_WINE64 chain refused depth=%u", exec_chain_depth);
+            unlink(exec_chain_request);
+        }
     } else {
         restart_title(NULL, launch.cycle + 1u, "wine-exit");
     }
@@ -1496,6 +1607,23 @@ int main(int argc, char **argv)
         return 1;
     }
     if (per_game_mode) {
+        snprintf(exec_chain_request, sizeof(exec_chain_request), "%s/.pw-exec-chain", prefix);
+        if (exec_chain_depth) {
+            if (exec_chain_take(prefix, launch.executable, sizeof(launch.executable)) != 0) {
+                PS5LOG_LOG("PW_WINE64 chain=%u refused: no valid request", exec_chain_depth);
+                (void)pw_title_session_failed(&title_session, 0, 0);
+                pw_title_session_close(&title_session);
+                pw_diagnostics_close("exec-chain-refused");
+                return 1;
+            }
+            PS5LOG_LOG("PW_WINE64 chain=%u exe=%s args=%s cwd=%s", exec_chain_depth, launch.executable,
+                       exec_chain_arguments[0] ? exec_chain_arguments : "-", exec_chain_cwd);
+        } else if (unlink(exec_chain_request) == 0) {
+            PS5LOG_LOG("PW_WINE64 chain stale request removed");
+        }
+        if (exec_chain_depth < PW_WINE64_CHAIN_MAX) setenv("WINE_PS5_EXEC_CHAIN", exec_chain_request, 1);
+    }
+    if (per_game_mode) {
         char executable_path[PW_TITLE_SESSION_PATH_SIZE];
 
         if (pw_wine_launch_host_dir(prefix, launch.executable, executable_path,
@@ -1721,12 +1849,13 @@ int main(int argc, char **argv)
         }
         if (PW_WINE64_WAIT_WATCHDOG) setenv("WINE_PS5_WAIT_WATCHDOG", "1", 1);
         /* [application] arguments follow the executable in Wine's argv. */
-        int words = pw_wine_launch_split(game->app.arguments, argument_words,
-                                         sizeof(argument_words), wine_argv + 2,
-                                         PW_WINE_LAUNCH_WORDS);
+        /* A chained program's arguments are a Windows command line. */
+        const char *arguments = exec_chain_depth ? exec_chain_arguments : game->app.arguments;
+        int words = (exec_chain_depth ? pw_wine_launch_split_windows : pw_wine_launch_split)(
+            arguments, argument_words, sizeof(argument_words), wine_argv + 2, PW_WINE_LAUNCH_WORDS);
         if (words > 0) config.argc = 2 + words;
-        if (words < 0) PS5LOG_LOG("PW_WINE64 arguments refused: %s", game->app.arguments);
-        else if (words) PS5LOG_LOG("PW_WINE64 arguments words=%d line=%s", words, game->app.arguments);
+        if (words < 0) PS5LOG_LOG("PW_WINE64 arguments refused: %s", arguments);
+        else if (words) PS5LOG_LOG("PW_WINE64 arguments words=%d line=%s", words, arguments);
     }
 
     for (size_t i = 0; i < sizeof(runtime_roots) / sizeof(runtime_roots[0]); i++) {
@@ -1839,14 +1968,16 @@ int main(int argc, char **argv)
         /* The game starts in its profile's working directory. A title
          * cannot chdir, so ntdll keeps a logical one (wine/ps5/pw_wine_cwd.h),
          * which Wine reads as the process's current directory. */
-        if (game && game->app.working_directory[0]) {
+        const char *working_directory = exec_chain_depth ? exec_chain_cwd :
+                                        game ? game->app.working_directory : "";
+        if (working_directory[0]) {
             int (*set_cwd)(const char *) = (int (*)(const char *))
                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_cwd_set");
             char host_dir[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY + PW_APP_PATH_CAPACITY];
-            int mapped = pw_wine_launch_host_dir(prefix, game->app.working_directory, host_dir,
+            int mapped = pw_wine_launch_host_dir(prefix, working_directory, host_dir,
                                                  sizeof(host_dir));
             int cwd_status = set_cwd && mapped == 0 ? set_cwd(host_dir) : -1;
-            PS5LOG_LOG("PW_WINE64 cwd=%s host=%s status=%d", game->app.working_directory,
+            PS5LOG_LOG("PW_WINE64 cwd=%s host=%s status=%d", working_directory,
                        mapped == 0 ? host_dir : "-", cwd_status);
         }
         status = pw_wine_start_environment(&start, &config, &ops);

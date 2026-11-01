@@ -123,6 +123,47 @@ int pw_wine_launch_split(const char *text, char *storage, size_t size, const cha
     }
 }
 
+int pw_wine_launch_split_windows(const char *text, char *storage, size_t size, const char **words,
+                                 size_t max)
+{
+    size_t used = 0;
+    int count = 0;
+
+    if (!text || !storage || !words) return -1;
+    for (;;) {
+        int quoted = 0;
+
+        while (*text == ' ' || *text == '\t') text++;
+        if (!*text) return count;
+        if ((size_t)count >= max) return -1;
+        words[count++] = storage + used;
+        while (*text && (quoted || (*text != ' ' && *text != '\t'))) {
+            size_t slashes = 0, emit = 0;
+            char c = 0;
+
+            while (text[slashes] == '\\') slashes++;
+            if (slashes && text[slashes] != '"') {
+                emit = slashes;          /* literal backslashes */
+                text += slashes;
+            } else if (slashes) {
+                emit = slashes / 2;
+                text += slashes;
+                if (slashes % 2) { c = '"'; text++; }
+            } else if (*text == '"') {
+                if (quoted && text[1] == '"') { c = '"'; text += 2; }
+                else { quoted = !quoted; text++; }
+            } else {
+                c = *text++;
+            }
+            if (used + emit + (c != 0) + 1 > size) return -1;
+            while (emit--) storage[used++] = '\\';
+            if (c) storage[used++] = c;
+        }
+        if (used >= size) return -1;
+        storage[used++] = 0;
+    }
+}
+
 int pw_wine_launch_host_dir(const char *prefix, const char *windows_path, char *out, size_t size)
 {
     const char *base;

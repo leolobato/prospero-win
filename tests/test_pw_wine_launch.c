@@ -131,6 +131,32 @@ static void test_split(void)
     assert(pw_wine_launch_split("a", storage, sizeof(storage), NULL, 8) == -1);
 }
 
+/* A chained program's command line, split by the Windows C runtime rules. */
+static void test_split_windows(void)
+{
+    char storage[64], small[6];
+    const char *words[PW_WINE_LAUNCH_WORDS];
+
+    assert(pw_wine_launch_split_windows("  -a\t\"b c\"  d ", storage, sizeof(storage), words, 8) == 3);
+    assert(!strcmp(words[0], "-a") && !strcmp(words[1], "b c") && !strcmp(words[2], "d"));
+    /* Backslashes: literal unless before a quote. */
+    assert(pw_wine_launch_split_windows("C:\\a\\b\\ \"C:\\x y\\\\\"", storage, sizeof(storage), words, 8) == 2);
+    assert(!strcmp(words[0], "C:\\a\\b\\") && !strcmp(words[1], "C:\\x y\\"));
+    /* \" is a literal quote, \\\" a backslash and a literal quote. */
+    assert(pw_wine_launch_split_windows("\"a\\\"b\" x\\\\\\\"y", storage, sizeof(storage), words, 8) == 2);
+    assert(!strcmp(words[0], "a\"b") && !strcmp(words[1], "x\\\"y"));
+    /* "" inside quotes, an empty word, an unclosed quote. */
+    assert(pw_wine_launch_split_windows("\"a\"\"b\" \"\" \"c d", storage, sizeof(storage), words, 8) == 3);
+    assert(!strcmp(words[0], "a\"b") && !strcmp(words[1], "") && !strcmp(words[2], "c d"));
+    assert(pw_wine_launch_split_windows("", storage, sizeof(storage), words, 8) == 0);
+    /* Refusals: too many words, storage exhausted, missing buffers. */
+    assert(pw_wine_launch_split_windows("a b c", storage, sizeof(storage), words, 2) == -1);
+    assert(pw_wine_launch_split_windows("abcdef", small, sizeof(small), words, 8) == -1);
+    assert(pw_wine_launch_split_windows("a\\\\\\\\b", small, sizeof(small), words, 8) == -1);
+    assert(pw_wine_launch_split_windows("ab c", small, sizeof(small), words, 8) == 2);
+    assert(pw_wine_launch_split_windows(NULL, storage, sizeof(storage), words, 8) == -1);
+}
+
 /* A profile's working directory, mapped into its prefix. */
 static void test_host_dir(void)
 {
@@ -157,6 +183,7 @@ int main(void)
     test_parse();
     test_argv();
     test_split();
+    test_split_windows();
     test_host_dir();
     printf("wine launch passed: launcher on no game, profile and path, overrides, refusals, "
            "cycle counts, LoadExec argv round trip, bounded storage, "
