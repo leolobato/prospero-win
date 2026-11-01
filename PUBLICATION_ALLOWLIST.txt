@@ -76,6 +76,8 @@ src/pw_pad.c
 src/pw_pad.h
 src/pw_game_menu.c
 src/pw_game_menu.h
+src/pw_input_switch.c
+src/pw_input_switch.h
 src/pw_osk.c
 src/pw_osk.h
 src/pw_guest_call.c
@@ -86,6 +88,7 @@ tests/test_pw_audio_mix.c
 tests/test_pw_app_profile.c
 tests/test_pw_pad.c
 tests/test_pw_game_menu.c
+tests/test_pw_input_switch.c
 tests/test_pw_pad_ps5.c
 tests/test_status_vocabulary.py
 tests/test_classify_x86.py

@@ -313,6 +313,20 @@ static void test_version(void)
     PwGameEnv env[PW_GAME_VERSION_ENV_MAX];
     PwGameProfile p;
 
+    /* [launcher]: off without it; its lines are the first program's input. */
+    assert(parse(APP, &p) == PW_OK && !p.has_launcher);
+    assert(parse(APP "[input]\npreset = gamepad\n[launcher]\nlabel = Mouse\ngame_label = Arrow keys\n"
+                 "mode = keyboard\nmouse = left_stick\ncross = mouse_left\n", &p) == PW_OK);
+    assert(p.has_launcher && !strcmp(p.launcher_label, "Mouse") && !strcmp(p.game_label, "Arrow keys"));
+    assert(p.launcher_input.mouse == PW_GAME_STICK_LEFT && p.launcher_input.mode == PW_GAME_INPUT_KEYBOARD);
+    assert(p.input.mouse == PW_GAME_STICK_NONE && !strcmp(p.input.preset, "gamepad"));
+    assert(parse(APP "[launcher]\n", &p) == PW_OK && p.has_launcher && !p.launcher_label[0]);
+    assert(parse(APP "[launcher]\npreset = mouse\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[launcher]\nplayer2 = mouse\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[launcher]\nlabel = a\nlabel = b\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[launcher]\nlabel = a\"b\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[launcher]\nunknown = 1\n", &p) != PW_OK);
+    assert(parse(APP "[launcher]\n[launcher]\n", &p) == PW_ERR_MALFORMED);
     assert(parse(APP, &p) == PW_OK && pw_game_profile_version(&p) == 1);
     assert(pw_game_version_env(&p, env) == 1);
     assert(!strcmp(env[0].name, "RADV_PS5_PS_WAVE64") && !strcmp(env[0].value, "1"));

@@ -40,6 +40,7 @@
 #include "../src/pw_title_session.h"
 #include "../src/pw_wine_launch.h"
 #include "../src/pw_game_menu.h"
+#include "../src/pw_input_switch.h"
 #include "pw_data_mount.h"
 #include "pw_file_limits.h"
 #include "pw_audio_ps5.h"
@@ -297,6 +298,7 @@ static volatile int per_game_running;
  * loop of programs starting each other. */
 enum { PW_WINE64_CHAIN_MAX = 4 };
 static char exec_chain_request[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY + sizeof("/.pw-exec-chain")];
+static int exec_chain_enabled;              /* this start hands Wine the chain: [launcher] */
 static unsigned exec_chain_depth;           /* N of the chain=N this start came from, 0 for none */
 static char exec_chain_arguments[PW_APP_ARGUMENTS_CAPACITY];
 static char exec_chain_cwd[PW_APP_PATH_CAPACITY];
@@ -319,6 +321,7 @@ static const PwPadKeyMap pad_open_map[] = { { PAD_CROSS, 0x20, 0, 0, "cross" } }
 
 
 int sceSystemServiceLoadExec(const char *path, char *const argv[]);
+int sceKernelDlsym(int32_t handle, const char *symbol, void **address);
 int sceSystemServiceGetAppIdOfRunningBigApp(void);
 int sceSystemServiceKillApp(int app_id, int how, int reason, int core_dump);
 int32_t sceKernelLoadStartModule(const char *path, size_t argc, const void *argv,
@@ -895,6 +898,24 @@ static void leave_to_home(const char *reason)
     _exit(0);
 }
 
+/* A notification from the console, over whatever the game draws. Other request
+ * types are refused, so it carries the console's "Debug:" header. */
+static void input_switch_notify(const char *label)
+{
+    static struct { char header[45]; char message[3075]; } request;
+    int (*send)(int, void *, size_t, int);
+    void *symbol = NULL;
+    int rc = -1;
+
+    if (sceKernelDlsym(0x2001, "sceKernelSendNotificationRequest", &symbol) == 0 && symbol) {
+        memset(&request, 0, sizeof(request));
+        snprintf(request.message, sizeof(request.message), "Controller preset: %s", label[0] ? label : "switched");
+        send = (int (*)(int, void *, size_t, int))symbol;
+        rc = send(0, &request, sizeof(request), 0);
+    }
+    PS5LOG_LOG("PW_WINE64 input switch to=%s notify=%d", label[0] ? label : "-", rc);
+}
+
 /* Replace this per-game title with itself and chain=N, to run the program
  * the game asked for (exec_chain_take). Returns only on failure. */
 static void restart_chain(unsigned depth)
@@ -981,7 +1002,7 @@ static void on_exit_report(void)
         else (void)pw_title_session_failed(&title_session, 0, 0);
         pw_title_session_close(&title_session);
         if (chain) {
-            if (exec_chain_depth < PW_WINE64_CHAIN_MAX) restart_chain(exec_chain_depth + 1);
+            if (exec_chain_enabled) restart_chain(exec_chain_depth + 1);
             else PS5LOG_LOG("PW_WINE64 chain refused depth=%u", exec_chain_depth);
             unlink(exec_chain_request);
         }
@@ -1496,6 +1517,10 @@ int main(int argc, char **argv)
     static PwPadPs5 pad;
     static PwHidPs5 hid;
     static PwGameInput game_input;
+    static PwGameInput other_input;     /* [launcher]: the preset not in use */
+    static PwInputSwitch input_switch;
+    const char *input_label = "", *other_label = "";
+    int has_other_input = 0, needs_xinput = 0;
     /* [input] player2: a second signed-in user's DualSense as more keys. */
     static PwPadPs5 pad2;
     static PwGameInput game_input2;
@@ -1621,7 +1646,10 @@ int main(int argc, char **argv)
         } else if (unlink(exec_chain_request) == 0) {
             PS5LOG_LOG("PW_WINE64 chain stale request removed");
         }
-        if (exec_chain_depth < PW_WINE64_CHAIN_MAX) setenv("WINE_PS5_EXEC_CHAIN", exec_chain_request, 1);
+        /* Only a game that starts through a launcher gets the chain: another
+         * program's start fails as before, so one that starts helpers runs on. */
+        exec_chain_enabled = game->has_launcher && exec_chain_depth < PW_WINE64_CHAIN_MAX;
+        if (exec_chain_enabled) setenv("WINE_PS5_EXEC_CHAIN", exec_chain_request, 1);
     }
     if (per_game_mode) {
         char executable_path[PW_TITLE_SESSION_PATH_SIZE];
@@ -1686,8 +1714,31 @@ int main(int argc, char **argv)
             pw_game_input_overlay(&game_input, &game->input);
             pw_game_input_default_mode(&game_input);
             input_status = PW_OK;
+            needs_xinput = game_input.mode == PW_GAME_INPUT_XINPUT;
+            /* Starting through a launcher: its preset until it starts the game.
+             * Either may be swapped in later, so a controller either one needs
+             * is set up from the start, and stays idle under the other. */
+            if (game->has_launcher) {
+                other_input = game->launcher_input;
+                pw_game_input_default_mode(&other_input);
+                needs_xinput |= other_input.mode == PW_GAME_INPUT_XINPUT;
+                has_other_input = 1;
+                input_label = game->game_label;
+                other_label = game->launcher_label;
+                pw_input_switch_init(&input_switch, PW_PAD_PS5_TOUCHPAD);
+                if (!exec_chain_depth) {
+                    PwGameInput swap = game_input;
+                    game_input = other_input;
+                    other_input = swap;
+                    input_label = game->launcher_label;
+                    other_label = game->game_label;
+                }
+                PS5LOG_LOG("PW_WINE64 launcher mode chain=%u preset=%s controller=%d", exec_chain_depth,
+                           input_label[0] ? input_label : "-", needs_xinput);
+            }
         } else {
             input_status = pw_wine_library_input(game, library_root, &game_input);
+            needs_xinput = game_input.mode == PW_GAME_INPUT_XINPUT;
         }
         int input2_status = pw_wine_library_player2_input(game, library_root, &game_input2);
         player2 = input2_status == PW_OK;
@@ -1747,12 +1798,12 @@ int main(int argc, char **argv)
         /* xinput mode: SDL2 games (Half-Life) look for controllers through
          * raw input first, which Wine on the PS5 has none of, and then skip
          * XInput; this hint makes them read controller 0 through XInput. */
-        if (game_input.mode == PW_GAME_INPUT_XINPUT)
+        if (needs_xinput)
             extra[config.extra_env_count++] = (PwWineStartEnv){ "SDL_JOYSTICK_RAWINPUT", "0" };
         /* xinput mode: the game also hosts the controller's HID drivers
          * (patches 0951-0953), so DirectInput, winmm and
          * Windows.Gaming.Input find the DualSense as an Xbox 360 controller. */
-        if (game_input.mode == PW_GAME_INPUT_XINPUT) {
+        if (needs_xinput) {
             static const char *const drivers[] = { "hidclass.sys", "hidparse.sys", "winebus.sys", "winehid.sys",
                                                    "winexinput.sys" };
             int installed = 0;
@@ -1936,7 +1987,7 @@ int main(int argc, char **argv)
             (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_post_input");
         /* xinput mode: the DualSense is also the game's XInput controller
          * 0, read by Wine's xinput (patch 0470); bindings still apply. */
-        if (game_input.mode == PW_GAME_INPUT_XINPUT) {
+        if (needs_xinput) {
             set_pad = (void (*)(const PwWinePad *))
                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_pad");
             rumble = (int (*)(uint32_t *, uint32_t *))
@@ -2146,7 +2197,8 @@ int main(int argc, char **argv)
          * closed them stay theirs until they are let go. Closing the game
          * below still reads the real pad. */
         const PwPadPs5 *seen = &pad;
-        if (pad_read && (set_menu || osk_status == PW_OK)) {
+        int switch_inputs = 0;
+        if (pad_read && (set_menu || osk_status == PW_OK || has_other_input)) {
             uint32_t held = pad.core.previous_buttons, pressed = pad.core.pressed_edges,
                      released = pad.core.released_edges;
             int neutral = 0;
@@ -2173,6 +2225,24 @@ int main(int argc, char **argv)
                 released = view.released;
             }
             game_pad = pad;
+            if (has_other_input) {
+                /* While the menu or the keyboard has the pad, the touchpad is theirs. */
+                if (neutral) {
+                    if (pw_input_switch_cancel(&input_switch)) released |= PW_PAD_PS5_TOUCHPAD;
+                    held &= ~(uint32_t)PW_PAD_PS5_TOUCHPAD;
+                    pressed &= ~(uint32_t)PW_PAD_PS5_TOUCHPAD;
+                } else {
+                    PwInputSwitchView view;
+
+                    pw_input_switch_tick(&input_switch, held, pressed, released, pad.touch_left != 0,
+                                         PW_WINE64_TICK_US, &view);
+                    held = view.held;
+                    pressed = view.pressed;
+                    released = view.released;
+                    game_pad.touch_left = view.left != 0;
+                    switch_inputs = view.switch_now;
+                }
+            }
             game_pad.core.previous_buttons = held;
             game_pad.core.pressed_edges = pressed;
             game_pad.core.released_edges = released;
@@ -2189,11 +2259,36 @@ int main(int argc, char **argv)
         if (set_pad) {
             PwWinePad state;
             int connected = pw_wine_game_pad(pad_read ? seen : NULL, &state), scripted = 0;
+            /* The other preset's controller, idle under this one. It stays
+             * connected: a game may pause when a controller goes. */
+            if (connected && game_input.mode != PW_GAME_INPUT_XINPUT) {
+                memset(&state, 0, sizeof(state));
+                state.connected = 1;
+            }
 #if PW_WINE64_SCRIPT
             scripted = script_input.pad_events != 0;
             connected = pw_wine_script_pad(&state, connected, &script_pad, scripted);
 #endif
             if (pad_read || scripted) set_pad(connected ? &state : NULL);
+        }
+        if (pad_read && switch_inputs) {
+            /* What the old preset holds down comes up, as does what was let go
+             * this tick, and the new one starts from the next press. */
+            size_t count = pw_wine_game_inputs(&game_input, 0, game_pad.core.previous_buttons | game_pad.core.released_edges,
+                                               events, sizeof(events) / sizeof(events[0]) - 1);
+            PwGameInput swap = game_input;
+            const char *label = input_label;
+
+            for (size_t i = 0; i < count; i++) {
+                if (post_input(&events[i]) == 0) posted++;
+                else refused++;
+            }
+            game_input = other_input;
+            other_input = swap;
+            input_label = other_label;
+            other_label = label;
+            input_switch_notify(input_label);
+            game_pad.core.released_edges = 0;
         }
         if (pad_read) {
             size_t count = pw_wine_game_inputs(&game_input, seen->core.pressed_edges,
