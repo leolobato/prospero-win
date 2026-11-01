@@ -12,6 +12,11 @@
  * in the top left of every picture ("30 -> 60"), after generation, so the
  * counter is never blended.
  *
+ * With PW_FRAMEGEN_COUNTER=1 and no PW_FRAMEGEN it only counts: the program's
+ * frames are drawn on as they are presented, with the same counter and one
+ * number, for a backend that has none of its own. The swapchain keeps its
+ * images and present mode, and no generator or network is loaded.
+ *
  * GPL-3.0-or-later because it links MihawkGen; libvulkan.prx, the only
  * module it goes into, is distributed under the GPL as a whole
  * (THIRD_PARTY.md). Linked by tools/link_radv_prx.sh. */
@@ -64,6 +69,7 @@ constexpr uint8_t kFont[kGlyphs][7] = {
     {0x00, 0x04, 0x02, 0x1F, 0x02, 0x04, 0x00}, {0},
 };
 constexpr uint32_t kHudChars = 12;
+constexpr uint32_t kMaxPresentWaits = 16;
 
 struct Chain {
     VkDevice device = VK_NULL_HANDLE;
@@ -82,6 +88,8 @@ struct Chain {
     VkCommandBuffer cmd[kSlots]{};
     VkFence fence[kSlots]{};
     VkSemaphore real_done[kSlots]{}, acquired[kSlots][kMaxFactor - 1]{}, generated[kSlots][kMaxFactor - 1]{};
+    /* counting only: one per image, free again once the image is reacquired */
+    VkSemaphore image_done[kMaxImages]{};
     uint32_t slot = 0;
     /* the last second's counts, and the one being counted */
     uint64_t window_start = 0;
@@ -95,7 +103,7 @@ struct Chain {
 };
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-int factor_setting = -1, hud_setting = -1;
+int factor_setting = -1, hud_setting = -1, counter_setting = -1;
 VkInstance instance_seen = VK_NULL_HANDLE;
 bool device_loaded = false;
 struct { VkDevice device; VkPhysicalDevice physical; } devices[8];
@@ -127,6 +135,17 @@ bool hud(void)
         hud_setting = value && value[0] == '1';
     }
     return hud_setting;
+}
+
+/* Counting without generating: PW_FRAMEGEN_COUNTER=1, and no factor. */
+bool counter_only(void)
+{
+    if (counter_setting < 0) {
+        const char *value = getenv("PW_FRAMEGEN_COUNTER");
+        counter_setting = !factor() && value && value[0] == '1';
+        if (counter_setting) fprintf(stderr, "pw_framegen: counter only\n");
+    }
+    return counter_setting;
 }
 
 uint64_t now_ns(void)
@@ -271,9 +290,31 @@ void free_chain(Chain *c)
                 if (c->generated[s][k]) vkDestroySemaphore(c->device, c->generated[s][k], nullptr);
             }
         }
+        for (VkSemaphore semaphore : c->image_done)
+            if (semaphore) vkDestroySemaphore(c->device, semaphore, nullptr);
         if (c->pool) vkDestroyCommandPool(c->device, c->pool, nullptr);
     }
     delete c;
+}
+
+/* Counting without generating: the images, the counter and synchronisation.
+ * A swapchain with more images than the table is left as it was. */
+bool setup_counter_chain(Chain *c, VkPhysicalDevice physical)
+{
+    if (!make_font(c, physical)) {
+        fprintf(stderr, "pw_framegen: no counter font: no counter\n");
+        return false;
+    }
+    VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    fence.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    for (uint32_t s = 0; s < kSlots; s++)
+        if (vkCreateFence(c->device, &fence, nullptr, &c->fence[s]) != VK_SUCCESS) return false;
+    for (uint32_t i = 0; i < c->image_count; i++)
+        if (vkCreateSemaphore(c->device, &semaphore, nullptr, &c->image_done[i]) != VK_SUCCESS) return false;
+    fprintf(stderr, "pw_framegen: swapchain %ux%u, %u images, counter only\n", c->extent.width, c->extent.height,
+            c->image_count);
+    return true;
 }
 
 /* The generator's images, network and synchronisation for one swapchain. */
@@ -282,8 +323,10 @@ bool setup_chain(Chain *c)
     VkPhysicalDevice physical = physical_of(c->device);
     if (!physical || !load_device(c->device)) return false;
     uint32_t count = kMaxImages;
-    if (vkGetSwapchainImagesKHR(c->device, c->handle, &count, c->images) < 0) return false;
+    VkResult images = vkGetSwapchainImagesKHR(c->device, c->handle, &count, c->images);
+    if (images != VK_SUCCESS && (images != VK_INCOMPLETE || !c->factor)) return false;
     c->image_count = count;
+    if (!c->factor) return setup_counter_chain(c, physical);
     fg_create_info info{};
     info.device = c->device;
     info.physical_device = physical;
@@ -394,7 +437,8 @@ void record_counter(Chain *c, VkCommandBuffer cmd, VkImage target)
     if (!c->font_uploaded || !c->measured) return;
     int glyphs[kHudChars], n = 0;
     char text[kHudChars + 1];
-    snprintf(text, sizeof(text), " %u>%u ", c->real_rate, c->shown_rate);
+    if (c->factor) snprintf(text, sizeof(text), " %u>%u ", c->real_rate, c->shown_rate);
+    else snprintf(text, sizeof(text), " %u ", c->real_rate);
     for (const char *p = text; *p && n < (int)kHudChars; p++)
         glyphs[n++] = *p == '>' ? kGlyphArrow : *p >= '0' && *p <= '9' ? *p - '0' : kGlyphSpace;
     uint32_t scale = c->extent.height / 270 > 2 ? c->extent.height / 270 : 2, margin = 2 * scale;
@@ -424,8 +468,11 @@ void count_frame(Chain *c, uint32_t generated)
     c->real_rate = (uint32_t)((c->real_count * 1000000000ull + elapsed / 2) / elapsed);
     c->shown_rate = (uint32_t)((c->shown_count * 1000000000ull + elapsed / 2) / elapsed);
     c->measured = true;
-    fprintf(stderr, "pw_framegen: %u frames/s from the program, %u pictures/s presented (%u generated each)\n",
-            c->real_rate, c->shown_rate, generated);
+    if (c->factor)
+        fprintf(stderr, "pw_framegen: %u frames/s from the program, %u pictures/s presented (%u generated each)\n",
+                c->real_rate, c->shown_rate, generated);
+    else
+        fprintf(stderr, "pw_framegen: %u frames/s from the program\n", c->real_rate);
     c->window_start = now;
     c->real_count = c->shown_count = 0;
 }
@@ -470,13 +517,16 @@ VKAPI_ATTR VkResult VKAPI_CALL fg_CreateSwapchainKHR(VkDevice device, const VkSw
                                                      const VkAllocationCallbacks *allocator, VkSwapchainKHR *handle)
 {
     VkSwapchainCreateInfoKHR ours = *info;
-    ours.minImageCount += factor() - 1;
-    ours.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    /* FIFO paces the pictures; mailbox or immediate would drop or tear them. */
-    ours.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    ours.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (factor()) {
+        ours.minImageCount += factor() - 1;
+        ours.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        /* FIFO paces the pictures; mailbox or immediate would drop or tear them. */
+        ours.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    }
     VkResult result = real_CreateSwapchainKHR(device, &ours, allocator, handle);
     if (result != VK_SUCCESS) {
-        fprintf(stderr, "pw_framegen: swapchain refused with extra images (%d): without generation\n", (int)result);
+        fprintf(stderr, "pw_framegen: swapchain refused with the changes (%d): left as it was\n", (int)result);
         return real_CreateSwapchainKHR(device, info, allocator, handle);
     }
     Chain *c = new (std::nothrow) Chain;
@@ -494,7 +544,7 @@ VKAPI_ATTR VkResult VKAPI_CALL fg_CreateSwapchainKHR(VkDevice device, const VkSw
     }
     pthread_mutex_unlock(&lock);
     if (!ok) {
-        fprintf(stderr, "pw_framegen: swapchain %ux%u without generation\n", c->extent.width, c->extent.height);
+        fprintf(stderr, "pw_framegen: swapchain %ux%u left as it was\n", c->extent.width, c->extent.height);
         free_chain(c);
     }
     return result;
@@ -510,6 +560,76 @@ VKAPI_ATTR void VKAPI_CALL fg_DestroySwapchainKHR(VkDevice device, VkSwapchainKH
     real_DestroySwapchainKHR(device, handle, allocator);
 }
 
+/* Stop serving a chain that can no longer draw: its presents go straight to the driver. */
+void drop_chain(Chain *c)
+{
+    for (auto *&slot : chains)
+        if (slot == c) slot = nullptr;
+    free_chain(c);
+}
+
+/* Counting without generating: draw the counter on the program's frame and
+ * present it, after what the program asked to wait for. Called with the lock,
+ * and lets it go. */
+VkResult present_counted(Chain *c, VkQueue queue, const VkPresentInfoKHR *info)
+{
+    /* More than the table takes: this frame goes without a counter. */
+    if (info->waitSemaphoreCount > kMaxPresentWaits) {
+        pthread_mutex_unlock(&lock);
+        return real_QueuePresentKHR(queue, info);
+    }
+    uint32_t s = c->slot;
+    c->slot = (c->slot + 1) % kSlots;
+    vkWaitForFences(c->device, 1, &c->fence[s], VK_TRUE, UINT64_MAX);
+
+    VkCommandBuffer cmd = c->cmd[s];
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkResetCommandBuffer(cmd, 0);
+    vkBeginCommandBuffer(cmd, &begin);
+    const bool font_was_uploaded = c->font_uploaded;
+    if (!c->font_uploaded) record_font_upload(c, cmd);
+    VkImage frame = c->images[info->pImageIndices[0]];
+    barrier(cmd, frame, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    record_counter(c, cmd, frame);
+    barrier(cmd, frame, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    vkEndCommandBuffer(cmd);
+
+    VkPipelineStageFlags stages[kMaxPresentWaits];
+    for (uint32_t i = 0; i < info->waitSemaphoreCount; i++) stages[i] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.waitSemaphoreCount = info->waitSemaphoreCount;
+    submit.pWaitSemaphores = info->pWaitSemaphores;
+    submit.pWaitDstStageMask = stages;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cmd;
+    submit.signalSemaphoreCount = 1;
+    submit.pSignalSemaphores = &c->image_done[info->pImageIndices[0]];
+    /* The fence stays signalled unless this is sure to reach the queue. */
+    vkResetFences(c->device, 1, &c->fence[s]);
+    VkResult result = vkQueueSubmit(queue, 1, &submit, c->fence[s]);
+    if (result != VK_SUCCESS) {
+        /* A failed submit signals nothing: this slot needs a fence that a later frame can wait for. */
+        VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        fence.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        vkDestroyFence(c->device, c->fence[s], nullptr);
+        c->fence[s] = VK_NULL_HANDLE;
+        if (vkCreateFence(c->device, &fence, nullptr, &c->fence[s]) != VK_SUCCESS) drop_chain(c);
+        else c->font_uploaded = font_was_uploaded;
+        pthread_mutex_unlock(&lock);
+        fprintf(stderr, "pw_framegen: submit failed (%d)\n", (int)result);
+        return result;
+    }
+    VkPresentInfoKHR real = *info;
+    real.waitSemaphoreCount = 1;
+    real.pWaitSemaphores = &c->image_done[info->pImageIndices[0]];
+    count_frame(c, 0);
+    pthread_mutex_unlock(&lock);
+    return real_QueuePresentKHR(queue, &real);
+}
+
 /* One submission for the program's frame: copy it aside, then make and draw
  * each picture between it and the previous one into an acquired image. The
  * pictures are presented first, then the program's frame. */
@@ -522,6 +642,7 @@ VKAPI_ATTR VkResult VKAPI_CALL fg_QueuePresentKHR(VkQueue queue, const VkPresent
         pthread_mutex_unlock(&lock);
         return real_QueuePresentKHR(queue, info);
     }
+    if (!c->factor) return present_counted(c, queue, info);
     uint32_t s = c->slot;
     c->slot = (c->slot + 1) % kSlots;
     vkWaitForFences(c->device, 1, &c->fence[s], VK_TRUE, UINT64_MAX);
@@ -662,7 +783,7 @@ PFN_vkVoidFunction wrap(const char *name, PFN_vkVoidFunction real)
 
 extern "C" PFN_vkVoidFunction pw_framegen_resolve(VkInstance instance, const char *name, PFN_vkVoidFunction real)
 {
-    if (!name || !real || !factor()) return real;
+    if (!name || !real || (!factor() && !counter_only())) return real;
     if (instance) instance_seen = instance;
     PFN_vkVoidFunction ours = wrap(name, real);
     return ours ? ours : real;

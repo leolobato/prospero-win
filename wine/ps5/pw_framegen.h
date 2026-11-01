@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 /* Frame generation's lookup step (pw_framegen.cpp): with PW_FRAMEGEN set
- * to 2..4, the wrapper for an entry point it serves (device creation, queue
+ * to 2..4 or PW_FRAMEGEN_COUNTER=1, the wrapper for an entry point it serves (device creation, queue
  * lookups, swapchain creation and destruction, present), remembering the
  * driver's own; otherwise, or for any other entry point, real itself.
  * instance is the instance the lookup came through, or VK_NULL_HANDLE. */

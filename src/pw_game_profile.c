@@ -213,6 +213,14 @@ static int display_field(PwGameDisplay *display, uint32_t *seen, const uint8_t *
         *seen |= 8u;
         return PW_OK;
     }
+    if (is(key, key_length, "fps_counter")) {
+        if (*seen & 512u) return PW_ERR_MALFORMED;
+        if (is(v, n, "true")) display->fps_counter = 1;
+        else if (is(v, n, "false")) display->fps_counter = 0;
+        else return PW_ERR_UNSUPPORTED;
+        *seen |= 512u;
+        return PW_OK;
+    }
     if (is(key, key_length, "framegen")) {
         if (*seen & 128u) return PW_ERR_MALFORMED;
         if (is(v, n, "off")) display->framegen = 0;
@@ -659,6 +667,9 @@ size_t pw_game_graphics_env(const PwGameProfile *profile, PwGameEnv *env)
         static const char *const factors[] = { "2", "3", "4" };
         env[count++] = (PwGameEnv){ "PW_FRAMEGEN", factors[profile->display.framegen - 2] };
         if (profile->display.show_fps) env[count++] = (PwGameEnv){ "PW_FRAMEGEN_HUD", "1" };
+    } else if (profile->display.fps_counter) {
+        /* A backend with no counter of its own: the driver draws one. */
+        env[count++] = (PwGameEnv){ "PW_FRAMEGEN_COUNTER", "1" };
     }
     return count;
 }
@@ -694,10 +705,11 @@ int pw_game_profile_parse(const uint8_t *bytes, size_t length, PwGameProfile *pr
     for (size_t i = 0; (parsed.display.show_fps || parsed.display.menu) && i < parsed.debug_env_count; i++)
         if (!strcmp(parsed.debug_env[i].name, "DXVK_HUD") || !strcmp(parsed.debug_env[i].name, "GALLIUM_HUD"))
             return PW_ERR_UNSUPPORTED;
-    /* and framegen sets PW_FRAMEGEN and PW_FRAMEGEN_HUD. */
-    for (size_t i = 0; parsed.display.framegen && i < parsed.debug_env_count; i++)
+    /* and framegen and fps_counter set the driver's PW_FRAMEGEN variables. */
+    int driver_env = parsed.display.framegen || parsed.display.fps_counter;
+    for (size_t i = 0; driver_env && i < parsed.debug_env_count; i++)
         if (!strncmp(parsed.debug_env[i].name, "PW_FRAMEGEN", 11)) return PW_ERR_UNSUPPORTED;
-    for (size_t i = 0; parsed.display.framegen && i < parsed.environment_count; i++)
+    for (size_t i = 0; driver_env && i < parsed.environment_count; i++)
         if (!strncmp(parsed.environment[i].name, "PW_FRAMEGEN", 11)) return PW_ERR_UNSUPPORTED;
     /* A variable is set by one section only: [debug] env or [environment]. */
     for (size_t i = 0; i < parsed.environment_count; i++)

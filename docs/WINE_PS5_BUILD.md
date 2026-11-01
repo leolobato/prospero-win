@@ -1130,6 +1130,11 @@ The title runs one game per process (`src/pw_wine_launch.h`):
     `show_fps = false` turns it off. With `framegen` on, the counter is
     frame generation's own instead (`PW_FRAMEGEN_HUD=1`), for any backend:
     the game's frames and the pictures shown each second, `30 -> 60`;
+  - `[display] fps_counter = true` (default `false`) sets
+    `PW_FRAMEGEN_COUNTER=1` for a backend with no counter of its own, such as
+    vkd3d-proton: `libvulkan.prx` draws the game's frame rate on each frame it
+    presents. It adds no images and keeps the present mode. `framegen` comes
+    first, and the game's real rate is what it shows;
   - `[display] framegen = 2`, `3` or `4` (default `off`) sets `PW_FRAMEGEN`:
     `libvulkan.prx` (`wine/ps5/pw_framegen.cpp`) gives the screen that many
     pictures for each frame the game presents, the ones between made by
@@ -1171,7 +1176,7 @@ The title runs one game per process (`src/pw_wine_launch.h`):
     refused, so these only add: `PW_VK_BATCH`, `PW_INPUT_SHARED_FAST`,
     `PW_QPC_TSC_*`, `GALLIUM_DRIVER`, `DXVK_HUD` or `GALLIUM_HUD` while
     `show_fps` is on (set `show_fps = false` to choose the HUD), and
-    `PW_FRAMEGEN` and `PW_FRAMEGEN_HUD` while `framegen` is on. The log
+    `PW_FRAMEGEN*` while `framegen` or `fps_counter` is on. The log
     names them (`PW_WINE64 debug_env=`).
     Titles built before the limit went up to five accept four lines.
   - `[environment]` adds up to eight `NAME = value` lines to that game's

@@ -86,6 +86,17 @@ static void test_graphics_env(void)
     }
     assert(parse(APP "[display]\nframegen = 4\nshow_fps = false\n", &p) == PW_OK);
     assert(pw_game_graphics_env(&p, env) == 1 && !strcmp(env[0].value, "4"));
+    /* fps_counter: the driver's counter, and framegen's comes first. */
+    assert(parse(APP "[display]\nshow_fps = false\nfps_counter = true\n", &p) == PW_OK && p.display.fps_counter == 1);
+    assert(pw_game_graphics_env(&p, env) == 1 && !strcmp(env[0].name, "PW_FRAMEGEN_COUNTER") &&
+           !strcmp(env[0].value, "1"));
+    assert(parse(APP "[display]\nshow_fps = false\nfps_counter = false\n", &p) == PW_OK && p.display.fps_counter == 0);
+    assert(pw_game_graphics_env(&p, env) == 0);
+    assert(parse(APP "[display]\nframegen = 2\nfps_counter = true\n", &p) == PW_OK);
+    assert(pw_game_graphics_env(&p, env) == 2 && !strcmp(env[0].name, "PW_FRAMEGEN"));
+    assert(parse(APP "[display]\nfps_counter = maybe\n", &p) == PW_ERR_UNSUPPORTED);
+    assert(parse(APP "[display]\nfps_counter = true\nfps_counter = true\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[display]\nfps_counter = true\n[debug]\nenv = PW_FRAMEGEN_COUNTER=0\n", &p) == PW_ERR_UNSUPPORTED);
     /* The menu stays DXVK's, without its frame rate. */
     assert(parse(APP "[display]\nframegen = 2\nmenu = true\n", &p) == PW_OK);
     assert(pw_game_graphics_env(&p, env) == 3 && !strcmp(env[0].name, "DXVK_HUD") &&

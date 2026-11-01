@@ -17,6 +17,9 @@
  *   menu = true            ; L3+R3 opens prospero-win's menu over the game
  *                          ; (pw_game_menu; drawn by DXVK's HUD, so DXVK games
  *                          ; only); default false
+ *   fps_counter = true     ; the Vulkan driver draws the frame rate, for a
+ *                          ; backend with no counter of its own (off by
+ *                          ; default; framegen's counter comes first)
  *   framegen = 2           ; frame generation: the screen gets 2, 3 or 4
  *                          ; pictures for each frame the game draws, the ones
  *                          ; between made by MihawkGen in the Vulkan driver
@@ -150,6 +153,7 @@ typedef struct PwGameDisplay {
     int show_fps;               /* the graphics backend's frame-rate counter */
     int menu;                   /* the in-game menu (pw_game_menu) */
     uint32_t framegen;          /* pictures per game frame, 2..4; 0 off (PW_FRAMEGEN) */
+    uint32_t fps_counter;       /* the driver draws the frame rate (PW_FRAMEGEN_COUNTER) */
     uint32_t refresh;           /* the output's rate: 60 or 120 */
     uint32_t frame_rate;        /* a cap: 0 (none), 120, 60, 40 or 30 */
     int opengl_thread;          /* parsed but unused since Zink */
