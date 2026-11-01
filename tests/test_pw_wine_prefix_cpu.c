@@ -83,6 +83,58 @@ static void synthetic_section_import(const char *path, int bits, int broken)
     assert(fwrite(pe, 1, sizeof(pe), file) == sizeof(pe) && !fclose(file));
 }
 
+static void test_openal(void)
+{
+    char root[] = "/tmp/pw_prefix_openal_XXXXXX", prefix[256], provider[256], path[512], installed[512];
+    unsigned copied;
+    assert(mkdtemp(root));
+    snprintf(prefix, sizeof(prefix), "%s/prefix", root); assert(!mkdir(prefix, 0700));
+    snprintf(provider, sizeof(provider), "%s/provider", root); assert(!mkdir(provider, 0700));
+    assert(pw_wine_prefix_openal_install(NULL, provider, &copied) == PW_ERR_PRECONDITION);
+    assert(pw_wine_prefix_openal_install(prefix, provider, &copied) == PW_ERR_NOT_FOUND && !copied);
+    snprintf(path, sizeof(path), "%s/i386-windows", provider); assert(!mkdir(path, 0700));
+    snprintf(path, sizeof(path), "%s/i386-windows/OpenAL32.dll", provider); synthetic_dll(path, 32, 1);
+    snprintf(path, sizeof(path), "%s/x86_64-windows", provider); assert(!mkdir(path, 0700));
+    snprintf(path, sizeof(path), "%s/x86_64-windows/OpenAL32.dll", provider); synthetic_dll(path, 32, 1);
+    /* A 32-bit library in the 64-bit folder is refused. */
+    assert(pw_wine_prefix_openal_install(prefix, provider, &copied) == PW_ERR_UNSUPPORTED && copied == 1);
+    synthetic_dll(path, 64, 1);
+    assert(pw_wine_prefix_openal_install(prefix, provider, &copied) == PW_OK && copied == 1);
+    snprintf(installed, sizeof(installed), "%s/drive_c/windows/syswow64/OpenAL32.dll", prefix);
+    assert(!access(installed, F_OK));
+    snprintf(installed, sizeof(installed), "%s/drive_c/windows/system32/OpenAL32.dll", prefix);
+    assert(!access(installed, F_OK));
+    assert(pw_wine_prefix_openal_install(prefix, provider, &copied) == PW_OK && !copied);
+    /* One already in the prefix is not replaced, whoever put it there. */
+    synthetic_dll(path, 64, 2);
+    assert(pw_wine_prefix_openal_install(prefix, provider, &copied) == PW_OK && !copied);
+    assert(!remove(installed));
+    assert(pw_wine_prefix_openal_install(prefix, provider, &copied) == PW_OK && copied == 1);
+}
+
+static void test_program_facts(void)
+{
+    char root[] = "/tmp/pw_prefix_facts_XXXXXX", path[256];
+    PwAppArchitecture architecture = PW_APP_ARCH_PE64;
+    int opengl_only = -1;
+    assert(mkdtemp(root));
+    snprintf(path, sizeof(path), "%s/game.exe", root);
+    assert(pw_wine_prefix_program_facts(NULL, &architecture, &opengl_only) == PW_ERR_PRECONDITION);
+    assert(pw_wine_prefix_program_facts(path, &architecture, &opengl_only) == PW_ERR_NOT_FOUND);
+    write_file(path, "MZ");
+    assert(pw_wine_prefix_program_facts(path, &architecture, &opengl_only) == PW_ERR_TRUNCATED);
+    synthetic_dll(path, 32, 1); synthetic_import(path, "OPENGL32.dll");
+    assert(pw_wine_prefix_program_facts(path, &architecture, &opengl_only) == PW_OK);
+    assert(architecture == PW_APP_ARCH_PE32 && opengl_only == 1);
+    synthetic_dll(path, 32, 1); synthetic_import(path, "d3d9.dll");
+    assert(pw_wine_prefix_program_facts(path, &architecture, &opengl_only) == PW_OK && !opengl_only);
+    synthetic_dll(path, 32, 1); synthetic_import(path, "kernel32.dll");
+    assert(pw_wine_prefix_program_facts(path, &architecture, &opengl_only) == PW_OK && !opengl_only);
+    synthetic_dll(path, 64, 1);
+    assert(pw_wine_prefix_program_facts(path, &architecture, &opengl_only) == PW_OK);
+    assert(architecture == PW_APP_ARCH_PE64 && !opengl_only);
+}
+
 static void test_zink(void)
 {
     char root[] = "/tmp/pw_prefix_zink_XXXXXX", prefix[256], provider[256], path[512], installed[512];
@@ -169,6 +221,8 @@ static void test_zink(void)
 int main(void)
 {
     test_zink();
+    test_openal();
+    test_program_facts();
     char root[] = "/tmp/pw_prefix_cpu_XXXXXX", prefix[256], system32[300], source[300], installed[340],
          temporary[350];
 

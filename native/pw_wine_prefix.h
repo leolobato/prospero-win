@@ -39,4 +39,17 @@ int pw_wine_prefix_driver_install(const char *prefix, const char *source, const 
 int pw_wine_prefix_zink_install(const char *prefix, const char *provider,
                                 PwAppArchitecture architecture, unsigned *copied);
 
+/* Wine has no OpenAL, and a game that links to it without shipping the library
+ * does not start. Installs <provider>/{i386,x86_64}-windows/OpenAL32.dll as
+ * <prefix>/drive_c/windows/{syswow64,system32}/OpenAL32.dll where the prefix has
+ * none: one a game's installer put there stays, and a library in the game's own
+ * folder still comes first. PW_ERR_NOT_FOUND when the runtime has none. copied
+ * counts the files added. */
+int pw_wine_prefix_openal_install(const char *prefix, const char *provider, unsigned *copied);
+
+/* What the program at host path needs from a start: its architecture, and
+ * whether it draws with OpenGL only (it imports opengl32.dll and no Direct3D
+ * or DirectDraw library). Bounded, as the Zink checks above. */
+int pw_wine_prefix_program_facts(const char *path, PwAppArchitecture *architecture, int *opengl_only);
+
 #endif

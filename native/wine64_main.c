@@ -1635,6 +1635,35 @@ int main(int argc, char **argv)
             pw_diagnostics_close("per-game-executable-refused");
             return 1;
         }
+        /* The profile describes the program the title was prepared for, and a
+         * launcher can start one built differently: a 64-bit game from a 32-bit
+         * launcher, an OpenGL game beside a Direct3D one. */
+        if (exec_chain_depth) {
+            static PwGameProfile chain_profile;
+            PwAppArchitecture architecture;
+            int opengl_only = 0;
+            int facts = pw_wine_prefix_program_facts(executable_path, &architecture, &opengl_only);
+
+            if (facts == PW_OK) {
+                chain_profile = *game;
+                chain_profile.app.architecture = architecture;
+                if (opengl_only && chain_profile.app.graphics != PW_APP_GRAPHICS_ZINK) {
+                    char overrides[sizeof(effective_dll_overrides)];
+
+                    chain_profile.app.graphics = PW_APP_GRAPHICS_ZINK;
+                    chain_profile.display.menu = 0; /* DXVK's HUD draws it; Zink has none */
+                    /* The profile's own opengl32 rule may not allow Zink's. */
+                    if (pw_app_profile_effective_dll_overrides(&chain_profile.app, overrides, sizeof(overrides)) != PW_OK) {
+                        PS5LOG_LOG("PW_WINE64 chain keeps the profile's graphics: its opengl32 override excludes Zink");
+                        chain_profile.app.graphics = game->app.graphics;
+                        chain_profile.display.menu = game->display.menu;
+                    }
+                }
+                game = &chain_profile;
+            }
+            PS5LOG_LOG("PW_WINE64 chain program facts=%s architecture=%s opengl_only=%d", pw_result_name(facts),
+                       facts != PW_OK ? "-" : architecture == PW_APP_ARCH_PE32 ? "pe32" : "pe64", opengl_only);
+        }
     }
     /* [display] refresh and frame_rate: the video output's rate and cap, set
      * for every game, so one without a refresh line, or a bare path=
@@ -1702,6 +1731,18 @@ int main(int argc, char **argv)
             PS5LOG_LOG("PW_WINE64 zink provider=%s copied=%u architecture=%s", pw_result_name(provider_status),
                        copied, game->app.architecture == PW_APP_ARCH_PE32 ? "pe32" : "pe64");
             if (provider_status != PW_OK) return 1;
+        }
+        {
+            int openal_status = PW_ERR_NOT_FOUND;
+            unsigned openal_copied = 0;
+
+            for (size_t i = 0; i < sizeof(runtime_roots) / sizeof(runtime_roots[0]) && openal_status == PW_ERR_NOT_FOUND; i++) {
+                char provider[512];
+
+                if (snprintf(provider, sizeof(provider), "%s/win/openal-soft", runtime_roots[i]) < (int)sizeof(provider))
+                    openal_status = pw_wine_prefix_openal_install(prefix, provider, &openal_copied);
+            }
+            PS5LOG_LOG("PW_WINE64 openal provider=%s copied=%u", pw_result_name(openal_status), openal_copied);
         }
         /* xinput mode: SDL2 games (Half-Life) look for controllers through
          * raw input first, which Wine on the PS5 has none of, and then skip

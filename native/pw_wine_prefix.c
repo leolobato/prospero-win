@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <stdlib.h>
 
 /* mkdir -p for everything after path[base], which exists. */
@@ -166,13 +167,14 @@ static int zink_rva_byte(FILE *file, size_t size, unsigned headers,
            !fseek(file, (long)offset, SEEK_SET) && fread(out, 1, 1, file) == 1;
 }
 
-static int zink_imports(FILE *file, size_t size, PwAppArchitecture architecture,
-                        char names[][ZINK_DLL_NAME], unsigned dll_count)
+/* Calls visit(name, context) for each DLL the file imports; a non-zero return
+ * stops the walk and is returned. */
+static int pe_imports(FILE *file, size_t size, PwAppArchitecture architecture,
+                      int (*visit)(const char *name, void *context), void *context)
 {
     unsigned char dos[64], coff[24], optional[240], section[40], descriptor[20];
     struct zink_section sections[96];
     unsigned pe, count, opt_bytes, headers, directory_offset, imports, import_bytes;
-    const char *companions[] = { "libgallium_wgl.dll", "libc++.dll", "libunwind.dll", "libwinpthread-1.dll" };
     if (fseek(file, 0, SEEK_SET) || fread(dos, 1, sizeof(dos), file) != sizeof(dos)) return PW_ERR_STATE;
     pe = pe_u32(dos + 60);
     if (fseek(file, pe, SEEK_SET) || fread(coff, 1, sizeof(coff), file) != sizeof(coff)) return PW_ERR_STATE;
@@ -213,14 +215,74 @@ static int zink_imports(FILE *file, size_t size, PwAppArchitecture architecture,
             if (!name[length]) break;
         }
         if (!length || length == sizeof(name)) return PW_ERR_MALFORMED;
-        for (unsigned k = 0; k < sizeof(companions) / sizeof(companions[0]); k++) {
-            if (strcasecmp(name, companions[k])) continue;
-            unsigned i;
-            for (i = 0; i < dll_count && strcasecmp(names[i], name); i++) {}
-            if (i == dll_count) return PW_ERR_NOT_FOUND;
-        }
+        int stop = visit(name, context);
+        if (stop) return stop;
     }
     return PW_ERR_MALFORMED; /* No bounded terminating import descriptor. */
+}
+
+struct zink_names { char (*names)[ZINK_DLL_NAME]; unsigned count; };
+
+static int zink_import_present(const char *name, void *context)
+{
+    static const char *const companions[] = { "libgallium_wgl.dll", "libc++.dll", "libunwind.dll", "libwinpthread-1.dll" };
+    const struct zink_names *dlls = context;
+
+    for (unsigned k = 0; k < sizeof(companions) / sizeof(companions[0]); k++) {
+        if (strcasecmp(name, companions[k])) continue;
+        unsigned i;
+        for (i = 0; i < dlls->count && strcasecmp(dlls->names[i], name); i++) {}
+        if (i == dlls->count) return PW_ERR_NOT_FOUND;
+    }
+    return PW_OK;
+}
+
+static int zink_imports(FILE *file, size_t size, PwAppArchitecture architecture,
+                        char names[][ZINK_DLL_NAME], unsigned dll_count)
+{
+    struct zink_names dlls = { names, dll_count };
+
+    return pe_imports(file, size, architecture, zink_import_present, &dlls);
+}
+
+/* Which graphics libraries a program names: 1 OpenGL, 2 Direct3D or DirectDraw. */
+static int program_import_graphics(const char *name, void *context)
+{
+    static const char *const direct3d[] = { "ddraw.dll", "d3d8.dll", "d3d9.dll", "d3d10.dll", "d3d10_1.dll",
+                                            "d3d10core.dll", "d3d11.dll", "d3d12.dll", "dxgi.dll" };
+    unsigned *found = context;
+
+    if (!strcasecmp(name, "opengl32.dll")) *found |= 1;
+    for (unsigned i = 0; i < sizeof(direct3d) / sizeof(direct3d[0]); i++)
+        if (!strcasecmp(name, direct3d[i])) *found |= 2;
+    return PW_OK;
+}
+
+int pw_wine_prefix_program_facts(const char *path, PwAppArchitecture *architecture, int *opengl_only)
+{
+    unsigned char dos[64], coff[8];
+    struct stat st;
+    unsigned offset, machine, found = 0;
+    int status = PW_OK;
+    FILE *file;
+
+    if (!path || !architecture || !opengl_only) return PW_ERR_PRECONDITION;
+    if (!(file = fopen(path, "rb"))) return PW_ERR_NOT_FOUND;
+    if (fstat(fileno(file), &st) || !S_ISREG(st.st_mode) || st.st_size < 0) status = PW_ERR_STATE;
+    else if (fread(dos, 1, sizeof(dos), file) != sizeof(dos)) status = PW_ERR_TRUNCATED;
+    else if (memcmp(dos, "MZ", 2)) status = PW_ERR_NOT_PE;
+    else if ((offset = pe_u32(dos + 60)) < sizeof(dos) || offset > 4096 ||
+             (uint64_t)offset + sizeof(coff) > (uint64_t)st.st_size) status = PW_ERR_TRUNCATED;
+    else if (fseek(file, offset, SEEK_SET) || fread(coff, 1, sizeof(coff), file) != sizeof(coff)) status = PW_ERR_STATE;
+    else if (memcmp(coff, "PE\0\0", 4)) status = PW_ERR_NOT_PE;
+    else if ((machine = pe_u16(coff + 4)) != 0x14cu && machine != 0x8664u) status = PW_ERR_UNSUPPORTED;
+    else {
+        *architecture = machine == 0x14cu ? PW_APP_ARCH_PE32 : PW_APP_ARCH_PE64;
+        status = pe_imports(file, (size_t)st.st_size, *architecture, program_import_graphics, &found);
+        *opengl_only = found == 1;
+    }
+    fclose(file);
+    return status;
 }
 
 static int zink_copy(FILE *source, size_t size, const char *path)
@@ -255,6 +317,40 @@ static int zink_copy(FILE *source, size_t size, const char *path)
     if (!failed && !rename(temporary, path)) return 1;
     remove(temporary);
     return PW_ERR_STATE;
+}
+
+int pw_wine_prefix_openal_install(const char *prefix, const char *provider, unsigned *copied)
+{
+    static const struct { const char *from, *to; PwAppArchitecture architecture; } kinds[] = {
+        { "i386-windows", "syswow64", PW_APP_ARCH_PE32 },
+        { "x86_64-windows", "system32", PW_APP_ARCH_PE64 },
+    };
+    char source[1024], destination[1024];
+
+    if (!prefix || !provider || !copied) return PW_ERR_PRECONDITION;
+    *copied = 0;
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+        FILE *file;
+        size_t bytes;
+        int status;
+
+        if (snprintf(source, sizeof(source), "%s/%s/OpenAL32.dll", provider, kinds[i].from) >= (int)sizeof(source) ||
+            snprintf(destination, sizeof(destination), "%s/drive_c/windows/%s", prefix, kinds[i].to) >=
+                (int)sizeof(destination)) return PW_ERR_LIMIT;
+        if (!(file = fopen(source, "rb"))) return PW_ERR_NOT_FOUND;
+        status = zink_dll_validate(file, kinds[i].architecture, &bytes);
+        if (status == PW_OK && make_folders(destination, strlen(prefix))) status = PW_ERR_STATE;
+        if (status == PW_OK && snprintf(destination, sizeof(destination), "%s/drive_c/windows/%s/OpenAL32.dll", prefix,
+                                        kinds[i].to) >= (int)sizeof(destination)) status = PW_ERR_LIMIT;
+        /* One already there stays: a game's installer may have put its own. */
+        if (status == PW_OK && access(destination, F_OK)) {
+            status = zink_copy(file, bytes, destination);
+            if (status >= 0) { *copied += (unsigned)status; status = PW_OK; }
+        }
+        fclose(file);
+        if (status != PW_OK) return status;
+    }
+    return PW_OK;
 }
 
 int pw_wine_prefix_zink_install(const char *prefix, const char *provider,
