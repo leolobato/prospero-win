@@ -29,6 +29,10 @@ int pw_title_path_is_directory(const char *path);
 int pw_title_path_is_regular_file(const char *path);
 int pw_title_session_start(PwTitleSession *session, const PwTitleLaunch *launch,
                            const char *session_argument, char *error, size_t error_size);
+/* Continue a handed-off session after the title restarted itself to run the next
+ * program. The record must exist, belong to this launch and not have ended. */
+int pw_title_session_resume(PwTitleSession *session, const PwTitleLaunch *launch,
+                            const char *session_argument, char *error, size_t error_size);
 
 /* Call running only after the Wine entry thread has actually begun. Exited
  * may omit an exit status when Wine's exit callback does not provide one. */

@@ -432,6 +432,64 @@ fail:
     return -1;
 }
 
+int pw_title_session_resume(PwTitleSession *session, const PwTitleLaunch *launch,
+                            const char *session_argument, char *error, size_t error_size)
+{
+    static const char prefix[] = "session=";
+    char sessions[PW_TITLE_SESSION_PATH_SIZE], text[1024], expected[256];
+    ssize_t used;
+    int fd;
+
+    if (!session || !launch || !session_argument ||
+        strncmp(session_argument, prefix, sizeof(prefix) - 1) != 0 ||
+        !pw_title_session_id_valid(session_argument + sizeof(prefix) - 1)) {
+        set_error(error, error_size, "session argument is invalid");
+        return -1;
+    }
+    memset(session, 0, sizeof(*session));
+    strcpy(session->origin, "playden");
+    strcpy(session->session_id, session_argument + sizeof(prefix) - 1);
+    session->launch = *launch;
+    if (snprintf(sessions, sizeof(sessions), "%s/logs/sessions", launch->data_root) >= (int)sizeof(sessions) ||
+        snprintf(session->path, sizeof(session->path), "%s/%s.json", sessions,
+                 session->session_id) >= (int)sizeof(session->path) ||
+        !private_directory_safe(sessions)) {
+        set_error(error, error_size, "session directory is unavailable or unsafe");
+        return -1;
+    }
+    fd = open(session->path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0 || !private_file_fd(fd)) {
+        if (fd >= 0) close(fd);
+        set_error(error, error_size, "session record is missing or unsafe");
+        return -1;
+    }
+    used = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (used <= 0) {
+        set_error(error, error_size, "cannot read session record");
+        return -1;
+    }
+    text[used] = 0;
+    snprintf(expected, sizeof(expected), "\"session_id\":\"%s\",\"install_id\":\"%s\",\"title_id\":\"%s\",\"origin\":\"playden\",",
+             session->session_id, launch->install_id, launch->title_id);
+    if (!strstr(text, expected)) {
+        set_error(error, error_size, "session record belongs to another launch");
+        return -1;
+    }
+    if (strstr(text, "\"phase\":\"exited\"") || strstr(text, "\"phase\":\"failed\"")) {
+        set_error(error, error_size, "session already ended");
+        return -1;
+    }
+    strcpy(session->directory, sessions);
+    session->active = 1;
+    if (write_phase_unlocked(session, "starting", 0, 0) != 0) {
+        set_error(error, error_size, "cannot write starting session: %s", strerror(errno));
+        session->active = 0;
+        return -1;
+    }
+    return 0;
+}
+
 int pw_title_session_running(PwTitleSession *session)
 {
     int status;

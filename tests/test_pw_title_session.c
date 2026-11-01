@@ -399,6 +399,43 @@ static void test_terminal_phase_never_regresses_under_concurrency(void)
     }
 }
 
+static void test_chained_start_keeps_the_session(void)
+{
+    char root[] = "/tmp/pw-title-session-XXXXXX";
+    PwTitleLaunch launch, other;
+    PwTitleSession first, next, refused;
+    char error[160], text[1024], path[PW_TITLE_SESSION_PATH_SIZE];
+    const char *argument = "session=123e4567-e89b-12d3-a456-426614174000";
+    const char *unknown = "session=123e4567-e89b-12d3-a456-426614174001";
+
+    make_temp_dir(root);
+    launch = launch_for(root);
+    format_path(path, sizeof(path), "%s/logs/sessions/123e4567-e89b-12d3-a456-426614174000.json", launch.data_root);
+    assert(pw_title_session_resume(&refused, &launch, argument, error, sizeof(error)) != 0);
+    assert(pw_title_session_start(&first, &launch, argument, error, sizeof(error)) == 0);
+    assert(pw_title_session_running(&first) == 0);
+    pw_title_session_close(&first);
+
+    /* Only this launch's own unfinished record continues. */
+    assert(pw_title_session_resume(&refused, &launch, unknown, error, sizeof(error)) != 0);
+    assert(pw_title_session_resume(&refused, &launch, "session=../../outside", error, sizeof(error)) != 0);
+    other = launch;
+    snprintf(other.install_id, sizeof(other.install_id), "%s", "another-install");
+    assert(pw_title_session_resume(&refused, &other, argument, error, sizeof(error)) != 0);
+
+    assert(pw_title_session_resume(&next, &launch, argument, error, sizeof(error)) == 0);
+    read_text(path, text, sizeof(text));
+    assert_contains(text, "\"phase\":\"starting\"");
+    assert_contains(text, "\"origin\":\"playden\"");
+    assert(pw_title_session_failed(&next, 0, 0) == 0);
+    pw_title_session_close(&next);
+    read_text(path, text, sizeof(text));
+    assert_contains(text, "\"phase\":\"failed\"");
+
+    /* An ended session is history. */
+    assert(pw_title_session_resume(&refused, &launch, argument, error, sizeof(error)) != 0);
+}
+
 static void test_public_session_parents_are_rejected(void)
 {
     char root[] = "/tmp/pw-title-private-XXXXXX";
@@ -426,6 +463,7 @@ static void test_public_session_parents_are_rejected(void)
 int main(void)
 {
     test_public_session_parents_are_rejected();
+    test_chained_start_keeps_the_session();
     test_uuid_validation();
     test_playden_lifecycle_is_atomic();
     test_home_launch_generates_fresh_id();

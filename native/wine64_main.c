@@ -456,26 +456,29 @@ static void close_title_publication(void)
 
 static int per_game_argument(int argc, char **argv, char *error, size_t error_size)
 {
-    const char *argument = NULL;
+    const char *argument = NULL, *chain = NULL;
 
     for (int i = 0; i < argc; i++) {
         if (!argv || !argv[i] || !argv[i][0]) continue;
+        if (!chain && !strncmp(argv[i], "chain=", 6)) {
+            chain = argv[i];
+            continue;
+        }
         if (argument) {
             snprintf(error, error_size, "per-game launch accepts one session argument");
             return -1;
         }
         argument = argv[i];
     }
-    if (argument && !strncmp(argument, "chain=", 6)) {
+    if (chain) {
         char *end = NULL;
-        unsigned long depth = strtoul(argument + 6, &end, 10);
+        unsigned long depth = strtoul(chain + 6, &end, 10);
 
         if (!end || *end || depth < 1 || depth > PW_WINE64_CHAIN_MAX) {
-            snprintf(error, error_size, "per-game launch rejects argument %.32s", argument);
+            snprintf(error, error_size, "per-game launch rejects argument %.32s", chain);
             return -1;
         }
         exec_chain_depth = (unsigned)depth;
-        return 0;
     }
     if (argument && (strncmp(argument, "session=", 8) ||
                      !pw_title_session_id_valid(argument + 8))) {
@@ -917,15 +920,22 @@ static void input_switch_notify(const char *label)
 }
 
 /* Replace this per-game title with itself and chain=N, to run the program
- * the game asked for (exec_chain_take). Returns only on failure. */
+ * the game asked for (exec_chain_take). A handed-off launch keeps its session
+ * across the restart, so whoever started it sees how the last program ended.
+ * Returns only on failure. */
 static void restart_chain(unsigned depth)
 {
     static char sandbox_eboot[sizeof(sandbox_app0) + sizeof("/eboot.bin")];
     static char word[16];
+    static char session_word[sizeof("session=") + PW_TITLE_SESSION_ID_SIZE];
     const char *const eboots[] = { "/app0/eboot.bin", sandbox_eboot };
-    char *next[] = { word, NULL };
+    char *next[] = { word, NULL, NULL };
 
     snprintf(word, sizeof(word), "chain=%u", depth);
+    if (title_session_argument) {
+        snprintf(session_word, sizeof(session_word), "%s", title_session_argument);
+        next[1] = session_word;
+    }
     snprintf(sandbox_eboot, sizeof(sandbox_eboot), "%s/eboot.bin", sandbox_app0);
     display_quiesce("exec-chain");
     close_title_publication();
@@ -998,14 +1008,21 @@ static void on_exit_report(void)
         int chain = exec_chain_pending();
         int running = __atomic_load_n(&per_game_running, __ATOMIC_ACQUIRE);
 
-        if (running || chain) (void)pw_title_session_exited(&title_session, 0, 0);
-        else (void)pw_title_session_failed(&title_session, 0, 0);
-        pw_title_session_close(&title_session);
+        /* A handed-off launch stays open for the program that comes next. */
+        int handover = chain && exec_chain_enabled;
+        int keep_session = handover && title_session_argument;
+
+        if (!keep_session) {
+            if (handover || (running && !chain)) (void)pw_title_session_exited(&title_session, 0, 0);
+            else (void)pw_title_session_failed(&title_session, 0, 0);
+        }
         if (chain) {
-            if (exec_chain_enabled) restart_chain(exec_chain_depth + 1);
+            if (handover) restart_chain(exec_chain_depth + 1);
             else PS5LOG_LOG("PW_WINE64 chain refused depth=%u", exec_chain_depth);
             unlink(exec_chain_request);
+            if (keep_session) (void)pw_title_session_failed(&title_session, 0, 0);
         }
+        pw_title_session_close(&title_session);
     } else {
         restart_title(NULL, launch.cycle + 1u, "wine-exit");
     }
@@ -1059,8 +1076,10 @@ static int open_library(void)
             return -1;
         }
         library_root = per_game_library_root;
-        if (pw_title_session_start(&title_session, &title_launch, title_session_argument,
-                                   session_error, sizeof(session_error)) != 0) {
+        if ((exec_chain_depth && title_session_argument ?
+                 pw_title_session_resume : pw_title_session_start)(
+                &title_session, &title_launch, title_session_argument,
+                session_error, sizeof(session_error)) != 0) {
             PS5LOG_LOG("PW_WINE64 session start refused reason=%s", session_error);
             return -1;
         }
