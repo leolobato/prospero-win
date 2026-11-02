@@ -62,6 +62,10 @@ size_t pw_wine_game_inputs(const PwGameInput *input, uint32_t pressed, uint32_t 
  * packets. */
 int pw_wine_game_pad(const PwPadPs5 *pad, PwWinePad *out);
 
+/* A motor's XInput speed (0..65535) as the DualSense's level (0..255), at
+ * percent of the game's vibration ([input] rumble). */
+uint8_t pw_wine_rumble_level(uint32_t speed, uint32_t percent);
+
 /* A script build's scripted controller (src/pw_script_input.h) added to
  * the real one in pad, which pw_wine_game_pad filled (connected says
  * whether it is): the scripted buttons join the held ones, and each stick

@@ -137,6 +137,13 @@ int pw_wine_game_pad(const PwPadPs5 *pad, PwWinePad *out)
     return 1;
 }
 
+uint8_t pw_wine_rumble_level(uint32_t speed, uint32_t percent)
+{
+    if (speed > 0xffffu) speed = 0xffffu;
+    if (percent > PW_GAME_RUMBLE_MAX) percent = PW_GAME_RUMBLE_MAX;
+    return (uint8_t)((speed >> 8) * percent / PW_GAME_RUMBLE_MAX);
+}
+
 int pw_wine_script_pad(PwWinePad *pad, int connected, const PwScriptPad *script, int scripted)
 {
     if (!pad) return 0;

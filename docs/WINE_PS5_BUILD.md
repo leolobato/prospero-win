@@ -657,10 +657,12 @@ the title's DualSense instead:
   as disconnected. The sink records which indexes the game asked for, and
   `pw_wine_pads_wanted` reports them, so the title opens the other users'
   pads only once a game asks for controllers 1..3. A controller 1..3 that
-  read as disconnected is asked of the sink again only once a second, so a
-  game polling all four every frame crosses to the Unix side for controller
-  0 alone. `pw_wine_set_pad` and the other unnumbered calls are controller
-  0's.
+  read as disconnected is asked of the sink again only once a second while
+  the game keeps polling it, so a game polling all four every frame crosses
+  to the Unix side for controller 0 alone. A poll after a pause of 100 ms or
+  more always asks, so a game that looks again only on `WM_DEVICECHANGE`
+  finds the controller that just connected. `pw_wine_set_pad` and the other
+  unnumbered calls are controller 0's.
 - The PRX stage links `xinput1_3.prx`. Its descriptor exports
   `__wine_unix_call_funcs` and `__wine_unix_call_wow64_funcs`, and it
   imports ntdll's `dlsym`, like `wowprospero.prx`.

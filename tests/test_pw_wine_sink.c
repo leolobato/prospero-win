@@ -350,6 +350,21 @@ int main(void)
     assert(pw_wine_pads_wanted()==0xfu);
     pw_wine_set_pad_at(1,NULL);assert(!pw_wine_pad_at(1,&got));
     assert(pw_wine_pad(&got) && got.packet==9);
+    /* Another controller coming or going counts too: a game may look for
+     * controllers again only when told. */
+    {
+        uint32_t changes=pw_wine_pad_changes();
+        uint8_t wake_drain[8];
+        while(read(fd,wake_drain,sizeof(wake_drain))>0){}
+        PwWinePad held=second;
+        pw_wine_set_pad_at(2,NULL);assert(pw_wine_pad_changes()==changes);     /* it was not connected */
+        pw_wine_set_pad_at(2,&held);
+        assert(pw_wine_pad_changes()==changes+1 && read(fd,wake_drain,sizeof(wake_drain))==1);
+        pw_wine_set_pad_at(2,&held);assert(pw_wine_pad_changes()==changes+1);   /* still there */
+        pw_wine_set_pad_at(2,NULL);
+        assert(pw_wine_pad_changes()==changes+2 && read(fd,wake_drain,sizeof(wake_drain))==1);
+        pw_wine_set_pad_at(PW_WINE_PADS,&held);assert(pw_wine_pad_changes()==changes+2);
+    }
     pw_wine_set_rumble_at(3,500,600);
     assert(!pw_wine_rumble(&left,&right) && !pw_wine_rumble_at(1,&left,&right));
     assert(pw_wine_rumble_at(3,&left,&right)==1 && left==500 && right==600);

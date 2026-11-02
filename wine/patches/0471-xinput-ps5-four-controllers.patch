@@ -13,20 +13,22 @@ ntdll.prx), so local multiplayer sees one XInput controller per player:
 - XInputSetState keeps each controller's rumble, and XInputEnable passes
   all four on;
 - a controller 1..3 that read as disconnected is asked of the sink again
-  only once a second, so a game polling all four every frame crosses to
-  the Unix side for controller 0 alone. The title fills those slots only
-  once a game has asked for them.
+  only once a second while a game keeps polling it, so a game polling all
+  four every frame crosses to the Unix side for controller 0 alone. A poll
+  after a pause always asks: a game that looks for controllers only on
+  WM_DEVICECHANGE must not miss the one that just connected. The title
+  fills those slots only once a game has asked for them.
 ---
- dlls/xinput1_3/main.c    | 42 +++++++++++++++++++++++++++++-----------
+ dlls/xinput1_3/main.c    | 49 ++++++++++++++++++++++++++++++++-----------
  dlls/xinput1_3/unixlib.c | 15 +++++++-------
  dlls/xinput1_3/unixlib.h |  8 ++++++++
- 3 files changed, 47 insertions(+), 18 deletions(-)
+ 3 files changed, 54 insertions(+), 18 deletions(-)
 
 diff --git a/dlls/xinput1_3/main.c b/dlls/xinput1_3/main.c
 index 83cee15..e9b4c88 100644
 --- a/dlls/xinput1_3/main.c
 +++ b/dlls/xinput1_3/main.c
-@@ -110,7 +110,14 @@ static XINPUT_STATE current_state[XUSER_MAX_COUNT];
+@@ -110,7 +110,16 @@ static XINPUT_STATE current_state[XUSER_MAX_COUNT];
   * xinput uses HID. */
  static unixlib_handle_t title_pad;
  static BOOL title_pad_enabled = TRUE;
@@ -34,15 +36,17 @@ index 83cee15..e9b4c88 100644
 +static XINPUT_VIBRATION title_pad_vibration[XUSER_MAX_COUNT];
 +/* Controllers 1..3 are empty until the title opens another user's pad,
 + * which it does only once a game asks for them. A slot that read as
-+ * disconnected is asked of the sink again once a second, so a game polling
-+ * all four controllers every frame crosses to the Unix side for controller
-+ * 0 alone. No lock: two threads probing one slot at once cost one extra
-+ * call. */
-+static struct { BOOL absent; ULONGLONG asked; } title_pad_slot[XUSER_MAX_COUNT];
++ * disconnected is asked of the sink again once a second while the game keeps
++ * polling it, so a game polling all four controllers every frame crosses to
++ * the Unix side for controller 0 alone. A poll after a pause always asks: a
++ * game that looks again only on WM_DEVICECHANGE must not miss the controller
++ * that just connected. No lock: two threads probing one slot at once cost an
++ * extra call, or a controller just connected reads absent for a second more. */
++static struct { BOOL absent; ULONGLONG asked, polled; } title_pad_slot[XUSER_MAX_COUNT];
  
  static BOOL WINAPI find_title_pad(INIT_ONCE *once, void *param, void **context)
  {
-@@ -130,7 +137,7 @@ static BOOL WINAPI find_title_pad(INIT_ONCE *once, void *param, void **context)
+@@ -130,7 +139,7 @@ static BOOL WINAPI find_title_pad(INIT_ONCE *once, void *param, void **context)
          __wine_unload_unix_lib(module);
          return TRUE;
      }
@@ -51,7 +55,7 @@ index 83cee15..e9b4c88 100644
      title_pad = handle;
      return TRUE;
  }
-@@ -144,9 +151,21 @@ static BOOL has_title_pad(void)
+@@ -144,9 +153,26 @@ static BOOL has_title_pad(void)
  
  static BOOL title_pad_state(DWORD index, XINPUT_STATE *state)
  {
@@ -62,8 +66,13 @@ index 83cee15..e9b4c88 100644
 +    struct xinput_pad_state pad;
 +
 +    if (index >= XUSER_MAX_COUNT) return FALSE;
-+    if (index && title_pad_slot[index].absent && GetTickCount64() - title_pad_slot[index].asked < 1000)
-+        return FALSE;
++    if (index)
++    {
++        ULONGLONG now = GetTickCount64(), polled = title_pad_slot[index].polled;
++        title_pad_slot[index].polled = now;
++        if (title_pad_slot[index].absent && now - title_pad_slot[index].asked < 1000 && now - polled < 100)
++            return FALSE;
++    }
 +    params.index = index;
 +    if (__wine_unix_call(title_pad, unix_pad_state, &params) || !params.state.connected)
 +    {
@@ -76,7 +85,7 @@ index 83cee15..e9b4c88 100644
      memset(state, 0, sizeof(*state));
      state->dwPacketNumber = pad.packet;
      if (!title_pad_enabled) return TRUE;  /* XInputEnable(FALSE): neutral, still connected */
-@@ -161,14 +180,15 @@ static BOOL title_pad_state(DWORD index, XINPUT_STATE *state)
+@@ -161,14 +187,15 @@ static BOOL title_pad_state(DWORD index, XINPUT_STATE *state)
  }
  
  /* xinput_cs must be held */
@@ -95,7 +104,7 @@ index 83cee15..e9b4c88 100644
      }
      __wine_unix_call(title_pad, unix_pad_rumble, &params);
  }
-@@ -894,7 +914,7 @@ void WINAPI DECLSPEC_HOTPATCH XInputEnable(BOOL enable)
+@@ -894,7 +921,7 @@ void WINAPI DECLSPEC_HOTPATCH XInputEnable(BOOL enable)
      {
          EnterCriticalSection(&xinput_cs);
          title_pad_enabled = enable;
@@ -104,7 +113,7 @@ index 83cee15..e9b4c88 100644
          LeaveCriticalSection(&xinput_cs);
          return;
      }
-@@ -923,8 +943,8 @@ DWORD WINAPI DECLSPEC_HOTPATCH XInputSetState(DWORD index, XINPUT_VIBRATION *vib
+@@ -923,8 +950,8 @@ DWORD WINAPI DECLSPEC_HOTPATCH XInputSetState(DWORD index, XINPUT_VIBRATION *vib
          if (index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
          if (!title_pad_state(index, &state)) return ERROR_DEVICE_NOT_CONNECTED;
          EnterCriticalSection(&xinput_cs);

@@ -256,6 +256,17 @@ static void test_pad(void)
 }
 
 /* A script build's controller added to the DualSense's. */
+static void test_rumble_level(void)
+{
+    assert(pw_wine_rumble_level(0, 100) == 0);
+    assert(pw_wine_rumble_level(65535, 100) == 255);
+    assert(pw_wine_rumble_level(65535, 50) == 127);
+    assert(pw_wine_rumble_level(65535, 0) == 0);
+    assert(pw_wine_rumble_level(0x8000, 100) == 0x80);
+    assert(pw_wine_rumble_level(0x10000, 100) == 255);   /* never wraps */
+    assert(pw_wine_rumble_level(65535, 101) == 255);
+}
+
 static void test_script_pad(void)
 {
     PwPadPs5 pad;
@@ -337,6 +348,7 @@ int main(void)
     test_pointer();
     test_pointer_fraction();
     test_pad();
+    test_rumble_level();
     test_script_pad();
     printf("wine display passed: frame box copy, newest frame, refusals, concurrent put/take, "
            "profile bindings to keys and mouse buttons, stick pointer, resized frames, "

@@ -118,11 +118,13 @@ In xinput mode, the DualSenses of the other PS5 users who are signed in
 multiplayer finds them as it would on a PC. They are opened once the game
 asks for a second controller, which most games do at start or when a
 player presses a button on the menu. Each player's controller rumbles on
-its own. A user who signs in while the game runs is found within two
-seconds and keeps the same controller until they sign out. A controller
+its own, at the profile's `rumble` strength. A user who signs in while the
+game runs is found within two seconds and keeps the same controller until
+they sign out. A controller
 that fails to open is tried again only after that user signs out and in.
-Buttons, the pointer and closing the game stay the first player's, and
-while the in-game menu is open the other controllers read idle. A profile
+Buttons, the pointer and closing the game stay the first player's. While
+the in-game menu or the keyboard is open, and under a launcher's preset
+that is not xinput, the other controllers read idle. A profile
 with a `player2` preset (below) gives the second player keys instead, and
 then no other controllers are opened.
 
