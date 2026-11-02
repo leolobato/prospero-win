@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 2 Nov 2026 03:10:00 +0100
+Subject: [PATCH] winegstreamer: Release a parser's elements once after a failed connect.
+
+wg_parser_connect() releases my_src and the container when it fails, leaving
+my_src set, and DirectShow then calls wg_parser_disconnect(). It released
+my_src again and used the NULL container. The double release corrupts memory, and a
+game that retries a graph it cannot build is aborted by GLib after some minutes.
+
+---
+
+diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
+--- a/dlls/winegstreamer/wg_parser.c
++++ b/dlls/winegstreamer/wg_parser.c
+@@ -1830,7 +1830,10 @@
+     if (parser->container)
+         gst_element_set_state(parser->container, GST_STATE_NULL);
+     if (parser->my_src)
++    {
+         gst_object_unref(parser->my_src);
++        parser->my_src = NULL;
++    }
+ 
+     for (i = 0; i < parser->stream_count; ++i)
+         free_stream(parser->streams[i]);
+@@ -1872,6 +1875,13 @@
+     struct wg_parser *parser = get_parser(*(wg_parser_t *)args);
+     unsigned int i;
+ 
++    /* A connect that failed has already released all of this. */
++    if (!parser->container)
++    {
++        parser_clear_input_cache(parser);
++        return S_OK;
++    }
++
+     /* Unblock all of our streams. */
+     pthread_mutex_lock(&parser->mutex);
+     for (i = 0; i < parser->stream_count; ++i)
