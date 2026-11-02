@@ -667,6 +667,8 @@ src/pw_publication_sha256.c
 src/pw_publication_sha256.h
 src/pw_title_id.c
 src/pw_title_id.h
+src/pw_title_sandbox.c
+src/pw_title_sandbox.h
 src/pw_title_launch.c
 src/pw_title_launch.h
 src/pw_title_publication.c
@@ -679,6 +681,7 @@ tests/test_playden_kit.py
 tests/test_prepare_playden_bottle.py
 tests/test_pw_publication_sha256.c
 tests/test_pw_title_id.c
+tests/test_pw_title_sandbox.c
 tests/test_pw_title_launch.c
 tests/test_pw_title_publication.c
 tests/test_pw_title_publication_native.c

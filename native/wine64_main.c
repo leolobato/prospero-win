@@ -37,6 +37,7 @@
 #include "../src/pw_script_input.h"
 #include "../src/pw_title_launch.h"
 #include "../src/pw_title_id.h"
+#include "../src/pw_title_sandbox.h"
 #include "../src/pw_title_session.h"
 #include "../src/pw_wine_launch.h"
 #include "../src/pw_game_menu.h"
@@ -120,7 +121,7 @@ static int kernel_title_id(char *title, size_t size)
 #define PW_WINE64_RUNTIME "/win/wine/lib/wine/x86_64-unix"
 /* Its 64-bit PE modules, among them the WoW64 CPU backends. */
 #define PW_WINE64_PE_RUNTIME "/win/wine/lib/wine/x86_64-windows"
-static char sandbox_app0[sizeof("/mnt/sandbox/_000/app0") + PW_TITLE_ID_SIZE];
+static char sandbox_app0[PW_TITLE_SANDBOX_PATH_SIZE];
 static const char *const runtime_roots[] = { "/app0", sandbox_app0 };
 /* The title's data: profiles/, input/, prefix/ and prefixes/<name>. */
 #ifndef PW_WINE64_ROOT_DATA
@@ -948,6 +949,16 @@ static void restart_chain(unsigned depth)
     }
 }
 
+static int sandbox_probe(const char *dir, const char *eboot, uint64_t *made, void *context)
+{
+    struct stat st;
+
+    (void)context;
+    if (stat(eboot, &st) != 0 || stat(dir, &st) != 0) return -1;
+    *made = (uint64_t)st.st_ctim.tv_sec * 1000000000u + (uint64_t)st.st_ctim.tv_nsec;
+    return 0;
+}
+
 /* Replace this process with the title again: app's game, or the launcher
  * when app is NULL. /app0 is not visible once /data is granted, so the
  * sandbox's view of the same eboot is tried next. Returns only on failure.
@@ -1601,7 +1612,15 @@ int main(int argc, char **argv)
     }
     pw_hid_ps5_preload(hid_log);   /* before the /data grant changes the title's credentials */
     pw_osk_ps5_preload(osk_log);   /* the dialog's module is a system module too */
-    if (open_library() != 0) {
+    {
+        /* The grant shows the sandboxes and hides /app0: see pw_title_sandbox.h. */
+        int library_status = open_library();
+        unsigned sandboxes = pw_title_sandbox_find(title_id, sandbox_probe, NULL, sandbox_app0, sizeof(sandbox_app0));
+
+        PS5LOG_LOG("PW_WINE64 sandbox app0=%s found=%u", sandbox_app0, sandboxes);
+        status = library_status;
+    }
+    if (status != 0) {
         PS5LOG_LOG("PW_WINE64 startup blocked reason=%s",
                    per_game_mode ? "per-game-bootstrap" : "data-helper-incomplete");
         ps5log_close(per_game_mode ? "per-game-bootstrap" : "data-helper-incomplete");
