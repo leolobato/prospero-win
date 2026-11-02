@@ -3,7 +3,7 @@
 """Explicit target-only static media flags for Wine and the PRX linker."""
 import json, os, shlex, subprocess, sys
 from pathlib import Path
-PLUGINS='coreelements app playback typefindfunctions audioconvert audioresample videoconvertscale isomp4 videoparsersbad libav deinterlace videofilter avi'.split()
+PLUGINS='coreelements app playback typefindfunctions audioconvert audioresample videoconvertscale isomp4 videoparsersbad libav deinterlace videofilter avi wavparse audioparsers id3demux'.split()
 PACKAGES='gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-audio-1.0 gstreamer-pbutils-1.0 gstreamer-riff-1.0 gstreamer-rtp-1.0 gstreamer-codecparsers-1.0 gstreamer-net-1.0 gstreamer-fft-1.0 gio-2.0 libavfilter libavformat libavcodec libavutil libswscale libswresample'.split()
 def flags(root):
  root=Path(root).resolve()

@@ -291,8 +291,9 @@ def build_gstreamer(name, source, sdk, work, jobs):
         libraries=['gst'+part+'-1.0' for part in
                    ('allocators','app','audio','fft','pbutils','riff','rtp','rtsp','sdp','tag','video')]
     elif name=='gst-plugins-good':
-        plugins=['isomp4','deinterlace','videofilter','avi']; libraries=[]
-        args+=['-Disomp4=enabled','-Ddeinterlace=enabled','-Dvideofilter=enabled','-Davi=enabled','-Dorc=disabled']
+        plugins=['isomp4','deinterlace','videofilter','avi','wavparse','audioparsers','id3demux']; libraries=[]
+        args+=['-Disomp4=enabled','-Ddeinterlace=enabled','-Dvideofilter=enabled','-Davi=enabled',
+               '-Dwavparse=enabled','-Daudioparsers=enabled','-Did3demux=enabled','-Dorc=disabled']
     elif name=='gst-plugins-bad':
         plugins=['videoparsersbad']; libraries=['gstcodecparsers-1.0']
         args+=['-Dvideoparsers=enabled','-Dorc=disabled']

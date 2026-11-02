@@ -58,6 +58,8 @@ display, audio-device output and new-build game acceptance require separate chec
 | MPEG-PS | avdemux_mpeg | MPEG-1/MP2 and MPEG-2/MP2 |
 | H.264 | avdec_h264 | MP4 H.264/AAC |
 | WMV1/2 | avdec_wmv1, avdec_wmv2 | Both generated ASF fixtures |
+| WAV | wavparse (gst-good) | Generated PCM WAV through DirectShow on the console |
+| MP3 | mpegaudioparse (gst-good), id3demux, avdec_mp3 | Generated MP3 with and without ID3 through DirectShow on the console |
 | WMV3, VC-1 | avdec_wmv3, avdec_vc1 | Factory presence only for this build |
 | MPEG-4 part 2 | avdec_mpeg4 | Three generated AVI fixtures |
 | MPEG-1/2 | avdec_mpeg2video | Both generated MPEG-PS fixtures |

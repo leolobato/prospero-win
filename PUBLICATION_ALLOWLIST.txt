@@ -669,6 +669,8 @@ src/pw_title_id.c
 src/pw_title_id.h
 src/pw_title_sandbox.c
 src/pw_title_sandbox.h
+src/pw_title_sandbox.c
+src/pw_title_sandbox.h
 src/pw_title_launch.c
 src/pw_title_launch.h
 src/pw_title_publication.c
@@ -681,6 +683,7 @@ tests/test_playden_kit.py
 tests/test_prepare_playden_bottle.py
 tests/test_pw_publication_sha256.c
 tests/test_pw_title_id.c
+tests/test_pw_title_sandbox.c
 tests/test_pw_title_sandbox.c
 tests/test_pw_title_launch.c
 tests/test_pw_title_publication.c
@@ -751,3 +754,9 @@ wine/patches/0987-ntdll-report-hot-writes-only-beside-a-read-only-data-page.patc
 wine/patches/0988-ntdll-let-the-kernel-write-a-page-beside-a-protected-one.patch
 wine/patches/0989-ntdll-report-hot-writes-beside-a-read-only-page-only-on-request.patch
 wine/patches/0993-server-ps5-park-read-only-file-descriptors.patch
+wine/patches/0994-ntdll-ps5-run-a-program-a-game-starts-next.patch
+wine/patches/0995-win32u-ps5-show-where-the-pointer-is-and-keep-windows-in-order.patch
+wine/patches/0996-ntdll-ps5-end-a-launcher-that-waits-for-the-program-it-started.patch
+wine/patches/0997-ntdll-ps5-say-which-program-could-not-start.patch
+wine/patches/0998-win32u-keep-the-video-memory-size-within-32-bits.patch
+wine/patches/0999-winegstreamer-ps5-play-mp3-and-wav-through-directshow.patch

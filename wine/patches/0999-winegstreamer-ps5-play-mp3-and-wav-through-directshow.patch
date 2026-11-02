@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 2 Nov 2026 03:00:00 +0100
+Subject: [PATCH] winegstreamer: Register the PS5 WAV, MP3 and ID3 plugins.
+
+A DirectShow graph on an .mp3 or .wav file needs a parser for it. The static
+plugin set had none, so these files stayed silent.
+
+---
+
+diff --git a/dlls/winegstreamer/unixlib.c b/dlls/winegstreamer/unixlib.c
+--- a/dlls/winegstreamer/unixlib.c
++++ b/dlls/winegstreamer/unixlib.c
+@@ -62,6 +62,9 @@
+ GST_PLUGIN_STATIC_DECLARE(libav);
+ GST_PLUGIN_STATIC_DECLARE(deinterlace);
+ GST_PLUGIN_STATIC_DECLARE(videofilter);
++GST_PLUGIN_STATIC_DECLARE(wavparse);
++GST_PLUGIN_STATIC_DECLARE(audioparsers);
++GST_PLUGIN_STATIC_DECLARE(id3demux);
+ #endif
+ 
+ GstStreamType stream_type_from_caps(GstCaps *caps)
+@@ -328,6 +331,9 @@
+     GST_PLUGIN_STATIC_REGISTER(libav);
+     GST_PLUGIN_STATIC_REGISTER(deinterlace);
+     GST_PLUGIN_STATIC_REGISTER(videofilter);
++    GST_PLUGIN_STATIC_REGISTER(wavparse);
++    GST_PLUGIN_STATIC_REGISTER(audioparsers);
++    GST_PLUGIN_STATIC_REGISTER(id3demux);
+ #endif
+ 
+     if (!NtQueryInformationProcess(GetCurrentProcess(),
