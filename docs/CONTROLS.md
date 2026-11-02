@@ -102,6 +102,30 @@ DualSense as an XInput controller. On the console, XInput reports both
 sticks over their full range, the triggers and the buttons, and Half-Life's
 SDL2 opens it as a game controller.
 
+### PlayStation controller games
+
+Some games pick their button prompts from the controller they find, and show
+Xbox prompts with `mode = xinput`. With `mode = playstation` the game finds a
+wired DualShock 4 instead, with the controller's own HID reports: games that
+read a PlayStation controller (SDL2's HIDAPI driver, Unity's Input System)
+show PlayStation buttons.
+
+| DualSense | DualShock 4 |
+| --- | --- |
+| every button, the sticks and the triggers | the same |
+| Create | Share |
+| touchpad click (anywhere) | touchpad click |
+| a finger on the touchpad | the first touch point |
+
+As on Windows with a DualShock 4 alone, XInput reports no controller, so a
+game that reads only Xbox controllers sees none: choose this mode only for
+games that show PlayStation buttons. Rumble and `rumble = 0-100` work as in
+xinput mode; motion reads as a still controller, and the PS button stays the
+console's. Bindings, the pointer stick, the in-game menu and the two-finger
+keyboard work as in xinput mode. The other signed-in users' controllers are
+DualShock 4s as well, each only while it is connected, as in the next section
+but one.
+
 ### DirectInput
 
 Games that read a controller through DirectInput (many games from before

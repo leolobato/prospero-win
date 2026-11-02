@@ -326,6 +326,26 @@ int main(void)
     pw_wine_set_pad(&changes[6]);assert(pw_wine_pad(&got) && got.packet==9 && got.thumb_ry==4);
     assert(pw_wine_pad_changes()==3 && read(fd,drain,sizeof(drain))==1);
 
+    /* The extras: zeros until set, kept as set (masked and clamped),
+     * cleared by NULL; neither a change of the gamepad nor a wake. */
+    PwWinePadExtra extra,extra_got;
+    memset(&extra_got,0x5a,sizeof(extra_got));
+    pw_wine_pad_extra(&extra_got);
+    assert(!extra_got.buttons && !extra_got.touching && !extra_got.touch_x && !extra_got.touch_y);
+    pw_wine_pad_extra(NULL);
+    extra=(PwWinePadExtra){PW_WINE_PAD_TOUCHPAD|PW_WINE_PAD_SHARE|0x80,7,1919,1079};
+    pw_wine_set_pad_extra(&extra);pw_wine_pad_extra(&extra_got);
+    assert(extra_got.buttons==(PW_WINE_PAD_TOUCHPAD|PW_WINE_PAD_SHARE) && extra_got.touching==1);
+    assert(extra_got.touch_x==1919 && extra_got.touch_y==1079);
+    extra=(PwWinePadExtra){PW_WINE_PAD_SHARE,0,5000,2000};
+    pw_wine_set_pad_extra(&extra);pw_wine_pad_extra(&extra_got);
+    assert(extra_got.buttons==PW_WINE_PAD_SHARE && !extra_got.touching);
+    assert(extra_got.touch_x==1919 && extra_got.touch_y==1079);
+    assert(pw_wine_pad(&got) && got.packet==9);
+    assert(pw_wine_pad_changes()==3 && read(fd,drain,1)==-1);
+    pw_wine_set_pad_extra(NULL);pw_wine_pad_extra(&extra_got);
+    assert(!extra_got.buttons && !extra_got.touching && !extra_got.touch_x && !extra_got.touch_y);
+
     /* Rumble: reported once per change, clamped to 16 bits. */
     uint32_t left=1,right=1;
     assert(!pw_wine_rumble(&left,&right) && left==0 && right==0);
@@ -380,6 +400,19 @@ int main(void)
         changes=pw_wine_pad_changes();
         pw_wine_pad_notify();
         assert(pw_wine_pad_changes()==changes+1 && read(fd,wake_drain,sizeof(wake_drain))==1);
+    }
+    /* Each controller has its own extras, and an index past the last reads none. */
+    {
+        PwWinePadExtra two={PW_WINE_PAD_SHARE,1,10,20},got_extra;
+        pw_wine_set_pad_extra_at(2,&two);
+        pw_wine_pad_extra_at(2,&got_extra);
+        assert(got_extra.buttons==PW_WINE_PAD_SHARE && got_extra.touching==1 && got_extra.touch_x==10);
+        pw_wine_pad_extra_at(1,&got_extra);
+        assert(!got_extra.buttons && !got_extra.touching);
+        pw_wine_set_pad_extra_at(PW_WINE_PADS,&two);
+        pw_wine_pad_extra_at(PW_WINE_PADS,&got_extra);
+        assert(!got_extra.buttons);
+        pw_wine_set_pad_extra_at(2,NULL);
     }
     pw_wine_set_rumble_at(3,500,600);
     assert(!pw_wine_rumble(&left,&right) && !pw_wine_rumble_at(1,&left,&right));

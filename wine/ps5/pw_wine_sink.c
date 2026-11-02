@@ -18,6 +18,7 @@ static PwWineSinkStats stats;
 static pthread_once_t wake_once=PTHREAD_ONCE_INIT;
 static int wake[2]={-1,-1};
 static PwWinePad pad_state[PW_WINE_PADS];
+static PwWinePadExtra pad_extra[PW_WINE_PADS];
 static uint32_t pad_changes;
 static uint32_t rumble_left[PW_WINE_PADS],rumble_right[PW_WINE_PADS],rumble_changed[PW_WINE_PADS];
 static uint32_t pads_wanted;
@@ -219,6 +220,30 @@ int pw_wine_pad_at(uint32_t index,PwWinePad *pad)
     return connected;
 }
 int pw_wine_pad(PwWinePad *pad){return pw_wine_pad_at(0,pad);}
+void pw_wine_set_pad_extra_at(uint32_t index,const PwWinePadExtra *extra)
+{
+    PwWinePadExtra next={0};
+    if(index>=PW_WINE_PADS)return;
+    if(extra) {
+        next.buttons=extra->buttons&(PW_WINE_PAD_TOUCHPAD|PW_WINE_PAD_SHARE);
+        next.touching=extra->touching!=0;
+        next.touch_x=extra->touch_x<PW_WINE_PAD_TOUCH_WIDTH?extra->touch_x:PW_WINE_PAD_TOUCH_WIDTH-1;
+        next.touch_y=extra->touch_y<PW_WINE_PAD_TOUCH_HEIGHT?extra->touch_y:PW_WINE_PAD_TOUCH_HEIGHT-1;
+    }
+    pthread_mutex_lock(&lock);
+    pad_extra[index]=next;
+    pthread_mutex_unlock(&lock);
+}
+void pw_wine_set_pad_extra(const PwWinePadExtra *extra){pw_wine_set_pad_extra_at(0,extra);}
+void pw_wine_pad_extra_at(uint32_t index,PwWinePadExtra *extra)
+{
+    if(!extra)return;
+    if(index>=PW_WINE_PADS){memset(extra,0,sizeof(*extra));return;}
+    pthread_mutex_lock(&lock);
+    *extra=pad_extra[index];
+    pthread_mutex_unlock(&lock);
+}
+void pw_wine_pad_extra(PwWinePadExtra *extra){pw_wine_pad_extra_at(0,extra);}
 void pw_wine_set_rumble_at(uint32_t index,uint32_t left,uint32_t right)
 {
     if(index>=PW_WINE_PADS)return;

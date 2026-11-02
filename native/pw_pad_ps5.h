@@ -6,8 +6,8 @@
 
 enum { PW_PAD_PS5_BATCH=64,PW_PAD_PS5_USERS=4,PW_PAD_PLAYERS=PW_PAD_PS5_USERS-1 };
 /* The touchpad's click, and the x that splits it in halves: touches report
- * x from 0 to 1919 across the pad. */
-enum { PW_PAD_PS5_TOUCHPAD=0x100000,PW_PAD_PS5_TOUCH_MIDDLE=960 };
+ * x from 0 to 1919 across the pad. Create is the button left of it. */
+enum { PW_PAD_PS5_TOUCHPAD=0x100000,PW_PAD_PS5_TOUCH_MIDDLE=960,PW_PAD_PS5_CREATE=0x1 };
 enum { PW_PAD_PS5_TOUCH_FROM_NONE,PW_PAD_PS5_TOUCH_FROM_CLICK,PW_PAD_PS5_TOUCH_FROM_EARLIER };
 typedef struct PwPadPs5Stick { uint8_t x,y; } PwPadPs5Stick;
 typedef struct PwPadPs5Touch { uint16_t x,y;uint8_t finger,reserved[3]; } PwPadPs5Touch;

@@ -36,8 +36,9 @@ static void test_graphics_env(void)
             p.runtime.cpu = PW_GAME_CPU_NATIVE; /* worst-case explicit override */
             size_t count = pw_game_graphics_env(&p, env);
             assert(count <= PW_GAME_GRAPHICS_ENV_MAX);
-            /* Fixed6, desktop/override/XInput3, graphics, display, runtime, clock and CPU. */
-            assert(6 + 3 + count + PW_GAME_DISPLAY_ENV_MAX + pw_game_cpu_env(&p, cpu) +
+            /* Fixed 7; desktop, overrides, raw input, HID drivers and pad identity 5; graphics, display, runtime,
+             * clock and CPU. */
+            assert(7 + 5 + count + PW_GAME_DISPLAY_ENV_MAX + pw_game_cpu_env(&p, cpu) +
                    pw_game_runtime_env(&p.runtime, runtime) + PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX +
                    PW_GAME_ENVIRONMENT_MAX <= PW_WINE_START_MAX_ENV);
             /* refresh and opengl_thread are not graphics variables */
@@ -185,6 +186,10 @@ static void test_profile(void)
 
     assert(parse(APP "[input]\nmode = xinput\n[display]\nscaling = stretch\n", &p) == PW_OK);
     assert(p.input.mode == PW_GAME_INPUT_XINPUT && p.display.scaling == PW_GAME_SCALING_STRETCH);
+    /* playstation: the controller is a DualShock 4 on the game's HID bus */
+    assert(parse(APP "[input]\nmode = playstation\nrumble = 30\n", &p) == PW_OK);
+    assert(p.input.mode == PW_GAME_INPUT_PLAYSTATION && p.input.rumble == 30);
+    assert(parse(APP "[input]\nmode = PlayStation\n", &p) == PW_OK && p.input.mode == PW_GAME_INPUT_PLAYSTATION);
     assert(p.display.view == PW_GAME_VIEW_WINDOW && p.display.show_fps == 1);
     assert(parse(APP "[display]\nview = desktop\n", &p) == PW_OK && p.display.view == PW_GAME_VIEW_DESKTOP);
     /* show_fps: the backend's frame-rate counter, on unless turned off */
@@ -446,6 +451,8 @@ static void test_refusals(void)
         APP "[display]\nview = window\nview = window\n",
         APP "[input]\nmode = gamepad\n",
         APP "[input]\nmode = keyboard\nmode = keyboard\n",
+        APP "[input]\nmode = playstation\nmode = xinput\n",
+        APP "[input]\nmode = dualshock4\n",
         APP "[input]\nmouse = both_sticks\n",
         APP "[input]\nmouse = none\nmouse = none\n",
         APP "[input]\nmouse_speed = 0\n",
@@ -582,6 +589,11 @@ static void test_default_mode(void)
     pw_game_input_overlay(&input, &p.input);
     pw_game_input_default_mode(&input);
     assert(input.mode == PW_GAME_INPUT_KEYBOARD);
+    assert(parse(APP "[input]\nmode = playstation\n", &p) == PW_OK);
+    pw_game_input_init(&input);
+    pw_game_input_overlay(&input, &p.input);
+    pw_game_input_default_mode(&input);
+    assert(input.mode == PW_GAME_INPUT_PLAYSTATION);
 
     /* A preset's bindings count too. */
     pw_game_input_init(&input);
@@ -706,7 +718,7 @@ static void test_debug_env(void)
     }
     /* The title's environment has room for every profile variable at once. */
     assert(PW_GAME_DEBUG_ENV_MAX == 5);
-    assert(7 + 3 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_DISPLAY_ENV_MAX + PW_GAME_RUNTIME_ENV_MAX +
+    assert(7 + 5 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_DISPLAY_ENV_MAX + PW_GAME_RUNTIME_ENV_MAX +
            PW_GAME_VERSION_ENV_MAX + PW_GAME_CPU_ENV_MAX + PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX + PW_GAME_ENVIRONMENT_MAX <=
            PW_WINE_START_MAX_ENV);
 }

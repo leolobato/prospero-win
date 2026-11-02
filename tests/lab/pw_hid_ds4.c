@@ -18,13 +18,16 @@
  * - output report 0x05: rumble reaches the title's motors (large left, small
  *   right) only when its flags ask for it;
  * - XInput reports no controller;
- * - Raw Input and DirectInput list the controller.
+ * - Raw Input and DirectInput list the controller;
+ * - a second controller is a second DualShock 4 only while it is connected,
+ *   with its own address, listed after the first, reading and rumbling apart.
  * Exit status 0 only when every check passed. */
 #define DIRECTINPUT_VERSION 0x0800
 #define COBJMACROS
 #include <windows.h>
 #include <initguid.h>
 #include <setupapi.h>
+#include <shlwapi.h>
 #include <hidsdi.h>
 #include <hidpi.h>
 #include <dinput.h>
@@ -305,12 +308,126 @@ static void check_dinput(void)
           "DirectInput lists one DualShock 4",seen);
 }
 
+/* The paths of the DualShock 4s there are now, in the order programs list them. */
+static int list_ds4(char paths[][512],int max)
+{
+    GUID hid;
+    HDEVINFO set;
+    SP_DEVICE_INTERFACE_DATA data;
+    int found=0;
+
+    HidD_GetHidGuid(&hid);
+    set=SetupDiGetClassDevsA(&hid,NULL,NULL,DIGCF_PRESENT|DIGCF_DEVICEINTERFACE);
+    if(set==INVALID_HANDLE_VALUE)return 0;
+    data.cbSize=sizeof(data);
+    for(DWORD i=0;SetupDiEnumDeviceInterfaces(set,NULL,&hid,i,&data);i++) {
+        char buffer[sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_A)+512];
+        SP_DEVICE_INTERFACE_DETAIL_DATA_A *detail=(void *)buffer;
+        detail->cbSize=sizeof(*detail);
+        if(!SetupDiGetDeviceInterfaceDetailA(set,&data,detail,sizeof(buffer),NULL,NULL))continue;
+        if(!StrStrIA(detail->DevicePath,"vid_054c&pid_09cc"))continue;
+        if(found<max)lstrcpynA(paths[found],detail->DevicePath,512);
+        found++;
+    }
+    SetupDiDestroyDeviceInfoList(set);
+    return found;
+}
+
+static int ds4_until(char paths[][512],int want)
+{
+    int found=0;
+    for(int i=0;i<40;i++) {
+        found=list_ds4(paths,4);
+        if(found==want)break;
+        Sleep(200);
+    }
+    return found;
+}
+
+static void set_second(int connected,unsigned buttons)
+{
+    char path[MAX_PATH+8];
+    FILE *f;
+
+    snprintf(path,sizeof(path),"%s.1",pad_path);
+    f=fopen(path,"w");
+    if(!f) { printf("FAIL cannot write %s\n",path); exit(2); }
+    fprintf(f,"%d %u 0 0 0 0 0 0 0 0 0 0\n",connected,buttons);
+    fclose(f);
+}
+
+static void check_second(void)
+{
+    char paths[4][512],seen[256],path[MAX_PATH+8],line[64];
+    BYTE first[7]={0x81},second[7]={0x81},report[64]={0x01},output[32]={0x05,0x01};
+    HANDLE handles[2];
+    int found,cross[2];
+    long left=-1,value,right;
+    FILE *f;
+
+    set_pad(1,0,0,0,0,0,0,0,0,0,0,0);
+    set_second(0,0);
+    found=ds4_until(paths,1);
+    snprintf(seen,sizeof(seen),"%d devices",found);
+    check(found==1,"a controller that is not connected has no DualShock 4",seen);
+    set_second(1,0);
+    found=ds4_until(paths,2);
+    snprintf(seen,sizeof(seen),"%d devices",found);
+    check(found==2,"a connected second controller is a second DualShock 4",seen);
+    if(found!=2)return;
+    for(int i=0;i<2;i++)
+        handles[i]=CreateFileA(paths[i],GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,0,NULL);
+    if(handles[0]==INVALID_HANDLE_VALUE || handles[1]==INVALID_HANDLE_VALUE) {
+        check(0,"both DualShock 4s open","");
+        return;
+    }
+    HidD_GetFeature(handles[0],first,sizeof(first));
+    HidD_GetFeature(handles[1],second,sizeof(second));
+    snprintf(seen,sizeof(seen),"low bytes %02x, %02x",first[1],second[1]);
+    check(first[1]!=second[1] && !memcmp(first+2,second+2,5),"each has its own address",seen);
+    set_second(1,0x1000);   /* A, the second controller's cross */
+    Sleep(400);
+    for(int i=0;i<2;i++) {
+        report[0]=0x01;
+        HidD_GetInputReport(handles[i],report,sizeof(report));
+        cross[i]=(report[5]&0x20)!=0;
+    }
+    snprintf(seen,sizeof(seen),"cross on device 0 %d, device 1 %d",cross[0],cross[1]);
+    check(!cross[0] && cross[1],"the second controller's button is on the second device",seen);
+    snprintf(path,sizeof(path),"%s.1",rumble_path);
+    f=fopen(path,"w");
+    if(f)fclose(f);
+    output[5]=255;
+    HidD_SetOutputReport(handles[1],output,sizeof(output));
+    Sleep(200);
+    f=fopen(path,"r");
+    while(f && fgets(line,sizeof(line),f))
+        if(sscanf(line,"%ld %ld",&value,&right)==2)left=value;
+    if(f)fclose(f);
+    snprintf(seen,sizeof(seen),"left motor on controller 1: %ld",left);
+    check(left>60000,"its output report reaches its own rumble",seen);
+    CloseHandle(handles[0]);
+    CloseHandle(handles[1]);
+    set_second(0,0);
+    found=ds4_until(paths,1);
+    snprintf(seen,sizeof(seen),"%d devices",found);
+    check(found==1,"the DualShock 4 goes with its controller",seen);
+}
+
 int main(int argc,char **argv)
 {
     if(argc<3) { printf("usage: pw_hid_ds4 PADFILE RUMBLEFILE\n"); return 2; }
     pad_path=argv[1];
     rumble_path=argv[2];
     setvbuf(stdout,NULL,_IONBF,0);
+    /* A hosted game that looks once, with a second controller there from the start. */
+    if(argc>3 && !strcmp(argv[3],"at-start")) {
+        char paths[4][512],seen[64];
+        int found=list_ds4(paths,4);
+        snprintf(seen,sizeof(seen),"%d devices",found);
+        check(found==2,"the first look finds a controller there from the start",seen);
+        return failures?1:0;
+    }
     set_pad(1,0,0,0,0,0,0,0,0,0,0,0);
     find_device();
     if(device!=INVALID_HANDLE_VALUE) {
@@ -322,6 +439,7 @@ int main(int argc,char **argv)
     check_xinput();
     check_rawinput();
     check_dinput();
+    check_second();
     printf("%s\n",failures?"FAILED":"PASSED");
     return failures?1:0;
 }

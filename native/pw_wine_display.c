@@ -111,7 +111,8 @@ static int16_t pad_axis(uint8_t raw, int up)
     return (int16_t)(d * (d < 0 ? 32768 : 32767) / reach);
 }
 
-int pw_wine_game_pad(const PwPadPs5 *pad, PwWinePad *out)
+/* The gamepad; with split, a touchpad click is Back or Guide by its half. */
+static int game_pad(const PwPadPs5 *pad, PwWinePad *out, int split)
 {
     if (!out) return 0;
     memset(out, 0, sizeof(*out));
@@ -127,7 +128,8 @@ int pw_wine_game_pad(const PwPadPs5 *pad, PwWinePad *out)
         if (pad->core.previous_buttons & pad_buttons[i].dualsense) out->buttons |= pad_buttons[i].xinput;
     /* The touchpad is two buttons: Back on its left half, so Select needs
      * no Create (the system's capture button), Guide on its right. */
-    if (pad->core.previous_buttons & PW_PAD_PS5_TOUCHPAD) out->buttons |= pad->touch_left ? 0x0020u : 0x0400u;
+    if (split && (pad->core.previous_buttons & PW_PAD_PS5_TOUCHPAD))
+        out->buttons |= pad->touch_left ? 0x0020u : 0x0400u;
     out->left_trigger = pad->l2;
     out->right_trigger = pad->r2;
     out->thumb_lx = pad_axis(pad->left_stick.x, 0);
@@ -142,6 +144,35 @@ uint8_t pw_wine_rumble_level(uint32_t speed, uint32_t percent)
     if (speed > 0xffffu) speed = 0xffffu;
     if (percent > PW_GAME_RUMBLE_MAX) percent = PW_GAME_RUMBLE_MAX;
     return (uint8_t)((speed >> 8) * percent / PW_GAME_RUMBLE_MAX);
+}
+
+int pw_wine_game_pad(const PwPadPs5 *pad, PwWinePad *out)
+{
+    return game_pad(pad, out, 1);
+}
+
+int pw_wine_game_pad_playstation(const PwPadPs5 *pad, PwWinePad *out, PwWinePadExtra *extra)
+{
+    int connected;
+
+    if (!out || !extra) return 0;
+    memset(extra, 0, sizeof(*extra));
+    connected = game_pad(pad, out, 0);
+    if (!connected || pad->intercepted) return connected;
+    if (pad->core.previous_buttons & PW_PAD_PS5_TOUCHPAD) extra->buttons |= PW_WINE_PAD_TOUCHPAD;
+    if (pad->core.previous_buttons & PW_PAD_PS5_CREATE) extra->buttons |= PW_WINE_PAD_SHARE;
+    /* The finger where it is; a click's sample can come without one, and
+     * then the finger stays where the click began. */
+    if (pad->finger_down) {
+        extra->touching = 1;
+        extra->touch_x = pad->finger_x;
+        extra->touch_y = pad->finger_y;
+    } else if (pad->touch_held && pad->touch_from != PW_PAD_PS5_TOUCH_FROM_NONE) {
+        extra->touching = 1;
+        extra->touch_x = pad->touch_x;
+        extra->touch_y = pad->touch_y;
+    }
+    return 1;
 }
 
 int pw_wine_script_pad(PwWinePad *pad, int connected, const PwScriptPad *script, int scripted)

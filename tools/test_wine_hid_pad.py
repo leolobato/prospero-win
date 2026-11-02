@@ -40,7 +40,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
 
     name = 'pw_hid_ds4' if args.dualshock4 else 'pw_hid_pad'
-    libraries = (['-lsetupapi', '-lhid', '-lxinput', '-ldinput8', '-ldxguid'] if args.dualshock4 else
+    libraries = (['-lsetupapi', '-lshlwapi', '-lhid', '-lxinput', '-ldinput8', '-ldxguid'] if args.dualshock4 else
                  ['-ldinput8', '-ldxguid', '-lwinmm', '-lruntimeobject'])
     programs = {'pe32': ('i686-w64-mingw32-gcc', output / f'{name}.exe')}
     if args.hosted:

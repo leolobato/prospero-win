@@ -69,6 +69,19 @@ typedef struct PwWinePad {
     int16_t thumb_lx,thumb_ly,thumb_rx,thumb_ry;
 } PwWinePad;
 
+/* What a PlayStation controller has beside an XInput gamepad: the
+ * touchpad's click, Share (the DualSense's Create) and the first finger on
+ * the touchpad. The title keeps it next to the gamepad when the game sees
+ * its controller as a DualShock 4 (WINE_PS5_PAD=dualshock4); winebus's PS5
+ * bus then reads both. */
+enum { PW_WINE_PAD_TOUCHPAD=0x1,PW_WINE_PAD_SHARE=0x2 };
+enum { PW_WINE_PAD_TOUCH_WIDTH=1920,PW_WINE_PAD_TOUCH_HEIGHT=1080 };
+typedef struct PwWinePadExtra {
+    uint32_t buttons;       /* PW_WINE_PAD_TOUCHPAD, PW_WINE_PAD_SHARE */
+    uint32_t touching;      /* 1 while a finger is on the touchpad */
+    uint16_t touch_x,touch_y;   /* that finger, 0..PW_WINE_PAD_TOUCH_WIDTH/HEIGHT-1 */
+} PwWinePadExtra;
+
 /* Title side. */
 void pw_wine_set_present_sink(PwWinePresentSink sink,void *context);
 void pw_wine_set_audio_sink(PwWineAudioSink sink,void *context);
@@ -79,6 +92,10 @@ void pw_wine_sink_stats(PwWineSinkStats *stats);
 /* The gamepad's newest state, or NULL when it is disconnected. The sink
  * numbers the packets; the pad's own packet field is ignored. */
 void pw_wine_set_pad(const PwWinePad *pad);
+/* The gamepad's extras, or NULL for none (all released, no finger).
+ * Coordinates are clamped. */
+void pw_wine_set_pad_extra(const PwWinePadExtra *extra);
+void pw_wine_set_pad_extra_at(uint32_t index,const PwWinePadExtra *extra);
 /* 1 and the newest motor speeds (0..65535) when they changed since the
  * last call, else 0. */
 int pw_wine_rumble(uint32_t *left,uint32_t *right);
@@ -107,6 +124,9 @@ int pw_wine_next_input(PwWineInput *event);
 int pw_wine_input_fd(void);
 /* 1 and the gamepad's state while one is connected, else 0. */
 int pw_wine_pad(PwWinePad *pad);
+/* The newest extras: zeros until the title sets them. */
+void pw_wine_pad_extra(PwWinePadExtra *extra);
+void pw_wine_pad_extra_at(uint32_t index,PwWinePadExtra *extra);
 /* The newest menu snapshot; a closed menu reads as zeros apart from
  * version and sequence. */
 void pw_wine_menu(struct pw_title_menu *menu);

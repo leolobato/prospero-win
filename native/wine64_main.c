@@ -316,6 +316,13 @@ enum { PW_WINE64_MAX_FRAME = 1920 * 1200 * 4, PW_WINE64_TICK_US = 16000,
         * closing takes a hold no game asks for. */
        PW_WINE64_CLOSE_HOLD_S = 3 };
 
+/* The modes in which the DualSense is also the game's controller: an Xbox
+ * one (xinput) or a DualShock 4 (playstation). */
+static int is_pad_mode(PwGameInputMode mode)
+{
+    return mode == PW_GAME_INPUT_XINPUT || mode == PW_GAME_INPUT_PLAYSTATION;
+}
+
 enum { PAD_CREATE = 0x1u, PAD_OPTIONS = 0x8u, PAD_UP = 0x10u, PAD_RIGHT = 0x20u,
        PAD_DOWN = 0x40u, PAD_LEFT = 0x80u, PAD_L1 = 0x400u, PAD_R1 = 0x800u,
        PAD_CROSS = 0x4000u, PAD_SQUARE = 0x8000u, PAD_CLOSE = PAD_OPTIONS | PAD_CREATE };
@@ -1515,7 +1522,7 @@ int main(int argc, char **argv)
     static char prefix[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY], desktop[24], view[8] = "window";
     static char radv_cache[PW_WINE_LIBRARY_PATH + 16];
     enum { WINE64_FIXED_ENV_COUNT = 7,
-           WINE64_PROFILE_ENV_CAPACITY = 4 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_DISPLAY_ENV_MAX +
+           WINE64_PROFILE_ENV_CAPACITY = 5 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_DISPLAY_ENV_MAX +
                                          PW_GAME_RUNTIME_ENV_MAX + PW_GAME_VERSION_ENV_MAX + PW_GAME_CPU_ENV_MAX +
                                          PW_GAME_CLOCK_ENV_MAX +
                                          PW_GAME_DEBUG_ENV_MAX + PW_GAME_ENVIRONMENT_MAX };
@@ -1535,7 +1542,8 @@ int main(int argc, char **argv)
          * driver keeps the first value, so this must be set before it
          * starts; a profile's [debug] env line still overrides it. */
         { "MESA_SHADER_CACHE_DIR", radv_cache },
-        { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, /* profile-specific environment */
+        { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL },
+        /* profile-specific environment */
     };
     _Static_assert(sizeof(extra) / sizeof(extra[0]) ==
                    WINE64_FIXED_ENV_COUNT + WINE64_PROFILE_ENV_CAPACITY,
@@ -1564,7 +1572,7 @@ int main(int argc, char **argv)
     static PwGameInput other_input;     /* [launcher]: the preset not in use */
     static PwInputSwitch input_switch;
     const char *input_label = "", *other_label = "";
-    int has_other_input = 0, needs_xinput = 0;
+    int has_other_input = 0, needs_xinput = 0, needs_playstation = 0;
     /* [input] player2: a second signed-in user's DualSense as more keys. */
     static PwPadPs5 pad2;
     static PwGameInput game_input2;
@@ -1575,6 +1583,9 @@ int main(int argc, char **argv)
     PwWinePointer pointer = { 0, 0 };
     int (*post_input)(const PwWineInput *) = NULL;
     void (*set_pad)(const PwWinePad *) = NULL;
+    /* playstation mode: the touchpad and Share, beside the gamepad */
+    void (*set_pad_extra)(const PwWinePadExtra *) = NULL;
+    void (*set_pad_extra_at)(uint32_t, const PwWinePadExtra *) = NULL;
     int (*rumble)(uint32_t *, uint32_t *) = NULL;
     /* xinput mode without a player2 preset: the other signed-in users'
      * DualSenses are XInput controllers 1..3 (patch 0471), once the game
@@ -1786,14 +1797,16 @@ int main(int argc, char **argv)
             pw_game_input_overlay(&game_input, &game->input);
             pw_game_input_default_mode(&game_input);
             input_status = PW_OK;
-            needs_xinput = game_input.mode == PW_GAME_INPUT_XINPUT;
+            needs_xinput = is_pad_mode(game_input.mode);
+            needs_playstation = game_input.mode == PW_GAME_INPUT_PLAYSTATION;
             /* Starting through a launcher: its preset until it starts the game.
              * Either may be swapped in later, so a controller either one needs
              * is set up from the start, and stays idle under the other. */
             if (game->has_launcher) {
                 other_input = game->launcher_input;
                 pw_game_input_default_mode(&other_input);
-                needs_xinput |= other_input.mode == PW_GAME_INPUT_XINPUT;
+                needs_xinput |= is_pad_mode(other_input.mode);
+                needs_playstation |= other_input.mode == PW_GAME_INPUT_PLAYSTATION;
                 has_other_input = 1;
                 input_label = game->game_label;
                 other_label = game->launcher_label;
@@ -1810,7 +1823,8 @@ int main(int argc, char **argv)
             }
         } else {
             input_status = pw_wine_library_input(game, library_root, &game_input);
-            needs_xinput = game_input.mode == PW_GAME_INPUT_XINPUT;
+            needs_xinput = is_pad_mode(game_input.mode);
+            needs_playstation = game_input.mode == PW_GAME_INPUT_PLAYSTATION;
         }
         int input2_status = pw_wine_library_player2_input(game, library_root, &game_input2);
         player2 = input2_status == PW_OK;
@@ -1869,12 +1883,20 @@ int main(int argc, char **argv)
         }
         /* xinput mode: SDL2 games (Half-Life) look for controllers through
          * raw input first, which Wine on the PS5 has none of, and then skip
-         * XInput; this hint makes them read controller 0 through XInput. */
+         * XInput; this hint makes them read controller 0 through XInput.
+         * In playstation mode it keeps them on HIDAPI, which finds the
+         * DualShock 4. */
         if (needs_xinput)
             extra[config.extra_env_count++] = (PwWineStartEnv){ "SDL_JOYSTICK_RAWINPUT", "0" };
-        /* xinput mode: the game also hosts the controller's HID drivers
-         * (patches 0951-0953), so DirectInput, winmm and
-         * Windows.Gaming.Input find the DualSense as an Xbox 360 controller. */
+        /* playstation mode: winebus makes the controller a DualShock 4
+         * (patch 0990) and xinput reports none (patch 0991), as on Windows
+         * with a DualShock 4 and no Xbox controller. */
+        if (needs_playstation)
+            extra[config.extra_env_count++] = (PwWineStartEnv){ "WINE_PS5_PAD", "dualshock4" };
+        /* xinput and playstation modes: the game also hosts the
+         * controller's HID drivers (patches 0951-0953), so DirectInput,
+         * winmm and Windows.Gaming.Input find the DualSense, as an Xbox 360
+         * controller or a DualShock 4. */
         if (needs_xinput) {
             static const char *const drivers[] = { "hidclass.sys", "hidparse.sys", "winebus.sys", "winehid.sys",
                                                    "winexinput.sys" };
@@ -1999,7 +2021,8 @@ int main(int argc, char **argv)
                    scaling, view, game->display.show_fps, game->display.framegen,
                    pw_result_name(input_status),
                    game->input.preset[0] ? game->input.preset : "-",
-                   game_input.mode == PW_GAME_INPUT_XINPUT ? "xinput" : "keyboard", (int)game_input.mouse,
+                   game_input.mode == PW_GAME_INPUT_XINPUT ? "xinput" :
+                   game_input.mode == PW_GAME_INPUT_PLAYSTATION ? "playstation" : "keyboard", (int)game_input.mouse,
                    (unsigned)game_input.rumble, effective_dll_overrides[0] ? effective_dll_overrides : "-");
         /* What Wine gives the game as NumberOfProcessors. */
         PS5LOG_LOG("PW_WINE64 cpus online=%ld", sysconf(_SC_NPROCESSORS_ONLN));
@@ -2058,7 +2081,9 @@ int main(int argc, char **argv)
         post_input = (int (*)(const PwWineInput *))
             (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_post_input");
         /* xinput mode: the DualSense is also the game's XInput controller
-         * 0, read by Wine's xinput (patch 0470); bindings still apply. */
+         * 0, read by Wine's xinput (patch 0470); bindings still apply. In
+         * playstation mode winebus reads the same state and the extras
+         * (patch 0990), and its rumble comes back the same way. */
         if (needs_xinput) {
             set_pad = (void (*)(const PwWinePad *))
                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_pad");
@@ -2076,6 +2101,13 @@ int main(int argc, char **argv)
                 /* Without the controllers the game asked for, no players. */
                 if (!pads_wanted) set_pad_at = NULL;
             }
+        }
+        if (needs_playstation) {
+            set_pad_extra = (void (*)(const PwWinePadExtra *))
+                (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_pad_extra");
+            set_pad_extra_at = (void (*)(uint32_t, const PwWinePadExtra *))
+                (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_pad_extra_at");
+            PS5LOG_LOG("PW_WINE64 pad identity=dualshock4 extra=%d", set_pad_extra != NULL);
         }
         if (game && game->display.menu) {
             set_menu = (void (*)(const struct pw_title_menu *))
@@ -2106,7 +2138,11 @@ int main(int argc, char **argv)
                     PwWinePad state;
 
                     if (!player->opened || pw_pad_ps5_read(player) != PW_OK) continue;
-                    if (pw_wine_game_pad(player, &state)) {
+                    PwWinePadExtra extra_state;
+
+                    if (set_pad_extra_at ? pw_wine_game_pad_playstation(player, &state, &extra_state) :
+                        pw_wine_game_pad(player, &state)) {
+                        if (set_pad_extra_at) set_pad_extra_at(i + 1, &extra_state);
                         set_pad_at(i + 1, &state);
                         players_fed[i] = 1;
                     } else {
@@ -2374,6 +2410,10 @@ int main(int argc, char **argv)
                 game_pad.left_stick.x = game_pad.left_stick.y = 0x80;
                 game_pad.right_stick.x = game_pad.right_stick.y = 0x80;
                 game_pad.l2 = game_pad.r2 = 0;
+                /* and no finger on a DualShock 4's touchpad */
+                game_pad.finger_down = game_pad.finger_count = 0;
+                game_pad.touch_held = 0;
+                game_pad.touch_from = PW_PAD_PS5_TOUCH_FROM_NONE;
             }
             seen = &game_pad;
         }
@@ -2382,18 +2422,25 @@ int main(int argc, char **argv)
          * stays down until its release. */
         if (set_pad) {
             PwWinePad state;
-            int connected = pw_wine_game_pad(pad_read ? seen : NULL, &state), scripted = 0;
+            PwWinePadExtra extra_state;
+            int connected = set_pad_extra ?
+                            pw_wine_game_pad_playstation(pad_read ? seen : NULL, &state, &extra_state) :
+                            pw_wine_game_pad(pad_read ? seen : NULL, &state), scripted = 0;
             /* The other preset's controller, idle under this one. It stays
              * connected: a game may pause when a controller goes. */
-            if (connected && game_input.mode != PW_GAME_INPUT_XINPUT) {
+            if (connected && !is_pad_mode(game_input.mode)) {
                 memset(&state, 0, sizeof(state));
                 state.connected = 1;
+                memset(&extra_state, 0, sizeof(extra_state));
             }
 #if PW_WINE64_SCRIPT
             scripted = script_input.pad_events != 0;
             connected = pw_wine_script_pad(&state, connected, &script_pad, scripted);
 #endif
-            if (pad_read || scripted) set_pad(connected ? &state : NULL);
+            if (pad_read || scripted) {
+                if (set_pad_extra) set_pad_extra(connected ? &extra_state : NULL);
+                set_pad(connected ? &state : NULL);
+            }
         }
         if (pad_read && switch_inputs) {
             /* What the old preset holds down comes up, as does what was let go
@@ -2414,14 +2461,14 @@ int main(int argc, char **argv)
             input_switch_notify(input_label);
             game_pad.core.released_edges = 0;
         }
-        /* XInput controllers 1..3: the other signed-in users' DualSenses,
-         * each with its own rumble, once the game has asked xinput for one
+        /* Controllers 1..3, XInput or DualShock 4s: the other signed-in users'
+         * DualSenses, each with its own rumble, once the game has asked xinput for one
          * of them; the sink is asked once a second until then. A user who
          * signs in during the game is found within two seconds. Only an
          * open slot is fed; one that closes reads as disconnected once.
          * A read that fails keeps the slot as it was, as controller 0 does.
          * While the menu or the keyboard has the first pad they read idle,
-         * and under a preset that is not xinput (a launcher's) they stay
+         * and under a preset that is no controller (a launcher's) they stay
          * connected and idle, as controller 0 does. Rumble is scaled by the
          * profile's [input] rumble. */
         int players_quiet = __atomic_load_n(&players_stopped, __ATOMIC_RELAXED);
@@ -2452,16 +2499,21 @@ int main(int argc, char **argv)
                 PwWinePad state;
                 uint32_t left, right;
                 if (!player->opened) {
+                    if (players_fed[i] && set_pad_extra_at) set_pad_extra_at(i + 1, NULL);
                     if (players_fed[i]) set_pad_at(i + 1, NULL);
                     players_fed[i] = 0;
                     continue;
                 }
                 if (pw_pad_ps5_read(player) == PW_OK) {
-                    int connected = pw_wine_game_pad(player, &state);
-                    if (connected && (others_idle || game_input.mode != PW_GAME_INPUT_XINPUT)) {
+                    PwWinePadExtra extra_state;
+                    int connected = set_pad_extra_at ? pw_wine_game_pad_playstation(player, &state, &extra_state) :
+                                    pw_wine_game_pad(player, &state);
+                    if (connected && (others_idle || !is_pad_mode(game_input.mode))) {
                         memset(&state, 0, sizeof(state));
                         state.connected = 1;
+                        memset(&extra_state, 0, sizeof(extra_state));
                     }
+                    if (set_pad_extra_at) set_pad_extra_at(i + 1, connected ? &extra_state : NULL);
                     set_pad_at(i + 1, connected ? &state : NULL);
                     players_fed[i] = 1;
                 }

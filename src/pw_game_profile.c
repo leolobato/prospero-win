@@ -131,6 +131,7 @@ static int input_field(PwGameInput *input, const uint8_t *key, size_t key_length
         if (input->set & SET_MODE) return PW_ERR_MALFORMED;
         if (is(v, n, "keyboard")) input->mode = PW_GAME_INPUT_KEYBOARD;
         else if (is(v, n, "xinput")) input->mode = PW_GAME_INPUT_XINPUT;
+        else if (is(v, n, "playstation")) input->mode = PW_GAME_INPUT_PLAYSTATION;
         else return PW_ERR_UNSUPPORTED;
         input->set |= SET_MODE;
         return PW_OK;

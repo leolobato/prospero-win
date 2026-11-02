@@ -255,6 +255,69 @@ static void test_pad(void)
     assert(xinput.thumb_lx == 64 * 32767 / 127 && xinput.thumb_ly == 64 * 32767 / 128);
 }
 
+/* The DualSense as a PlayStation controller: the gamepad without the
+ * touchpad's Back/Guide halves, and its extras beside it. */
+static void test_game_pad_playstation(void)
+{
+    PwPadPs5 pad;
+    PwWinePad xinput;
+    PwWinePadExtra extra;
+
+    memset(&pad, 0, sizeof(pad));
+    pad.left_stick = pad.right_stick = (PwPadPs5Stick){ 0x80, 0x80 };
+    memset(&extra, 0x5a, sizeof(extra));
+    assert(pw_wine_game_pad_playstation(&pad, &xinput, &extra) == 0 && !xinput.connected);
+    assert(!extra.buttons && !extra.touching && !extra.touch_x && !extra.touch_y);
+    assert(pw_wine_game_pad_playstation(NULL, &xinput, &extra) == 0 && !extra.buttons);
+    assert(pw_wine_game_pad_playstation(&pad, NULL, &extra) == 0);
+    assert(pw_wine_game_pad_playstation(&pad, &xinput, NULL) == 0);
+
+    /* A click is the touchpad button wherever it began, Create is Share
+     * (and still XInput's Back, which the bus ignores). */
+    pad.core.connected = 1;
+    pad.core.previous_buttons = 0x100000u;
+    for (int left = 0; left < 2; left++) {
+        pad.touch_left = (unsigned)left;
+        assert(pw_wine_game_pad_playstation(&pad, &xinput, &extra) == 1 && xinput.connected);
+        assert(!xinput.buttons && extra.buttons == PW_WINE_PAD_TOUCHPAD);
+    }
+    pad.core.previous_buttons = 0x1u | 0x4000u;
+    assert(pw_wine_game_pad_playstation(&pad, &xinput, &extra) == 1);
+    assert(xinput.buttons == (0x0020u | 0x1000u) && extra.buttons == PW_WINE_PAD_SHARE);
+    pad.core.previous_buttons = 0x1u | 0x100000u;
+    assert(pw_wine_game_pad_playstation(&pad, &xinput, &extra) == 1);
+    assert(xinput.buttons == 0x0020u && extra.buttons == (PW_WINE_PAD_SHARE | PW_WINE_PAD_TOUCHPAD));
+
+    /* The finger where it is; during a held click without one, where the
+     * click began; with neither, none. */
+    pad.core.previous_buttons = 0;
+    pad.finger_down = 1;
+    pad.finger_count = 2;
+    pad.finger_x = 1900;
+    pad.finger_y = 1070;
+    assert(pw_wine_game_pad_playstation(&pad, &xinput, &extra) == 1);
+    assert(!extra.buttons && extra.touching == 1 && extra.touch_x == 1900 && extra.touch_y == 1070);
+    pad.finger_down = 0;
+    assert(pw_wine_game_pad_playstation(&pad, &xinput, &extra) == 1 && !extra.touching);
+    pad.core.previous_buttons = 0x100000u;
+    pad.touch_held = 1;
+    pad.touch_from = PW_PAD_PS5_TOUCH_FROM_EARLIER;
+    pad.touch_x = 12;
+    pad.touch_y = 34;
+    assert(pw_wine_game_pad_playstation(&pad, &xinput, &extra) == 1);
+    assert(extra.touching == 1 && extra.touch_x == 12 && extra.touch_y == 34);
+    pad.touch_from = PW_PAD_PS5_TOUCH_FROM_NONE;
+    assert(pw_wine_game_pad_playstation(&pad, &xinput, &extra) == 1);
+    assert(extra.buttons == PW_WINE_PAD_TOUCHPAD && !extra.touching);
+
+    /* While the system has the pad: connected, neutral extras too. */
+    pad.intercepted = 1;
+    pad.finger_down = 1;
+    pad.core.previous_buttons = 0x100000u | 0x1u;
+    assert(pw_wine_game_pad_playstation(&pad, &xinput, &extra) == 1 && xinput.connected && !xinput.buttons);
+    assert(!extra.buttons && !extra.touching);
+}
+
 /* A script build's controller added to the DualSense's. */
 static void test_rumble_level(void)
 {
@@ -349,6 +412,7 @@ int main(void)
     test_pointer_fraction();
     test_pad();
     test_rumble_level();
+    test_game_pad_playstation();
     test_script_pad();
     printf("wine display passed: frame box copy, newest frame, refusals, concurrent put/take, "
            "profile bindings to keys and mouse buttons, stick pointer, resized frames, "

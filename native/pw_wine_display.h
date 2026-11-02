@@ -66,6 +66,14 @@ int pw_wine_game_pad(const PwPadPs5 *pad, PwWinePad *out);
  * percent of the game's vibration ([input] rumble). */
 uint8_t pw_wine_rumble_level(uint32_t speed, uint32_t percent);
 
+/* The DualSense as a PlayStation controller (a DualShock 4 on the game's
+ * HID bus): the gamepad as pw_wine_game_pad has it, except that a touchpad
+ * click is no XInput button, and its extras in extra: the click, Create as
+ * Share, and the finger on the touchpad (where it is, or where a held
+ * click began). Both are neutral while the system has the pad or it is
+ * disconnected. Returns as pw_wine_game_pad does. */
+int pw_wine_game_pad_playstation(const PwPadPs5 *pad, PwWinePad *out, PwWinePadExtra *extra);
+
 /* A script build's scripted controller (src/pw_script_input.h) added to
  * the real one in pad, which pw_wine_game_pad filled (connected says
  * whether it is): the scripted buttons join the held ones, and each stick
