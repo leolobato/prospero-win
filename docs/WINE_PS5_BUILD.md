@@ -663,6 +663,21 @@ the title's DualSense instead:
   more always asks, so a game that looks again only on `WM_DEVICECHANGE`
   finds the controller that just connected. `pw_wine_set_pad` and the other
   unnumbered calls are controller 0's.
+- Patch 0966 gives controllers 1..3 HID gamepads as well. While the sink has
+  one connected, winebus's PS5 bus (patch 0951) has a device for it with its
+  own serial number, and removes it when the controller goes, so a game that
+  counts controllers finds only players who are there. hidclass reports its
+  instance IDs as unique, so devices list by serial number and controller 0
+  comes first, which a game's player 1 depends on. The bus reads with
+  `pw_wine_pad_peek`, which notes nothing as asked for: it runs in every game.
+  hidclass sends `IOCTL_HID_ACTIVATE_DEVICE` when a device is first opened,
+  and the bus passes that on with `pw_wine_pads_ask`, so a game that looks
+  through HID asks as one using XInput does. The title also opens users
+  already signed in before Wine starts, with one sign-in list call and no more
+  until a game asks, and says how many are connected in `WINE_PS5_HID_PADS`,
+  so that ntoskrnl's hosted start waits for that many gamepads (still within
+  its timeout), for a game that looks only once. The bus asks the driver to tell the game's windows
+  (`pw_wine_pad_notify`) 0.5 s and 2 s after a device comes or goes.
 - The PRX stage links `xinput1_3.prx`. Its descriptor exports
   `__wine_unix_call_funcs` and `__wine_unix_call_wow64_funcs`, and it
   imports ntdll's `dlsym`, like `wowprospero.prx`.

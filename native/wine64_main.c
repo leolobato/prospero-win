@@ -308,6 +308,9 @@ static char exec_chain_cwd[PW_APP_PATH_CAPACITY];
  * (WINE_PS5_DESKTOP overrides, 1920x1080 for Warcraft III); bigger frames
  * are counted and dropped. */
 enum { PW_WINE64_MAX_FRAME = 1920 * 1200 * 4, PW_WINE64_TICK_US = 16000,
+       /* How long the pads of users signed in at start get to report a first
+        * sample before Wine starts. */
+       PW_WINE64_PLAYERS_SETTLE_TRIES = 10, PW_WINE64_PLAYERS_SETTLE_US = 5000,
        PW_WINE64_TICKS_PER_S = 60, PW_WINE64_CLOSE_WAIT_S = 5, PW_WINE64_LEAVE_WAIT_S = 5,
        /* Options+Create are also Start+Select, which games use together:
         * closing takes a hold no game asks for. */
@@ -1578,6 +1581,7 @@ int main(int argc, char **argv)
      * has asked xinput for one of them. players_fed[i] is set while slot
      * i feeds controller i+1. */
     static uint8_t players_fed[PW_PAD_PLAYERS];
+    static uint32_t player_vibrations[PW_PAD_PLAYERS];
     void (*set_pad_at)(uint32_t, const PwWinePad *) = NULL;
     int (*rumble_at)(uint32_t, uint32_t *, uint32_t *) = NULL;
     uint32_t (*pads_wanted)(void) = NULL;
@@ -2084,6 +2088,43 @@ int main(int argc, char **argv)
             pad_status = pw_pad_ps5_open(&pad, &pad_ops, pad_open_map,
                                          sizeof(pad_open_map) / sizeof(pad_open_map[0]));
         pw_pad_players_init(&players);
+        /* A user already signed in is opened before Wine starts, so that a
+         * game that looks for controllers once at start finds them through
+         * HID (patch 0966) as well as XInput. Alone on the console this is
+         * one sign-in list call, here off the frame thread. The list is not
+         * asked again until the game asks for controllers (players_from): a
+         * single-player game costs nothing on the frame thread. */
+        if (set_pad_at && pad_status == PW_OK) {
+            players_open = pw_pad_players_scan(&players, &pad);
+            PS5LOG_LOG("PW_WINE64 players at_start=%d login_users_us=%u", players_open,
+                       (unsigned)(players.login_ns / 1000u));
+            for (uint32_t wait = 0; players_open && wait < PW_WINE64_PLAYERS_SETTLE_TRIES; wait++) {
+                int waiting = 0;
+
+                for (uint32_t i = 0; i < PW_PAD_PLAYERS; i++) {
+                    PwPadPs5 *player = &players.slot[i];
+                    PwWinePad state;
+
+                    if (!player->opened || pw_pad_ps5_read(player) != PW_OK) continue;
+                    if (pw_wine_game_pad(player, &state)) {
+                        set_pad_at(i + 1, &state);
+                        players_fed[i] = 1;
+                    } else {
+                        waiting = 1;
+                    }
+                }
+                if (!waiting) break;
+                usleep(PW_WINE64_PLAYERS_SETTLE_US);
+            }
+            /* Controller 0's HID gamepad and these: a game that looks once at
+             * start waits for them all (patch 0966). */
+            uint32_t hid_pads = 1;
+            for (uint32_t i = 0; i < PW_PAD_PLAYERS; i++) hid_pads += players_fed[i] != 0;
+            if (hid_pads > 1) {
+                char count[2] = { (char)('0' + hid_pads), 0 };
+                setenv("WINE_PS5_HID_PADS", count, 1);
+            }
+        }
         if (player2 && pad_status == PW_OK)
             pad2_status = pw_pad_ps5_open_other(&pad2, &pad, -1, pad_open_map,
                                                 sizeof(pad_open_map) / sizeof(pad_open_map[0]));
@@ -2397,8 +2438,8 @@ int main(int argc, char **argv)
                 players_from = tick;
             }
         }
-        if (!players_quiet && players_from) {
-            if (tick == players_from || tick % (2 * PW_WINE64_TICKS_PER_S) == 0) {
+        if (!players_quiet && (players_from || players_open)) {
+            if (players_from && (tick == players_from || tick % (2 * PW_WINE64_TICKS_PER_S) == 0)) {
                 int open = pw_pad_players_scan(&players, &pad);
                 if (open != players_open || tick == players_from) PS5LOG_LOG("PW_WINE64 players=%d", open);
                 /* sceUserServiceGetLoginUserIdList ran on this, the frame thread. */
@@ -2424,9 +2465,14 @@ int main(int argc, char **argv)
                     set_pad_at(i + 1, connected ? &state : NULL);
                     players_fed[i] = 1;
                 }
-                if (rumble_at && rumble_at(i + 1, &left, &right) == 1)
-                    (void)pw_pad_ps5_vibrate(player, pw_wine_rumble_level(left, game_input.rumble),
-                                             pw_wine_rumble_level(right, game_input.rumble));
+                if (rumble_at && rumble_at(i + 1, &left, &right) == 1) {
+                    int vibrate = pw_pad_ps5_vibrate(player, pw_wine_rumble_level(left, game_input.rumble),
+                                                     pw_wine_rumble_level(right, game_input.rumble));
+                    if (!player_vibrations[i]++ || vibrate != PW_OK)
+                        PS5LOG_LOG("PW_WINE64 player=%u rumble left=%u right=%u scale=%u status=%s rc=%d trigger_rc=%d",
+                                   (unsigned)(i + 1), (unsigned)left, (unsigned)right, (unsigned)game_input.rumble,
+                                   pw_result_name(vibrate), player->vibration_rc, player->trigger_rc);
+                }
             }
         }
         if (pad_read) {

@@ -243,6 +243,31 @@ int pw_wine_rumble_at(uint32_t index,uint32_t *left,uint32_t *right)
     return changed;
 }
 int pw_wine_rumble(uint32_t *left,uint32_t *right){return pw_wine_rumble_at(0,left,right);}
+int pw_wine_pad_peek(uint32_t index,PwWinePad *pad)
+{
+    int connected;
+    if(!pad)return 0;
+    if(index>=PW_WINE_PADS){memset(pad,0,sizeof(*pad));return 0;}
+    pthread_mutex_lock(&lock);
+    connected=pad_state[index].connected!=0;
+    if(connected)*pad=pad_state[index];
+    else memset(pad,0,sizeof(*pad));
+    pthread_mutex_unlock(&lock);
+    return connected;
+}
+void pw_wine_pads_ask(uint32_t mask)
+{
+    pthread_mutex_lock(&lock);
+    pads_wanted|=mask&((1u<<PW_WINE_PADS)-1u);
+    pthread_mutex_unlock(&lock);
+}
+void pw_wine_pad_notify(void)
+{
+    pthread_mutex_lock(&lock);
+    pad_changes++;
+    pthread_mutex_unlock(&lock);
+    wake_driver();
+}
 uint32_t pw_wine_pads_wanted(void)
 {
     uint32_t wanted;

@@ -7,7 +7,9 @@
  * (buttons are XINPUT_GAMEPAD_* bits). A missing or unreadable file is a
  * disconnected pad. Each rumble request is appended to $PW_RUMBLE_FILE as
  * "left right". The test program writes the pad file through Wine's Z:
- * drive and reads the rumble file the same way. */
+ * drive and reads the rumble file the same way. Controllers 1..3 are the same
+ * in "$PW_PAD_FILE.N" and "$PW_RUMBLE_FILE.N", and pw_wine_pads_ask leaves its
+ * mask in "$PW_PAD_FILE.asked". */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,14 +24,25 @@ typedef struct PwWinePad {
 
 int pw_wine_pad(PwWinePad *pad);
 void pw_wine_set_rumble(uint32_t left,uint32_t right);
+int pw_wine_pad_peek(uint32_t index,PwWinePad *pad);
+void pw_wine_set_rumble_at(uint32_t index,uint32_t left,uint32_t right);
+void pw_wine_pads_ask(uint32_t mask);
+void pw_wine_pad_notify(void);
 
-int pw_wine_pad(PwWinePad *pad)
+int pw_wine_pad_peek(uint32_t index,PwWinePad *pad)
 {
-    const char *path=getenv("PW_PAD_FILE");
+    const char *base=getenv("PW_PAD_FILE");
+    char path[4096];
     unsigned connected,buttons,lt,rt;
     int lx,ly,rx,ry;
-    FILE *f=path?fopen(path,"r"):NULL;
-    int n=f?fscanf(f,"%u %u %u %u %d %d %d %d",&connected,&buttons,&lt,&rt,&lx,&ly,&rx,&ry):0;
+    FILE *f;
+    int n;
+
+    if(!base)return 0;
+    if(index)snprintf(path,sizeof(path),"%s.%u",base,index);
+    else snprintf(path,sizeof(path),"%s",base);
+    f=fopen(path,"r");
+    n=f?fscanf(f,"%u %u %u %u %d %d %d %d",&connected,&buttons,&lt,&rt,&lx,&ly,&rx,&ry):0;
     if(f)fclose(f);
     if(n!=8 || !connected)return 0;
     pad->connected=1;
@@ -44,11 +57,45 @@ int pw_wine_pad(PwWinePad *pad)
     return 1;
 }
 
-void pw_wine_set_rumble(uint32_t left,uint32_t right)
+int pw_wine_pad(PwWinePad *pad)
 {
-    const char *path=getenv("PW_RUMBLE_FILE");
-    FILE *f=path?fopen(path,"a"):NULL;
+    return pw_wine_pad_peek(0,pad);
+}
+
+void pw_wine_set_rumble_at(uint32_t index,uint32_t left,uint32_t right)
+{
+    const char *base=getenv("PW_RUMBLE_FILE");
+    char path[4096];
+    FILE *f;
+
+    if(!base)return;
+    if(index)snprintf(path,sizeof(path),"%s.%u",base,index);
+    else snprintf(path,sizeof(path),"%s",base);
+    f=fopen(path,"a");
     if(!f)return;
     fprintf(f,"%u %u\n",left,right);
     fclose(f);
+}
+
+void pw_wine_set_rumble(uint32_t left,uint32_t right)
+{
+    pw_wine_set_rumble_at(0,left,right);
+}
+
+void pw_wine_pads_ask(uint32_t mask)
+{
+    const char *base=getenv("PW_PAD_FILE");
+    char path[4096];
+    FILE *f;
+
+    if(!base)return;
+    snprintf(path,sizeof(path),"%s.asked",base);
+    f=fopen(path,"w");
+    if(!f)return;
+    fprintf(f,"%u\n",mask);
+    fclose(f);
+}
+
+void pw_wine_pad_notify(void)
+{
 }

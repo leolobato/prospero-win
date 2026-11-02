@@ -1,0 +1,520 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 2 Nov 2026 12:00:00 +0100
+Subject: [PATCH] winebus: Show the PS5 title's other controllers as HID gamepads.
+
+Patch 0471 gave XInput the other signed-in users' DualSenses, but
+DirectInput, winmm, Raw Input and Windows.Gaming.Input find controllers
+among winebus's devices, and the PS5 bus (patch 0951) had one.
+
+The bus now makes a device for each of controllers 1..3 while the title
+has it connected, with its own serial number, and removes it when the
+controller goes: a game that counts controllers finds only players who
+are there. Each device reads and rumbles its own controller. A device that
+was asked to go is not replaced until it has stopped, since a new one
+would have its instance ID. Controller 0's device stays always present.
+
+The bus reads these controllers with pw_wine_pad_peek, which does not note
+them as asked for: the bus runs in every game, and the title opens the
+other users' pads only for a game that looks for controllers.
+
+A game that looks through HID says so by opening a HID device. hidclass
+now sends the minidriver IOCTL_HID_ACTIVATE_DEVICE, as Windows does, when a
+device is first opened, and the bus passes that on to the title with
+pw_wine_pads_ask. The title has no plugplay service, so the bus also asks
+it to tell the game's windows (WM_DEVICECHANGE, patch 0984) some time after
+a device comes or goes, once its interface has changed.
+
+The devices are Xbox 360 controllers like controller 0's, so the HID stack
+gives them the &IG_ gamepad interface as well: a game that reads both
+XInput and HID finds each player once.
+
+Programs list HID devices in the order of their instance IDs, and a game
+such as Metal Slug 3 takes the first for its first player. hidclass now
+reports its IDs as unique, so ntoskrnl no longer puts a hash of the parent
+in front of them: the serial numbers decide, and controller 0 comes first.
+
+A hosted game goes on once a gamepad's interface is up (patch 0952), which
+could be before the others'. The title says how many are there at start in
+WINE_PS5_HID_PADS, and ntoskrnl waits for that many, still within its
+timeout: a game that looks for controllers once at start finds them all.
+---
+ dlls/hidclass.sys/device.c      |   8 +-
+ dlls/hidclass.sys/hid.h         |   1 +
+ dlls/hidclass.sys/pnp.c         |   3 +
+ dlls/ntoskrnl.exe/ntoskrnl.c    |  15 ++-
+ dlls/winebus.sys/bus_ps5.c      | 207 +++++++++++++++++++++++++++-----
+ dlls/winebus.sys/main.c         |   5 +
+ dlls/winebus.sys/unix_private.h |   1 +
+ dlls/winebus.sys/unixlib.c      |   2 +
+ dlls/winebus.sys/unixlib.h      |   1 +
+ 9 files changed, 210 insertions(+), 33 deletions(-)
+
+diff --git a/dlls/hidclass.sys/device.c b/dlls/hidclass.sys/device.c
+index 4a28ec0..91d2351 100644
+--- a/dlls/hidclass.sys/device.c
++++ b/dlls/hidclass.sys/device.c
+@@ -749,7 +749,8 @@ NTSTATUS WINAPI pdo_create( DEVICE_OBJECT *device, IRP *irp )
+ {
+     struct phys_device *pdo = pdo_from_DEVICE_OBJECT( device );
+     struct hid_queue *queue;
+-    BOOL removed;
++    BOOL removed, activate;
++    IO_STATUS_BLOCK io;
+     KIRQL irql;
+ 
+     TRACE("Open handle on device %p\n", device);
+@@ -770,8 +771,13 @@ NTSTATUS WINAPI pdo_create( DEVICE_OBJECT *device, IRP *irp )
+     {
+         KeAcquireSpinLock( &pdo->lock, &irql );
+         list_add_tail( &pdo->queues, &queue->entry );
++        activate = !pdo->activated;
++        pdo->activated = TRUE;
+         KeReleaseSpinLock( &pdo->lock, irql );
+ 
++        /* As on Windows, the minidriver hears when the device is first used. */
++        if (activate) call_minidriver( IOCTL_HID_ACTIVATE_DEVICE, pdo->parent_fdo, NULL, 0, NULL, 0, &io );
++
+         irp->Tail.Overlay.OriginalFileObject->FsContext = queue;
+         irp->IoStatus.Status = STATUS_SUCCESS;
+     }
+diff --git a/dlls/hidclass.sys/hid.h b/dlls/hidclass.sys/hid.h
+index 6ed4ff4..163ca2f 100644
+--- a/dlls/hidclass.sys/hid.h
++++ b/dlls/hidclass.sys/hid.h
+@@ -83,6 +83,7 @@ struct phys_device
+     KSPIN_LOCK lock;
+     struct list queues;
+     BOOL removed;
++    BOOL activated;
+ 
+     BOOL is_mouse;
+     UNICODE_STRING mouse_link_name;
+diff --git a/dlls/hidclass.sys/pnp.c b/dlls/hidclass.sys/pnp.c
+index 5e43ba8..13a6082 100644
+--- a/dlls/hidclass.sys/pnp.c
++++ b/dlls/hidclass.sys/pnp.c
+@@ -540,6 +540,9 @@ static NTSTATUS pdo_pnp( DEVICE_OBJECT *device, IRP *irp )
+             DEVICE_CAPABILITIES *caps = irpsp->Parameters.DeviceCapabilities.Capabilities;
+ 
+             caps->RawDeviceOK = 1;
++            /* The bus's instance ID is unique. Without this ntoskrnl puts a hash of the
++             * parent in front, and devices are listed in the order of those hashes. */
++            caps->UniqueID = 1;
+             status = STATUS_SUCCESS;
+             break;
+         }
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index 677ff9c..571ba5c 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -4383,12 +4383,18 @@ static DWORD WINAPI host_main_loop( void *stop_event )
+     return wine_ntoskrnl_main_loop( stop_event );
+ }
+ 
++/* How many gamepads to wait for: a game that looks for controllers once at start
++ * must find all that are there. WINE_PS5_HID_PADS, from the title, or one. */
++static LONG host_gamepads = 1;
++
+ /* The &XI_ gamepad interface winexinput.sys makes for a HID gamepad. */
+ static const GUID GUID_DEVINTERFACE_WINEXINPUT = {0x6c53d5fd, 0x6480, 0x440f, {0xb6, 0x18, 0x47, 0x67, 0x50, 0xc5, 0xe1, 0xa6}};
+ 
+ void hosted_interface_enabled( const GUID *interface_class )
+ {
+-    if (host_gamepad && IsEqualGUID( interface_class, &GUID_DEVINTERFACE_WINEXINPUT )) SetEvent( host_gamepad );
++    if (host_gamepad && IsEqualGUID( interface_class, &GUID_DEVINTERFACE_WINEXINPUT ) &&
++        InterlockedDecrement( &host_gamepads ) <= 0)
++        SetEvent( host_gamepad );
+ }
+ 
+ /***********************************************************************
+@@ -4421,6 +4427,13 @@ NTSTATUS CDECL wine_ntoskrnl_host_start( const WCHAR *driver_name, DWORD timeout
+     if (!(stop_event = CreateEventW( NULL, TRUE, FALSE, NULL ))) goto failed;
+     if (!(host_ready = CreateEventW( NULL, TRUE, FALSE, NULL ))) goto failed;
+     if (!(host_gamepad = CreateEventW( NULL, TRUE, FALSE, NULL ))) goto failed;
++    {
++        WCHAR pads[4];
++
++        if (GetEnvironmentVariableW( L"WINE_PS5_HID_PADS", pads, ARRAY_SIZE(pads) ) == 1 &&
++            pads[0] >= '1' && pads[0] <= '4')
++            host_gamepads = pads[0] - '0';
++    }
+ 
+     GetSystemDirectoryW( path, MAX_PATH );
+     wcscat( path, L"\\drivers" );
+diff --git a/dlls/winebus.sys/bus_ps5.c b/dlls/winebus.sys/bus_ps5.c
+index 10c7735..97bed10 100644
+--- a/dlls/winebus.sys/bus_ps5.c
++++ b/dlls/winebus.sys/bus_ps5.c
+@@ -52,7 +52,15 @@ WINE_DEFAULT_DEBUG_CHANNEL(hid);
+  * gamepad interface and its winexinput &XI_ partner, which DirectInput,
+  * winmm, Raw Input and Windows.Gaming.Input find. A disconnected pad
+  * reports a neutral state. XInput itself reads the sink directly (patch
+- * 0470) and does not use this device. */
++ * 0470) and does not use this device.
++ *
++ * The other signed-in users' controllers are controllers 1..3 in the sink.
++ * Each has a device of its own, with its own serial number, only while it is
++ * connected: a game that counts controllers must not find a player who is not
++ * there. These devices are read with pw_wine_pad_peek, which does not note the
++ * controller as asked for: this bus runs in every game, and the title opens
++ * the other users' controllers only for one that looks for them. A program
++ * opening one of these HID devices is what asks (ps5_bus_ask). */
+ struct title_pad_state
+ {
+     UINT32 connected;
+@@ -64,6 +72,10 @@ struct title_pad_state
+ 
+ static int (*title_pad)(struct title_pad_state *state);
+ static void (*title_rumble)(UINT32 left, UINT32 right);
++static int (*title_pad_peek)(UINT32 index, struct title_pad_state *state);
++static void (*title_rumble_at)(UINT32 index, UINT32 left, UINT32 right);
++static void (*title_pads_ask)(UINT32 mask);
++static void (*title_pad_notify)(void);
+ 
+ /* How often the pad is read: the title updates it once per frame or so. */
+ #define PS5_POLL_NS (4 * 1000 * 1000)
+@@ -80,10 +92,48 @@ struct ps5_device
+     BOOL have_state;
+     struct title_pad_state last;
+     UINT64 rumble_until;  /* CLOCK_MONOTONIC ns when the rumble stops; 0: until told */
++    UINT32 slot;          /* the controller's index in the title's sink */
+ };
+ 
+ static struct ps5_device *ps5_pad;
+ 
++/* Controllers 1..3. A device that was asked to go is not replaced until it has
++ * stopped: until then a new one would have its instance ID. */
++#define PS5_SLOTS 4
++/* After a device comes or goes, when to tell the game's windows again: its
++ * interface appears some time after the device starts, and a title has no
++ * plugplay service to say so. */
++#define PS5_NOTICE_FIRST_NS (500ull * 1000 * 1000)
++#define PS5_NOTICE_LAST_NS (2000ull * 1000 * 1000)
++
++enum ps5_slot_state { PS5_SLOT_ABSENT, PS5_SLOT_PRESENT, PS5_SLOT_REMOVING };
++enum ps5_slot_action { PS5_SLOT_NONE, PS5_SLOT_CREATE, PS5_SLOT_REMOVE };
++
++static enum ps5_slot_action ps5_slot_step(enum ps5_slot_state *state, BOOL connected)
++{
++    switch (*state)
++    {
++    case PS5_SLOT_ABSENT:
++        if (!connected) return PS5_SLOT_NONE;
++        *state = PS5_SLOT_PRESENT;
++        return PS5_SLOT_CREATE;
++    case PS5_SLOT_PRESENT:
++        if (connected) return PS5_SLOT_NONE;
++        *state = PS5_SLOT_REMOVING;
++        return PS5_SLOT_REMOVE;
++    case PS5_SLOT_REMOVING:
++        return PS5_SLOT_NONE;
++    }
++    return PS5_SLOT_NONE;
++}
++
++static struct
++{
++    enum ps5_slot_state state;
++    struct ps5_device *device;
++} ps5_slots[PS5_SLOTS];
++static UINT64 ps5_notice_first, ps5_notice_last;
++
+ static inline struct ps5_device *impl_from_unix_device(struct unix_device *iface)
+ {
+     return CONTAINING_RECORD(iface, struct ps5_device, unix_device);
+@@ -97,6 +147,22 @@ static UINT64 monotonic_ns(void)
+     return (UINT64)now.tv_sec * 1000000000 + now.tv_nsec;
+ }
+ 
++/* Called with ps5_cs. */
++static void ps5_notice_later(void)
++{
++    UINT64 now = monotonic_ns();
++
++    ps5_notice_first = now + PS5_NOTICE_FIRST_NS;
++    ps5_notice_last = now + PS5_NOTICE_LAST_NS;
++}
++
++/* Called with ps5_cs. */
++static void ps5_rumble(struct ps5_device *impl, UINT32 left, UINT32 right)
++{
++    if (impl->slot) title_rumble_at(impl->slot, left, right);
++    else title_rumble(left, right);
++}
++
+ static void ps5_device_destroy(struct unix_device *iface)
+ {
+ }
+@@ -108,6 +174,7 @@ static NTSTATUS ps5_device_start(struct unix_device *iface)
+     pthread_mutex_lock(&ps5_cs);
+     impl->started = TRUE;
+     impl->have_state = FALSE;
++    if (impl->slot) ps5_notice_later();
+     pthread_mutex_unlock(&ps5_cs);
+     return STATUS_SUCCESS;
+ }
+@@ -120,7 +187,13 @@ static void ps5_device_stop(struct unix_device *iface)
+     impl->started = FALSE;
+     impl->rumble_until = 0;
+     if (ps5_pad == impl) ps5_pad = NULL;
+-    if (title_rumble) title_rumble(0, 0);
++    if (title_rumble) ps5_rumble(impl, 0, 0);
++    if (impl->slot)
++    {
++        ps5_slots[impl->slot].device = NULL;
++        ps5_slots[impl->slot].state = PS5_SLOT_ABSENT;
++        ps5_notice_later();
++    }
+     pthread_mutex_unlock(&ps5_cs);
+ }
+ 
+@@ -140,7 +213,7 @@ static NTSTATUS ps5_device_haptics_start(struct unix_device *iface, UINT duratio
+     pthread_mutex_lock(&ps5_cs);
+     impl->rumble_until = duration_ms && (rumble_intensity || buzz_intensity)
+                          ? monotonic_ns() + (UINT64)duration_ms * 1000000 : 0;
+-    title_rumble(rumble_intensity, buzz_intensity);
++    ps5_rumble(impl, rumble_intensity, buzz_intensity);
+     pthread_mutex_unlock(&ps5_cs);
+     return STATUS_SUCCESS;
+ }
+@@ -152,7 +225,7 @@ static NTSTATUS ps5_device_haptics_stop(struct unix_device *iface)
+     if (!title_rumble) return STATUS_NOT_SUPPORTED;
+     pthread_mutex_lock(&ps5_cs);
+     impl->rumble_until = 0;
+-    title_rumble(0, 0);
++    ps5_rumble(impl, 0, 0);
+     pthread_mutex_unlock(&ps5_cs);
+     return STATUS_SUCCESS;
+ }
+@@ -233,32 +306,27 @@ static void set_report_from_state(struct unix_device *iface, const struct title_
+         hid_device_set_button(iface, ps5_buttons[i].button, !!(buttons & ps5_buttons[i].mask));
+ }
+ 
+-/* Stops a rumble whose duration ran out, reads the pad and queues a report
+- * when it changed. Called with ps5_cs. */
+-static void ps5_poll(void)
++/* Stops a device's rumble whose duration ran out, and queues a report when its
++ * state changed. Called with ps5_cs. */
++static void ps5_device_poll(struct ps5_device *impl, const struct title_pad_state *state)
+ {
+-    struct ps5_device *impl = ps5_pad;
+-    struct unix_device *iface;
+-    struct title_pad_state state;
++    struct unix_device *iface = &impl->unix_device;
+ 
+-    if (!impl || !impl->started) return;
+-    iface = &impl->unix_device;
+     if (impl->rumble_until && monotonic_ns() >= impl->rumble_until)
+     {
+         impl->rumble_until = 0;
+-        title_rumble(0, 0);
++        ps5_rumble(impl, 0, 0);
+     }
+-    if (!title_pad(&state)) memset(&state, 0, sizeof(state));
+-    if (impl->have_state && !memcmp(&state, &impl->last, sizeof(state))) return;
+-    impl->last = state;
++    if (impl->have_state && !memcmp(state, &impl->last, sizeof(*state))) return;
++    impl->last = *state;
+     impl->have_state = TRUE;
+ 
+-    set_report_from_state(iface, &state);
++    set_report_from_state(iface, state);
+     bus_event_queue_input_report(&event_queue, iface, iface->hid_device_state.report_buf,
+                                  iface->hid_device_state.report_len);
+ }
+ 
+-NTSTATUS ps5_bus_init(void *args)
++static struct ps5_device *ps5_device_create(UINT32 slot)
+ {
+     static const USAGE_AND_PAGE device_usage = {.UsagePage = HID_USAGE_PAGE_GENERIC, .Usage = HID_USAGE_GENERIC_GAMEPAD};
+     static const struct title_pad_state neutral;
+@@ -274,35 +342,112 @@ NTSTATUS ps5_bus_init(void *args)
+         .manufacturer = {'M','i','c','r','o','s','o','f','t',0},
+         .product = {'C','o','n','t','r','o','l','l','e','r',' ','(','X','B','O','X',' ','3','6','0',' ',
+                     'F','o','r',' ','W','i','n','d','o','w','s',')',0},
+-        .serialnumber = {'0','0','0','0',0},
++        .serialnumber = {'0','0','0',(WCHAR)('0' + slot),0},
+     };
+     struct unix_device *iface;
+     struct ps5_device *impl;
+ 
+-    title_pad = dlsym(RTLD_DEFAULT, "pw_wine_pad");
+-    title_rumble = dlsym(RTLD_DEFAULT, "pw_wine_set_rumble");
+-    if (!title_pad) return STATUS_NOT_SUPPORTED;
+-    TRACE("found the title's controller\n");
+-
+-    if (!(impl = hid_device_create(&ps5_device_vtbl, sizeof(struct ps5_device)))) return STATUS_NO_MEMORY;
++    if (!(impl = hid_device_create(&ps5_device_vtbl, sizeof(struct ps5_device)))) return NULL;
+     iface = &impl->unix_device;
++    impl->slot = slot;
+     if (!hid_device_begin_report_descriptor(iface, &device_usage)) goto failed;
+     if (!hid_device_add_gamepad(iface)) goto failed;
+     if (title_rumble && !hid_device_add_haptics(iface)) goto failed;
+     if (!hid_device_end_report_descriptor(iface)) goto failed;
+     set_report_from_state(iface, &neutral);
++    bus_event_queue_device_created(&event_queue, iface, &desc);
++    return impl;
++
++failed:
++    free(iface->hid_report_descriptor.data);
++    free(impl);
++    return NULL;
++}
++
++/* Reads the controllers and makes or removes the other users' devices. Called
++ * with ps5_cs. */
++static void ps5_poll(void)
++{
++    struct title_pad_state state;
++    UINT32 slot;
++
++    if (ps5_pad && ps5_pad->started)
++    {
++        if (!title_pad(&state)) memset(&state, 0, sizeof(state));
++        ps5_device_poll(ps5_pad, &state);
++    }
++
++    if (title_pad_peek && title_rumble_at)
++    {
++        for (slot = 1; slot < PS5_SLOTS; slot++)
++        {
++            BOOL connected = title_pad_peek(slot, &state) != 0;
++            struct ps5_device *impl = ps5_slots[slot].device;
++
++            switch (ps5_slot_step(&ps5_slots[slot].state, connected))
++            {
++            case PS5_SLOT_CREATE:
++                if (!(ps5_slots[slot].device = ps5_device_create(slot)))
++                {
++                    WARN("no device for controller %u\n", slot);
++                    ps5_slots[slot].state = PS5_SLOT_ABSENT;
++                }
++                break;
++            case PS5_SLOT_REMOVE:
++                if (!bus_event_queue_device_removed(&event_queue, &impl->unix_device))
++                {
++                    /* It stays until a later poll can ask again. */
++                    ps5_slots[slot].state = PS5_SLOT_PRESENT;
++                }
++                else title_rumble_at(slot, 0, 0);
++                break;
++            case PS5_SLOT_NONE:
++                if (connected && impl && impl->started) ps5_device_poll(impl, &state);
++                break;
++            }
++        }
++    }
++
++    if (title_pad_notify && ps5_notice_first && monotonic_ns() >= ps5_notice_first)
++    {
++        title_pad_notify();
++        ps5_notice_first = 0;
++    }
++    if (title_pad_notify && ps5_notice_last && monotonic_ns() >= ps5_notice_last)
++    {
++        title_pad_notify();
++        ps5_notice_last = 0;
++    }
++}
++
++NTSTATUS ps5_bus_init(void *args)
++{
++    title_pad = dlsym(RTLD_DEFAULT, "pw_wine_pad");
++    title_rumble = dlsym(RTLD_DEFAULT, "pw_wine_set_rumble");
++    title_pad_peek = dlsym(RTLD_DEFAULT, "pw_wine_pad_peek");
++    title_rumble_at = dlsym(RTLD_DEFAULT, "pw_wine_set_rumble_at");
++    title_pads_ask = dlsym(RTLD_DEFAULT, "pw_wine_pads_ask");
++    title_pad_notify = dlsym(RTLD_DEFAULT, "pw_wine_pad_notify");
++    if (!title_pad) return STATUS_NOT_SUPPORTED;
++    TRACE("found the title's controller\n");
+ 
+     pthread_mutex_lock(&ps5_cs);
+     ps5_stopping = FALSE;
+-    ps5_pad = impl;
+-    bus_event_queue_device_created(&event_queue, iface, &desc);
++    if (!(ps5_pad = ps5_device_create(0)))
++    {
++        pthread_mutex_unlock(&ps5_cs);
++        return STATUS_NO_MEMORY;
++    }
+     pthread_mutex_unlock(&ps5_cs);
+     return STATUS_SUCCESS;
++}
+ 
+-failed:
+-    free(iface->hid_report_descriptor.data);
+-    free(impl);
+-    return STATUS_NO_MEMORY;
++/* A program opened a HID device: a game that looks for controllers through
++ * HID, as XInput's calls for controllers 1..3 show one that uses XInput. */
++NTSTATUS ps5_bus_ask(void *args)
++{
++    if (title_pads_ask) title_pads_ask(((1u << PS5_SLOTS) - 1) & ~1u);
++    return STATUS_SUCCESS;
+ }
+ 
+ NTSTATUS ps5_bus_wait(void *args)
+diff --git a/dlls/winebus.sys/main.c b/dlls/winebus.sys/main.c
+index 649f64f..d4b607a 100644
+--- a/dlls/winebus.sys/main.c
++++ b/dlls/winebus.sys/main.c
+@@ -1708,6 +1708,11 @@ static NTSTATUS WINAPI hid_internal_dispatch(DEVICE_OBJECT *device, IRP *irp)
+             if (!irp->IoStatus.Status) hidraw_disable_report_fixups(device);
+             break;
+         }
++        case IOCTL_HID_ACTIVATE_DEVICE:
++            /* A program opened the device: tell a PS5 title (bus_ps5.c). */
++            winebus_call(ps5_ask, NULL);
++            irp->IoStatus.Status = STATUS_SUCCESS;
++            break;
+         default:
+             FIXME("Unsupported ioctl %lx (device=%lx access=%lx func=%lx method=%lx)\n",
+                   code, code >> 16, (code >> 14) & 3, (code >> 2) & 0xfff, code & 3);
+diff --git a/dlls/winebus.sys/unix_private.h b/dlls/winebus.sys/unix_private.h
+index 66df2e1..8577445 100644
+--- a/dlls/winebus.sys/unix_private.h
++++ b/dlls/winebus.sys/unix_private.h
+@@ -237,6 +237,7 @@ extern NTSTATUS iohid_bus_stop(void *);
+ extern NTSTATUS ps5_bus_init(void *);
+ extern NTSTATUS ps5_bus_wait(void *);
+ extern NTSTATUS ps5_bus_stop(void *);
++extern NTSTATUS ps5_bus_ask(void *);
+ 
+ extern void bus_event_cleanup(struct bus_event *event);
+ extern void bus_event_queue_destroy(struct list *queue);
+diff --git a/dlls/winebus.sys/unixlib.c b/dlls/winebus.sys/unixlib.c
+index e773d1e..94d8bff 100644
+--- a/dlls/winebus.sys/unixlib.c
++++ b/dlls/winebus.sys/unixlib.c
+@@ -315,6 +315,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
+     ps5_bus_init,
+     ps5_bus_wait,
+     ps5_bus_stop,
++    ps5_bus_ask,
+     mouse_device_create,
+     keyboard_device_create,
+     unix_device_remove,
+@@ -428,6 +429,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
+     ps5_bus_init,
+     ps5_bus_wait,
+     ps5_bus_stop,
++    ps5_bus_ask,
+     mouse_device_create,
+     keyboard_device_create,
+     unix_device_remove,
+diff --git a/dlls/winebus.sys/unixlib.h b/dlls/winebus.sys/unixlib.h
+index 870321f..30b2f4e 100644
+--- a/dlls/winebus.sys/unixlib.h
++++ b/dlls/winebus.sys/unixlib.h
+@@ -149,6 +149,7 @@ enum unix_funcs
+     ps5_init,
+     ps5_wait,
+     ps5_stop,
++    ps5_ask,
+     mouse_create,
+     keyboard_create,
+     device_remove,
+-- 
+2.56.0
+

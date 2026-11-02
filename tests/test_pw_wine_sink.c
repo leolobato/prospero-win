@@ -365,6 +365,22 @@ int main(void)
         assert(pw_wine_pad_changes()==changes+2 && read(fd,wake_drain,sizeof(wake_drain))==1);
         pw_wine_set_pad_at(PW_WINE_PADS,&held);assert(pw_wine_pad_changes()==changes+2);
     }
+    /* winebus reads every controller in every game: that is not asking. */
+    {
+        uint32_t wanted=pw_wine_pads_wanted(),changes=pw_wine_pad_changes();
+        uint8_t wake_drain[8];
+        while(read(fd,wake_drain,sizeof(wake_drain))>0){}
+        assert(!pw_wine_pad_peek(2,&got) && got.connected==0);
+        pw_wine_set_pad_at(2,&second);
+        assert(pw_wine_pad_peek(2,&got) && got.buttons==0x4000);
+        assert(!pw_wine_pad_peek(PW_WINE_PADS,&got) && !pw_wine_pad_peek(0,NULL));
+        assert(pw_wine_pads_wanted()==wanted);
+        pw_wine_set_pad_at(2,NULL);
+        while(read(fd,wake_drain,sizeof(wake_drain))>0){}
+        changes=pw_wine_pad_changes();
+        pw_wine_pad_notify();
+        assert(pw_wine_pad_changes()==changes+1 && read(fd,wake_drain,sizeof(wake_drain))==1);
+    }
     pw_wine_set_rumble_at(3,500,600);
     assert(!pw_wine_rumble(&left,&right) && !pw_wine_rumble_at(1,&left,&right));
     assert(pw_wine_rumble_at(3,&left,&right)==1 && left==500 && right==600);

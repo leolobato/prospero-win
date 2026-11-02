@@ -114,14 +114,23 @@ been tested.
 
 In xinput mode, the DualSenses of the other PS5 users who are signed in
 (a second account or a guest) are the game's XInput controllers 1, 2 and
-3, beside the first player's controller 0. A game's split screen or local
-multiplayer finds them as it would on a PC. They are opened once the game
-asks for a second controller, which most games do at start or when a
-player presses a button on the menu. Each player's controller rumbles on
+3, beside the first player's controller 0, and each one connected is also a
+HID gamepad, for games that read DirectInput, winmm, Raw Input or
+Windows.Gaming.Input. A game's split screen or local multiplayer finds them
+as it would on a PC. Users signed in when the game starts are opened at
+once. One who signs in later is found once the game looks for controllers:
+it asks XInput for a second one, or opens a HID gamepad, which most games do
+at start or when a player presses a button on the menu. A game that does
+neither never looks for other users. A game that lists HID gamepads only once
+at start (Metal Slug 3, for one) doesn't get a controller back that turned off
+during the game, nor find one connected later, until it is started again.
+Windows.Gaming.Input also looks only once, at start, in a title. Sign in and
+turn on the other controllers before starting such a game.
+Each player's controller rumbles on
 its own, at the profile's `rumble` strength. A user who signs in while the
 game runs is found within two seconds and keeps the same controller until
-they sign out. A controller
-that fails to open is tried again only after that user signs out and in.
+they sign out. A controller that fails to open is tried again only after
+that user signs out and in.
 Buttons, the pointer and closing the game stay the first player's. While
 the in-game menu or the keyboard is open, and under a launcher's preset
 that is not xinput, the other controllers read idle. A profile

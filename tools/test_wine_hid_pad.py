@@ -89,6 +89,18 @@ def main():
                 print(f'{name}: FAIL hardware input arrived without its message (WoW64 NtUserSendHardwareInput)')
             if code or 'started, gamepad after' not in text or 'unknown message type' in text:
                 failed.append(name)
+            # A game that looks once, on a fresh server, with a second controller already connected.
+            subprocess.run([wineserver, '-k'], env=plain, check=False, timeout=60)
+            (output / 'pad.txt.1').write_text('1 0 0 0 0 0 0 0\n')
+            start = subprocess.run([wine, str(exe), windows_pad, windows_rumble, 'at-start'],
+                                   env=dict(hosted, WINE_PS5_HID_PADS='2'),
+                                   capture_output=True, text=True, errors='replace', timeout=120)
+            (output / 'pad.txt.1').unlink()
+            for line in start.stdout.splitlines():
+                if line.startswith(('ok ', 'FAIL ')):
+                    print(f'{name}: {line}')
+            if start.returncode:
+                failed.append(f'{name} at start')
     subprocess.run([wineserver, '-k'], env=plain, check=False, timeout=60)
     if failed:
         raise SystemExit('The HID gamepad checks failed: ' + ', '.join(failed))

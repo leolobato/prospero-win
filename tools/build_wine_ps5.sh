@@ -108,7 +108,8 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # kernelbase: the computer name without wineboot's volatile key (patch 0957).
 # wined3d: it carries vkd3d-shader, which d3dcompiler uses to compile D3DX
 # effects with samplers and in-pass shaders (patches 0959-0963).
-PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan kernelbase ntoskrnl.exe winebus.sys setupapi gdi32 wined3d rtworkq"
+# hidclass.sys: the minidriver hears when a device is first opened (patch 0966).
+PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan kernelbase ntoskrnl.exe winebus.sys hidclass.sys setupapi gdi32 wined3d rtworkq"
 PE_MODULES="$PE_MODULES xaudio2_0 xaudio2_1 xaudio2_2 xaudio2_3 xaudio2_4 xaudio2_5 xaudio2_6 xaudio2_7 xaudio2_8 xaudio2_9 xactengine2_0 xactengine2_4 xactengine2_7 xactengine2_9 xactengine3_0 xactengine3_1 xactengine3_2 xactengine3_3 xactengine3_4 xactengine3_5 xactengine3_6 xactengine3_7"
 # Everything optional but FreeType (built below) is off: the console has none
 # of these libraries, and a configure-time probe against the payload SDK must
@@ -455,7 +456,7 @@ if [ "$prx_status" = 0 ]; then
         pw_wine_set_present_sink pw_wine_post_input pw_wine_sink_stats \
         pw_wine_present pw_wine_next_input pw_wine_input_fd \
         pw_wine_set_pad pw_wine_rumble pw_wine_pad pw_wine_set_rumble pw_wine_set_menu pw_wine_menu pw_wine_pad_changes \
-        pw_wine_set_pad_at pw_wine_rumble_at pw_wine_pad_at pw_wine_set_rumble_at pw_wine_pads_wanted \
+        pw_wine_set_pad_at pw_wine_rumble_at pw_wine_pad_at pw_wine_pad_peek pw_wine_set_rumble_at pw_wine_pads_wanted pw_wine_pads_ask pw_wine_pad_notify \
         pw_wine_set_audio_sink pw_wine_audio_available pw_wine_audio_output \
         __wine_virtual_stats __wine_virtual_fault_top __wine_ps5_set_output_sink __wine_ps5_memory_stats pw_cwd_set \
         __wine_ps5_set_segv_hook __wine_ps5_set_segv_unresolved_hook pw_wine_set_display_release pw_wine_release_display \

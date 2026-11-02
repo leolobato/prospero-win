@@ -86,8 +86,8 @@ int pw_wine_rumble(uint32_t *left,uint32_t *right);
  * read as disconnected); the calls above are controller 0's. */
 void pw_wine_set_pad_at(uint32_t index,const PwWinePad *pad);
 int pw_wine_rumble_at(uint32_t index,uint32_t *left,uint32_t *right);
-/* Bit i set once the game asked about controller i (pw_wine_pad_at); the
- * title opens the other users' pads only then. */
+/* Bit i set once the game asked about controller i (pw_wine_pad_at,
+ * pw_wine_pads_ask); the title opens the other users' pads only then. */
 uint32_t pw_wine_pads_wanted(void);
 /* The menu to draw, or NULL to close it. The sink sets version and
  * sequence, clamps lines and selected, and terminates every string. */
@@ -118,6 +118,13 @@ uint32_t pw_wine_pad_changes(void);
 /* The rumble a game asked for (XInputSetState); speeds are clamped. */
 void pw_wine_set_rumble(uint32_t left,uint32_t right);
 int pw_wine_pad_at(uint32_t index,PwWinePad *pad);
+/* The same without noting the controller as asked for: winebus reads every
+ * controller in every game. */
+int pw_wine_pad_peek(uint32_t index,PwWinePad *pad);
+/* A game looked for the controllers in mask some other way than XInput. */
+void pw_wine_pads_ask(uint32_t mask);
+/* Tell the game's windows that the controllers changed, as a connection does. */
+void pw_wine_pad_notify(void);
 void pw_wine_set_rumble_at(uint32_t index,uint32_t left,uint32_t right);
 /* 1 when the title set an audio sink: the audio driver offers its device
  * only then. */
