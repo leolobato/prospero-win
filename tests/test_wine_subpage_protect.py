@@ -7,7 +7,8 @@ without faults the program sees, in 64-bit and WoW64 processes
 being stepped over (0986); writes that keep coming beside a code page are not
 reported to the program (0987); a file read into a page beside a protected one
 succeeds, also when it starts in a host page nobody protected, and so does a
-datagram received there (0988); hot writes are reported only with PW_SUBPAGE_REPORT=1 (0989).
+datagram received there (0988); hot writes are reported only with PW_SUBPAGE_REPORT=1 (0989);
+a page decommitted beside a protected one is cleared, also when it is protected too (0975).
 
 Needs the host Wine from tools/build_host_wine.sh (PROSPERO_HOST_WINE, default
 .deps/wine-host/install/usr/bin/wine) and the mingw compilers; without them

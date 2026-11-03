@@ -62,6 +62,29 @@ static LONG write_pages(int first, int count, unsigned char value)
     return faults - before;
 }
 
+/* Decommits pages that are `own`, beside a page that is `neighbour` in the same host
+ * page, and commits them again: they come back zeroed and the neighbour keeps its
+ * protection. Chromium's allocator decommits this way, and stops if it fails. */
+static int decommit_beside(const char *what, DWORD neighbour, DWORD own, int count)
+{
+    unsigned char *memory = VirtualAlloc(NULL, 16 * PAGE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    MEMORY_BASIC_INFORMATION info;
+    DWORD old;
+    int i, ok = memory != NULL;
+
+    for (i = 1; ok && i <= count; i++) memory[i * PAGE] = 0x55;
+    ok = ok && VirtualProtect(memory, PAGE, neighbour, &old);
+    ok = ok && (own == PAGE_READWRITE || VirtualProtect(memory + PAGE, count * PAGE, own, &old));
+    ok = ok && VirtualFree(memory + PAGE, count * PAGE, MEM_DECOMMIT);
+    printf("subpage decommit %s: %s (error %lu)\n", what, ok ? "done" : "failed", ok ? 0ul : GetLastError());
+    ok = ok && VirtualAlloc(memory + PAGE, count * PAGE, MEM_COMMIT, PAGE_READWRITE);
+    for (i = 1; ok && i <= count; i++) ok = memory[i * PAGE] == 0;
+    ok = ok && VirtualQuery(memory, &info, sizeof(info)) && info.Protect == neighbour;
+    printf("subpage decommit %s: %s\n", what, ok ? "zeroed, neighbour kept" : "wrong after commit");
+    if (memory) VirtualFree(memory, 0, MEM_RELEASE);
+    return ok;
+}
+
 static int expect(const char *what, LONG got, LONG want)
 {
     printf("subpage %s: %ld fault(s), expected %ld\n", what, got, want);
@@ -216,6 +239,14 @@ int main(void)
     printf("subpage datagram beside a read-only page: %ld of %u bytes\n", got, (unsigned)sizeof(message));
     ok = ok && got == sizeof(message) && !memcmp(base + 36 * PAGE, message, sizeof(message));
     if (udp != INVALID_SOCKET) closesocket(udp);
+
+    /* Pages decommitted beside protected ones, also when they are protected too. */
+    ok = decommit_beside("writable beside read-only", PAGE_READONLY, PAGE_READWRITE, 1) && ok;
+    ok = decommit_beside("three writable beside inaccessible", PAGE_NOACCESS, PAGE_READWRITE, 3) && ok;
+    ok = decommit_beside("read-only beside read-only", PAGE_READONLY, PAGE_READONLY, 1) && ok;
+    ok = decommit_beside("read-only beside inaccessible", PAGE_NOACCESS, PAGE_READONLY, 1) && ok;
+    ok = decommit_beside("inaccessible beside inaccessible", PAGE_NOACCESS, PAGE_NOACCESS, 1) && ok;
+    ok = decommit_beside("inaccessible beside writable", PAGE_READWRITE, PAGE_NOACCESS, 1) && ok;
 
     printf("subpage verdict=%s\n", ok ? "pass" : "fail");
     fflush(stdout);
