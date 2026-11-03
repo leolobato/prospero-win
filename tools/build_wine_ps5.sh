@@ -342,7 +342,7 @@ for unit in pw_wine_heap pw_wine_heap_libc; do
 done
 # ntdll's anonymous memory comes from direct memory (patch 0600).
 dmem=""
-for unit in pw_wine_dmem pw_wine_dmem_ps5; do
+for unit in pw_wine_dmem pw_wine_sections pw_wine_dmem_ps5; do
     "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC \
         -c "$root/wine/ps5/$unit.c" -o "$work/heap/$unit.o" || fail "cannot compile $unit.c"
     dmem="$dmem $work/heap/$unit.o"
@@ -466,6 +466,7 @@ if [ "$prx_status" = 0 ]; then
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/win32u_desc.c" __wine_unix_lib_init
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/wineserver_desc.c" \
         pw_wineserver_connect pw_wine_thread_register pw_wine_thread_unregister pw_wineserver_call_direct pw_wineserver_try_fast_mutex \
+        pw_wineserver_section_callbacks \
         pw_wineserver_mutex_backend \
         pw_wineserver_sync_backend \
         pw_cwd_share_changes

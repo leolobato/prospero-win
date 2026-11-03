@@ -203,6 +203,106 @@ static void heap_counters(uint64_t *direct, uint64_t *spilled)
 
 /* With the heap's direct memory installed, headroom 4 MiB and spill cap
  * 3 MiB (set in main), out of a 16 MiB pool. */
+/* Small anonymous sections: every view is the same direct memory, out of the section's fd, and it stays
+ * until the section is closed and its views are gone, in either order. */
+int __wine_ps5_section_created(int fd, size_t bytes);
+void __wine_ps5_section_closed(int fd);
+int __wine_ps5_section_read(int fd, void *to, size_t bytes, off_t position);
+
+static void test_sections(void)
+{
+    uint8_t *space = space_for(32), *one = space + 4 * PAGE, *two = space + 12 * PAGE, *anon = space + 20 * PAGE;
+    const unsigned before = used();
+    const int fd = memfd_create("section", 0), large = memfd_create("large", 0);
+    uint8_t copy[8];
+
+    assert(fd >= 0 && !ftruncate(fd, 4 * PAGE));
+    assert(large >= 0 && !ftruncate(large, 32 << 20));
+    assert(!sceKernelReserveVirtualRange((void **)&one, 24 * PAGE, 0x90, PAGE));
+    __wine_ps5_dmem_region(one, 24 * PAGE);
+    assert(__wine_ps5_section_created(fd, 4 * PAGE));
+    assert(!__wine_ps5_section_created(large, 32 << 20));
+
+    /* Two views at different places and offsets alias; a new section reads as zero. */
+    assert(__wine_ps5_mmap(one, 4 * PAGE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) == one);
+    assert(used() == before + 4 && !one[0] && !one[4 * PAGE - 1]);
+    assert(__wine_ps5_mmap(two, 2 * PAGE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 2 * PAGE) == two);
+    assert(used() == before + 4);
+    one[2 * PAGE + 5] = 0x5a;
+    assert(two[5] == 0x5a);
+    two[PAGE] = 0xa5;
+    assert(one[3 * PAGE] == 0xa5);
+
+    /* The bytes are not in the fd: reads for copy-on-write views come from direct memory. */
+    assert(__wine_ps5_section_read(fd, copy, 1, 2 * PAGE + 5) && copy[0] == 0x5a);
+    assert(!__wine_ps5_section_read(large, copy, 1, 0));
+
+    /* Past the end fails instead of mapping the fd. */
+    errno = 0;
+    assert(__wine_ps5_mmap(two, 8 * PAGE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) == MAP_FAILED);
+    assert(errno == ENOMEM);
+
+    /* A large section stays a mapping of its fd. */
+    assert(__wine_ps5_mmap(anon, PAGE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, large, 0) == anon);
+    assert(used() == before + 4);
+    anon[0] = 3;
+    assert(!__wine_ps5_munmap(anon, PAGE));
+
+    /* A section the server maps itself was never reported: a view sees what the server writes through its fd. */
+    {
+        const int server = memfd_create("server", 0);
+        uint8_t *its_view;
+
+        assert(server >= 0 && !ftruncate(server, PAGE));
+        its_view = mmap(NULL, PAGE, PROT_READ | PROT_WRITE, MAP_SHARED, server, 0);
+        assert(its_view != MAP_FAILED);
+        assert(__wine_ps5_mmap(anon, PAGE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, server, 0) == anon);
+        its_view[9] = 0x77;
+        assert(anon[9] == 0x77 && used() == before + 4);
+        assert(!__wine_ps5_munmap(anon, PAGE));
+        munmap(its_view, PAGE);
+        close(server);
+    }
+
+    /* A pipe stands for a section, as in the server, and its size rounds up to a page. A closed one's memory stays
+     * while its view does, and a new section gets its own memory even if the number comes back. */
+    {
+        int ends[2];
+        uint8_t *view = anon;
+
+        assert(!pipe(ends));
+        close(ends[1]);
+        assert(__wine_ps5_section_created(ends[0], PAGE - 100));
+        assert(__wine_ps5_mmap(view, PAGE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, ends[0], 0) == view);
+        assert(used() == before + 5 && !view[0]);
+        view[0] = 0x31;
+        __wine_ps5_section_closed(ends[0]);
+        close(ends[0]);
+        assert(used() == before + 5 && view[0] == 0x31);
+        assert(!pipe(ends));
+        close(ends[1]);
+        assert(__wine_ps5_section_created(ends[0], PAGE));
+        assert(__wine_ps5_mmap(view + PAGE, PAGE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, ends[0], 0) == view + PAGE);
+        assert(used() == before + 6 && !view[PAGE] && view[0] == 0x31);
+        __wine_ps5_section_closed(ends[0]);
+        close(ends[0]);
+        assert(!__wine_ps5_munmap(view, 2 * PAGE));
+        assert(used() == before + 4);
+    }
+
+    /* A view goes: the memory stays for a later one, with what it holds. */
+    assert(!__wine_ps5_munmap(two, 2 * PAGE));
+    assert(used() == before + 4 && one[3 * PAGE] == 0xa5);
+
+    /* Closed with a view alive: still there, until an anonymous mapping replaces the view. */
+    __wine_ps5_section_closed(fd);
+    assert(used() == before + 4 && one[3 * PAGE] == 0xa5);
+    assert(__wine_ps5_mmap(one, 4 * PAGE, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == one);
+    assert(used() == before);
+    close(fd);
+    close(large);
+}
+
 static void test_heap(void)
 {
     enum { BLOCK = 2 << 20, BLOCK_PAGES = BLOCK / PAGE + 1, SMALL = 64 << 10, SMALL_PAGES = 5, STEPS = 4000 };
@@ -435,6 +535,7 @@ int main(void)
         refuse_map = 0;
     }
     assert(!__wine_ps5_munmap(base, 8 * PAGE) && used() == 0);
+    test_sections();
     test_heap();
     printf("wine dmem ps5 glue passed: pass-through before and outside the regions, commit, protect, "
            "a mapping across the edge, private and shared file views, munmap, a region given back and taken again, "

@@ -1,0 +1,172 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Tue, 3 Nov 2026 15:00:00 +0100
+Subject: [PATCH] ntdll, server: Keep small anonymous sections in direct memory
+ on PS5.
+
+An anonymous section is a shared memory object (patch 0730). Each view of one
+draws on the title's flexible memory, and a title can create only about 405 of
+them. Chromium keeps a section for every resource it is loading, so a game
+that loads hundreds at once runs out of both, and its loads fail.
+
+A title is one process, so a program's section needs no shared memory object
+for sharing: each view can map the same direct memory
+(wine/ps5/pw_wine_sections.c, reached from the wrapper of patch 0600). The
+server, a separate module, tells ntdll about sections a program creates and
+when they close, with a pipe standing for each one. Only those: the server
+maps its own session memory and user data page from their fds, so they stay
+shared memory objects, and a client reading them through direct memory would
+never see what the server writes. A copy-on-write view is filled by reading,
+so that read comes from direct memory too. The server now logs each failure to
+create a shared memory object, with how many it had created.
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1952,6 +1952,16 @@
+     if (!(connect_server = dlsym( module, "pw_wineserver_connect" )))
+         fatal_error( "%s has no pw_wineserver_connect\n", module_path );
+     register_server_thread = dlsym( module, "pw_wine_thread_register" );
++#ifdef __PROSPERO__
++    {
++        /* the server names the sections ntdll may keep in direct memory */
++        extern int __wine_ps5_section_created( int fd, size_t size );
++        extern void __wine_ps5_section_closed( int fd );
++        void (*section_callbacks)( int (*)( int, size_t ), void (*)( int ) ) =
++            dlsym( module, "pw_wineserver_section_callbacks" );
++        if (section_callbacks) section_callbacks( __wine_ps5_section_created, __wine_ps5_section_closed );
++    }
++#endif
+     if ((fd = connect_server( nls_dir )) == -1)
+         fatal_error( "the in-process server %s did not start\n", module_path );
+     unregister_server_thread = dlsym( module, "pw_wine_thread_unregister" );
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -190,6 +190,7 @@
+ extern int __wine_ps5_munmap( void *addr, size_t len );
+ extern int __wine_ps5_mprotect( void *addr, size_t len, int prot );
+ extern void __wine_ps5_dmem_region( void *base, size_t size );
++extern int __wine_ps5_section_read( int fd, void *to, size_t size, off_t offset );
+ #define host_mmap __wine_ps5_mmap
+ #define host_munmap __wine_ps5_munmap
+ #define host_mprotect __wine_ps5_mprotect
+@@ -2906,6 +2907,10 @@
+     }
+ 
+     mprotect( map_addr, map_size, PROT_READ | PROT_WRITE );
++#ifdef __PROSPERO__
++    /* a section in direct memory has its bytes there, not in its fd */
++    if (__wine_ps5_section_read( fd, map_addr, size, offset )) return STATUS_SUCCESS;
++#endif
+     pread( fd, map_addr, size, offset );
+     return STATUS_SUCCESS;
+ }
+diff --git a/server/mapping.c b/server/mapping.c
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -144,6 +144,7 @@
+     unsigned int flags;
+     unsigned int file_access;
+     struct fd   *fd;
++    int          program;  /* a section a program creates: the server maps none of them itself */
+ };
+ 
+ static void mapping_dump( struct object *obj, int verbose );
+@@ -365,8 +366,33 @@
+     return fd;
+ }
+ 
++#ifdef __PROSPERO__
++static int (*section_created)( int fd, size_t size );
++static void (*section_closed)( int fd );
++
++/* ntdll keeps a program's small anonymous sections in direct memory, and gives it back when they close */
++DECLSPEC_EXPORT void pw_wineserver_section_callbacks( int (*created)( int fd, size_t size ), void (*closed)( int fd ) )
++{
++    section_created = created;
++    section_closed = closed;
++}
++
++/* A section in direct memory needs no memory object, and a title can create only about 405 of those. A pipe, of
++ * which it can hold thousands, stands for it: ntdll knows the section by the descriptor's device and inode. */
++static int create_section_stand_in( file_pos_t size )
++{
++    int ends[2];
++
++    if (!section_created || size != (size_t)size || pipe( ends )) return -1;
++    close( ends[1] );
++    if (section_created( ends[0], size )) return ends[0];
++    close( ends[0] );
++    return -1;
++}
++#endif
++
+ /* create the unix fd behind an anonymous mapping */
+-static int create_anonymous_mapping_fd( file_pos_t size )
++static int create_anonymous_mapping_fd( file_pos_t size, int program )
+ {
+ #ifdef __PROSPERO__
+     /* There is no memfd on the PS5, so a temp file lives on the console's
+@@ -375,10 +401,11 @@
+      * good (Half-Life 2, whose 32-bit DXVK keeps textures in 64 MiB
+      * anonymous mappings). An anonymous shared memory object stays in
+      * memory instead; the temp file remains the fallback. */
+-    static int logged;
++    static int logged, created, failures;
+     off_t length = size;
+     int fd;
+ 
++    if (program && (fd = create_section_stand_in( size )) != -1) return fd;
+     if (sizeof(size) > sizeof(length) && length != size)
+     {
+         set_error( STATUS_INVALID_PARAMETER );
+@@ -389,11 +416,13 @@
+         if (!ftruncate( fd, length ))
+         {
+             if (!logged++) fprintf( stderr, "wine-ps5: anonymous mappings in shared memory\n" );
++            created++;
+             return fd;
+         }
+         close( fd );
+     }
+-    if (!logged++) fprintf( stderr, "wine-ps5: anonymous mappings in temp files: shared memory errno %d\n", errno );
++    if (failures++ < 8)
++        fprintf( stderr, "wine-ps5: anonymous mapping in a temp file: shared memory errno %d after %d created\n", errno, created );
+ #endif
+     return create_temp_file( size );
+ }
+@@ -1179,7 +1208,7 @@
+         }
+         if ((data->flags & SEC_RESERVE) && !(mapping->committed = create_ranges())) return false;
+         mapping->size = round_size( mapping->size, page_mask );
+-        if ((unix_fd = create_anonymous_mapping_fd( mapping->size )) == -1) goto error;
++        if ((unix_fd = create_anonymous_mapping_fd( mapping->size, data->program )) == -1) goto error;
+         if (!(mapping->fd = create_anonymous_fd( &mapping_fd_ops, unix_fd, &mapping->obj,
+                                                  FILE_SYNCHRONOUS_IO_NONALERT ))) goto error;
+         allow_fd_caching( mapping->fd );
+@@ -1325,6 +1354,13 @@
+ {
+     struct mapping *mapping = (struct mapping *)obj;
+     assert( obj->ops == &mapping_ops );
++#ifdef __PROSPERO__
++    if (section_closed && mapping->fd && !(mapping->flags & (SEC_FILE | SEC_IMAGE)))
++    {
++        int unix_fd = get_unix_fd( mapping->fd );
++        if (unix_fd != -1) section_closed( unix_fd );
++    }
++#endif
+     if (mapping->fd)
+     {
+         release_mapping_image_view_fd( mapping->fd, mapping->flags, mapping->shared );
+@@ -1588,7 +1624,7 @@
+ DECL_HANDLER(create_mapping)
+ {
+     struct file *file = NULL;
+-    struct mapping_init_data data = { .size = req->size, .file_access = req->file_access };
++    struct mapping_init_data data = { .size = req->size, .file_access = req->file_access, .program = !req->file_handle };
+     struct object_params params = { .ops = &mapping_ops, .access = req->access, .init_data = &data };
+ 
+     if (!get_req_object_attributes( &params )) return;
+-- 
+2.43.0
