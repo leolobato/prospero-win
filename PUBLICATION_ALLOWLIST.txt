@@ -642,6 +642,7 @@ wine/patches/0877-secur32-log-gnutls-errors-and-the-clock-on-handshake-failure.p
 tests/test_build_tls_ps5.py
 wine/patches/0965-win32u-ps5-no-pixel-format-message-loop-on-the-desktop.patch
 wine/patches/0966-winebus-ps5-other-controllers-as-hid-gamepads.patch
+wine/patches/0967-win32u-ps5-do-not-wait-for-the-desktop-window-owner.patch
 wine/patches/0970-ntdll-ps5-trace-each-process-query-class-once.patch
 wine/patches/0971-kernelbase-ps5-no-debugger-in-a-title.patch
 wine/patches/0972-faudio-keep-resampling-taps-within-the-samples.patch
