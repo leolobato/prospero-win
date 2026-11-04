@@ -391,18 +391,40 @@ int __wrap_stat(const char *path, struct stat *st)
     return resolve(&r, path, 1) ? -1 : stat_resolved(&r, st);
 }
 
+/* A trailing slash asks for what a link names, not the link: Wine looks at a
+ * drive root as "dosdevices/c:/". */
+static int ends_in_slash(const char *path)
+{
+    size_t length = strlen(path);
+    return length && path[length - 1] == '/';
+}
+
+/* What a trailing slash asks for has to be a directory, which the resolved path
+ * no longer says once a link was followed. */
+static int stat_directory_resolved(struct resolved *r, struct stat *st)
+{
+    if (stat_resolved(r, st)) return -1;
+    if (!S_ISDIR(st->st_mode)) { errno = ENOTDIR; return -1; }
+    return 0;
+}
+
 int __wrap_lstat(const char *path, struct stat *st)
 {
     struct resolved r;
-    return resolve(&r, path, 0) ? -1 : lstat_resolved(&r, st);
+    int follow = ends_in_slash(path);
+
+    if (resolve(&r, path, follow)) return -1;
+    return follow ? stat_directory_resolved(&r, st) : lstat_resolved(&r, st);
 }
 
 int __wrap_fstatat(int dirfd, const char *path, struct stat *st, int flags)
 {
     struct resolved r;
-    int follow = !(flags & AT_SYMLINK_NOFOLLOW);
+    int slash = ends_in_slash(path);
+    int follow = !(flags & AT_SYMLINK_NOFOLLOW) || slash;
 
     if (resolve_at(&r, dirfd, path, follow)) return -1;
+    if (slash) return stat_directory_resolved(&r, st);
     return follow ? stat_resolved(&r, st) : lstat_resolved(&r, st);
 }
 

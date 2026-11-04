@@ -325,6 +325,25 @@ int main(void)
     assert(!rmdir("dosdevices/c:/windows"));
     assert(!stat("dosdevices/c:", &st) && S_ISDIR(st.st_mode));
     assert(!lstat("dosdevices/c:", &st) && S_ISLNK(st.st_mode));
+    /* A trailing slash asks for what the link names, as on any host. */
+    assert(!lstat("dosdevices/c:/", &st) && S_ISDIR(st.st_mode));
+    assert(!lstat("dosdevices/z:/", &st) && S_ISDIR(st.st_mode));
+    assert(!fstatat(AT_FDCWD, "dosdevices/c:/", &st, AT_SYMLINK_NOFOLLOW) && S_ISDIR(st.st_mode));
+    assert(!fstatat(AT_FDCWD, "dosdevices/c:", &st, AT_SYMLINK_NOFOLLOW) && S_ISLNK(st.st_mode));
+    /* A link to a file isn't a directory, so a trailing slash can't name it. */
+    assert(!symlink("../drive_c/slash-target", "dosdevices/f:"));
+    {
+        int target = open("drive_c/slash-target", O_CREAT | O_WRONLY, 0644);
+        assert(target >= 0 && !close(target));
+    }
+    assert(!stat("dosdevices/f:", &st) && S_ISREG(st.st_mode));
+    errno = 0;
+    assert(lstat("dosdevices/f:/", &st) == -1 && errno == ENOTDIR);
+    errno = 0;
+    assert(fstatat(AT_FDCWD, "dosdevices/f:/", &st, AT_SYMLINK_NOFOLLOW) == -1 && errno == ENOTDIR);
+    assert(!unlink("dosdevices/f:") && !unlink("drive_c/slash-target"));
+    /* Only a look follows it: nothing here removes the drive through the name. */
+    assert(rmdir("dosdevices/c:/") == -1 && !lstat("dosdevices/c:", &st) && S_ISLNK(st.st_mode));
     assert(readlink("dosdevices/c:", buffer, sizeof(buffer)) == 10 && !memcmp(buffer, "../drive_c", 10));
     errno = 0;
     assert(readlink("drive_c", buffer, sizeof(buffer)) == -1 && errno == EINVAL);
