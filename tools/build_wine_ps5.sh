@@ -106,6 +106,7 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # game's hidclass sends hardware input through it (patch 0955). gdi32: a
 # window keeps its pixel format with a native opengl32 (patch 0956).
 # kernelbase: the computer name without wineboot's volatile key (patch 0957).
+# kernelbase: drives found by their roots without a mount manager (patch 0977).
 # wined3d: it carries vkd3d-shader, which d3dcompiler uses to compile D3DX
 # effects with samplers and in-pass shaders (patches 0959-0963).
 # hidclass.sys: the minidriver hears when a device is first opened (patch 0966).
