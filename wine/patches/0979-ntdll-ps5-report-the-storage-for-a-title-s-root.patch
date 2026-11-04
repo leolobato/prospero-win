@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Wed, 4 Nov 2026 13:00:00 +0100
+Subject: [PATCH] ntdll: Report the storage for a title's root directory on PS5.
+
+Z: maps to a PS5 title's root directory, a filesystem of a few megabytes
+that nothing can be stored in. Paths under Z:\data report the console's
+storage, but Z:\ itself reported under one megabyte free, and so did a
+NULL root for a program running from Z:, which is where games run from.
+A game checking the root of its own drive would find it full.
+
+When the size of the root directory is asked for, report /data's. Other
+directories keep their own, and the call falls back to the root's own
+figures if /data cannot be read.
+---
+ dlls/ntdll/unix/file.c | 29 +++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 48b58c3..933d09d 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -2216,6 +2216,31 @@ done:
+ }
+ #endif
+ 
++#ifdef __PROSPERO__
++/***********************************************************************
++ *           statvfs_for_size
++ *
++ * A title's root directory holds a few megabytes nothing can be stored in. It
++ * is Z:\, and the drive of a program running from Z:, so a game that checks
++ * the root of its own drive would find it full: report the storage instead.
++ */
++static int statvfs_for_size( int fd, const struct stat *st, struct statvfs *stfs )
++{
++    struct stat root;
++    int data_fd;
++
++    if (S_ISDIR(st->st_mode) && !stat( "/", &root ) &&
++        st->st_dev == root.st_dev && st->st_ino == root.st_ino &&
++        (data_fd = open( "/data", O_RDONLY )) != -1)
++    {
++        int ret = fstatvfs( data_fd, stfs );
++        close( data_fd );
++        if (!ret) return 0;
++    }
++    return fstatvfs( fd, stfs );
++}
++#endif
++
+ static NTSTATUS get_full_size_info(int fd, FILE_FS_FULL_SIZE_INFORMATION *info) {
+     struct stat st;
+     ULONGLONG bsize;
+@@ -2235,7 +2260,11 @@ static NTSTATUS get_full_size_info(int fd, FILE_FS_FULL_SIZE_INFORMATION *info)
+ 
+     /* Linux's fstatvfs is buggy */
+ #if !defined(linux) || !defined(HAVE_FSTATFS)
++#ifdef __PROSPERO__
++    if (statvfs_for_size( fd, &st, &stfs ) < 0) return errno_to_status( errno );
++#else
+     if (fstatvfs( fd, &stfs ) < 0) return errno_to_status( errno );
++#endif
+     bsize = stfs.f_frsize;
+ #else
+     if (fstatfs( fd, &stfs ) < 0) return errno_to_status( errno );
+-- 
+2.43.0
