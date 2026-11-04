@@ -209,6 +209,28 @@ int __wine_ps5_section_created(int fd, size_t bytes);
 void __wine_ps5_section_closed(int fd);
 int __wine_ps5_section_read(int fd, void *to, size_t bytes, off_t position);
 
+/* PW_SECTIONS_FLEXIBLE=1 keeps a game's sections as shared memory objects; no other value does. The choice is made
+ * at the first section, so each case runs in its own process. */
+static void test_sections_switch(void)
+{
+    static const struct { const char *value; int direct; } cases[] = { { "1", 0 }, { "0", 1 }, { "", 1 }, { NULL, 1 } };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        pid_t child = fork();
+        int status = -1;
+
+        assert(child >= 0);
+        if (!child) {
+            const int fd = memfd_create("section", 0);
+
+            if (cases[i].value) setenv("PW_SECTIONS_FLEXIBLE", cases[i].value, 1);
+            else unsetenv("PW_SECTIONS_FLEXIBLE");
+            _exit(fd >= 0 && !!__wine_ps5_section_created(fd, PAGE) == cases[i].direct ? 0 : 1);
+        }
+        assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && !WEXITSTATUS(status));
+    }
+}
+
 static void test_sections(void)
 {
     uint8_t *space = space_for(32), *one = space + 4 * PAGE, *two = space + 12 * PAGE, *anon = space + 20 * PAGE;
@@ -535,6 +557,7 @@ int main(void)
         refuse_map = 0;
     }
     assert(!__wine_ps5_munmap(base, 8 * PAGE) && used() == 0);
+    test_sections_switch();
     test_sections();
     test_heap();
     printf("wine dmem ps5 glue passed: pass-through before and outside the regions, commit, protect, "

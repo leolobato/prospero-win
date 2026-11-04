@@ -218,7 +218,9 @@ static int sections_check(void)
 static int sections_on(void)
 {
     if (!__atomic_load_n(&sections_state, __ATOMIC_ACQUIRE) && state > 0) {
-        const int on = !getenv("WINE_PS5_SECTIONS_FLEXIBLE") && sections_check();
+        /* A game's profile can turn this off: [debug] env takes PW_ names, not WINE_ ones. */
+        const char *const flexible = getenv("PW_SECTIONS_FLEXIBLE");
+        const int on = !(flexible && !strcmp(flexible, "1")) && sections_check();
 
         fprintf(stderr, "wine-ps5: small anonymous sections in %s memory\n", on ? "direct" : "flexible");
         __atomic_store_n(&sections_state, on ? 1 : -1, __ATOMIC_RELEASE);
