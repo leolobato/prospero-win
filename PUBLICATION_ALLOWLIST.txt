@@ -776,3 +776,8 @@ wine/patches/0997-ntdll-ps5-say-which-program-could-not-start.patch
 wine/patches/0998-win32u-keep-the-video-memory-size-within-32-bits.patch
 wine/patches/0999-winegstreamer-ps5-play-mp3-and-wav-through-directshow.patch
 wine/patches/0985-ntdll-ps5-start-hosted-drivers-without-thread-attach.patch
+
+# Rumble
+native/pw_rumble.c
+native/pw_rumble.h
+tests/test_pw_rumble.c

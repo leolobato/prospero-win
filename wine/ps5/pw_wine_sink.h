@@ -103,6 +103,9 @@ int pw_wine_rumble(uint32_t *left,uint32_t *right);
  * read as disconnected); the calls above are controller 0's. */
 void pw_wine_set_pad_at(uint32_t index,const PwWinePad *pad);
 int pw_wine_rumble_at(uint32_t index,uint32_t *left,uint32_t *right);
+/* The same, with the strongest speeds set since the last read: a pulse the
+ * game started and ended between two reads shows only here. */
+int pw_wine_rumble_peak_at(uint32_t index,uint32_t *left,uint32_t *right,uint32_t *peak_left,uint32_t *peak_right);
 /* Bit i set once the game asked about controller i (pw_wine_pad_at,
  * pw_wine_pads_ask); the title opens the other users' pads only then. */
 uint32_t pw_wine_pads_wanted(void);

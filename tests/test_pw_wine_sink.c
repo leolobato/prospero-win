@@ -356,6 +356,22 @@ int main(void)
     pw_wine_set_rumble(0x10000,0);assert(pw_wine_rumble(NULL,&right)==1 && right==0);
     assert(!pw_wine_rumble(&left,NULL) && left==0xffff);
 
+    /* A pulse between two reads: the plain read sees it end, the peak keeps it. */
+    {
+        uint32_t peak_left,peak_right;
+        pw_wine_set_rumble(0,0);(void)pw_wine_rumble(NULL,NULL);
+        pw_wine_set_rumble(60000,1000);pw_wine_set_rumble(0,0);
+        assert(pw_wine_rumble_peak_at(0,&left,&right,&peak_left,&peak_right)==1);
+        assert(left==0 && right==0 && peak_left==60000 && peak_right==1000);
+        pw_wine_set_rumble(60000,0);pw_wine_set_rumble(0,0);
+        assert(pw_wine_rumble(&left,&right)==1 && left==0 && right==0);
+        assert(!pw_wine_rumble_peak_at(0,&left,&right,&peak_left,&peak_right) && !peak_left && !peak_right);
+        pw_wine_set_rumble(500,500);
+        assert(pw_wine_rumble_peak_at(0,NULL,NULL,&peak_left,&peak_right)==1 && peak_left==500 && peak_right==500);
+        assert(!pw_wine_rumble_peak_at(0,NULL,NULL,&peak_left,&peak_right) && peak_left==500);
+        pw_wine_set_rumble(0,0);(void)pw_wine_rumble(NULL,NULL);
+    }
+
     /* Controllers 1..3: their own state, packets and rumble; 0 is the pad above. */
     PwWinePad second=pad;second.buttons=0x4000;
     /* Controller 0 was asked about above; the sink notes each index asked for. */

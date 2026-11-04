@@ -21,6 +21,8 @@ static PwWinePad pad_state[PW_WINE_PADS];
 static PwWinePadExtra pad_extra[PW_WINE_PADS];
 static uint32_t pad_changes;
 static uint32_t rumble_left[PW_WINE_PADS],rumble_right[PW_WINE_PADS],rumble_changed[PW_WINE_PADS];
+/* The strongest since the last read: a pulse that ended before it. */
+static uint32_t rumble_peak_left[PW_WINE_PADS],rumble_peak_right[PW_WINE_PADS];
 static uint32_t pads_wanted;
 static struct pw_title_menu menu_state={.version=PW_TITLE_MENU_VERSION};
 /* Audio has its own lock: its sink blocks for a grain, which must not hold
@@ -252,11 +254,13 @@ void pw_wine_set_rumble_at(uint32_t index,uint32_t left,uint32_t right)
     pthread_mutex_lock(&lock);
     if(left!=rumble_left[index] || right!=rumble_right[index]) {
         rumble_left[index]=left;rumble_right[index]=right;rumble_changed[index]=1;
+        if(left>rumble_peak_left[index])rumble_peak_left[index]=left;
+        if(right>rumble_peak_right[index])rumble_peak_right[index]=right;
     }
     pthread_mutex_unlock(&lock);
 }
 void pw_wine_set_rumble(uint32_t left,uint32_t right){pw_wine_set_rumble_at(0,left,right);}
-int pw_wine_rumble_at(uint32_t index,uint32_t *left,uint32_t *right)
+int pw_wine_rumble_peak_at(uint32_t index,uint32_t *left,uint32_t *right,uint32_t *peak_left,uint32_t *peak_right)
 {
     int changed;
     if(index>=PW_WINE_PADS)return 0;
@@ -264,8 +268,15 @@ int pw_wine_rumble_at(uint32_t index,uint32_t *left,uint32_t *right)
     changed=(int)rumble_changed[index];rumble_changed[index]=0;
     if(left)*left=rumble_left[index];
     if(right)*right=rumble_right[index];
+    if(peak_left)*peak_left=rumble_peak_left[index];
+    if(peak_right)*peak_right=rumble_peak_right[index];
+    rumble_peak_left[index]=rumble_left[index];rumble_peak_right[index]=rumble_right[index];
     pthread_mutex_unlock(&lock);
     return changed;
+}
+int pw_wine_rumble_at(uint32_t index,uint32_t *left,uint32_t *right)
+{
+    return pw_wine_rumble_peak_at(index,left,right,NULL,NULL);
 }
 int pw_wine_rumble(uint32_t *left,uint32_t *right){return pw_wine_rumble_at(0,left,right);}
 int pw_wine_pad_peek(uint32_t index,PwWinePad *pad)

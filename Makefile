@@ -150,6 +150,7 @@ $(eval $(call test_rule,test_pw_audio_mix,tests/test_pw_audio_mix.c src/pw_audio
 $(eval $(call test_rule,test_pw_agc_submit_lifecycle,tests/test_pw_agc_submit_lifecycle.c native/pw_agc_submit_lifecycle.c,))
 $(eval $(call test_rule,test_pw_videoout_layout,tests/test_pw_videoout_layout.c,))
 $(eval $(call test_rule,test_pw_videoout_tile,tests/test_pw_videoout_tile.c src/pw_present.c,))
+$(eval $(call test_rule,test_pw_rumble,tests/test_pw_rumble.c native/pw_rumble.c,))
 $(eval $(call test_rule,test_pw_pad_ps5,tests/test_pw_pad_ps5.c native/pw_pad_ps5.c src/pw_pad.c,-DPW_PAD_PS5_HOST_TEST))
 $(eval $(call test_rule,test_pw_pad_players,tests/test_pw_pad_players.c native/pw_pad_ps5.c src/pw_pad.c,-DPW_PAD_PS5_HOST_TEST))
 $(eval $(call test_rule,test_pw_data_mount,tests/test_pw_data_mount.c native/pw_data_mount.c,-DPW_DATA_MOUNT_HOST_TEST))
@@ -184,7 +185,7 @@ TESTS := test_pw_title_id test_pw_title_sandbox test_pw_publication_sha256 test_
 	test_pw_guest_fp test_pw_vm test_pw_x86_block test_pw_x86_flat test_pw_x86_cache test_pw_x86_code_pages test_pw_wow_smc_pages test_pw_wow_thread_budget test_pw_wow_tsc_clock test_pw_wow_call_top \
 	test_pw_x86_engine test_pw_x86_chaining test_pw_x86_residency test_pw_x86_global_residency test_pw_x86_reencode test_pw_x86_smc test_pw_x86_fault_markers test_pw_x86_lazyflags \
 	test_pw_guest_call test_pw_x87 test_pw_x87_native test_pw_audio_ps5 test_pw_audio_mix test_pw_agc_submit_lifecycle \
-	test_pw_videoout_layout test_pw_videoout_tile test_pw_pad_ps5 test_pw_pad_players test_pw_data_mount \
+	test_pw_videoout_layout test_pw_videoout_tile test_pw_pad_ps5 test_pw_rumble test_pw_pad_players test_pw_data_mount \
 	test_pw_data_mount_native test_pw_lapy_elevation test_pw_file_limits \
 	test_vk_present_interval test_vk_radv_profile
 

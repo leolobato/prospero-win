@@ -50,6 +50,7 @@
 #include "pw_osk_ps5.h"
 #include "pw_videoout_ps5.h"
 #include "pw_wine_library.h"
+#include "pw_rumble.h"
 #include "pw_wine_prefix.h"
 #include "pw_title_publication_native.h"
 #include "pw_title_publication_ps5_lock.h"
@@ -412,6 +413,18 @@ static uint64_t now_ns(void)
 
     if (clock_gettime(CLOCK_MONOTONIC, &value) != 0) return 0u;
     return (uint64_t)value.tv_sec * 1000000000u + (uint64_t)value.tv_nsec;
+}
+
+/* One pad's rumble for this tick. */
+static int rumble_drive(PwPadPs5 *pad, PwRumbleHold *hold, uint32_t percent, int changed, uint32_t left, uint32_t right,
+                        uint32_t peak_left, uint32_t peak_right, int *sent)
+{
+    uint32_t out_left, out_right;
+
+    *sent = pw_rumble_hold_step(hold, now_ns() / 1000000u, changed, left, right, peak_left, peak_right, &out_left, &out_right);
+    if (!*sent) return PW_OK;
+    return pw_pad_ps5_vibrate(pad, pw_rumble_motor(pw_wine_rumble_level(out_left, percent)),
+                              pw_rumble_motor(pw_wine_rumble_level(out_right, percent)));
 }
 
 /* [runtime] fast_clock: the readers pw_tsc_measure takes. */
@@ -1596,6 +1609,10 @@ int main(int argc, char **argv)
     void (*set_pad_at)(uint32_t, const PwWinePad *) = NULL;
     int (*rumble_at)(uint32_t, uint32_t *, uint32_t *) = NULL;
     uint32_t (*pads_wanted)(void) = NULL;
+    /* Newer ntdll: the sink's rumble with the pulses between two reads. */
+    int (*rumble_peak_at)(uint32_t, uint32_t *, uint32_t *, uint32_t *, uint32_t *) = NULL;
+    static PwRumbleHold rumble_holds[PW_PAD_PLAYERS + 1];
+    static int32_t rumble_users[PW_PAD_PLAYERS];   /* whose pad each player's hold is about */
     uint64_t players_from = 0;   /* the tick a game first asked for controllers 1..3 */
     int players_open = 0;
     /* [display] menu: L3+R3 opens the menu, DXVK's HUD draws it (patch 0973). */
@@ -2089,6 +2106,8 @@ int main(int argc, char **argv)
                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_pad");
             rumble = (int (*)(uint32_t *, uint32_t *))
                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_rumble");
+            rumble_peak_at = (int (*)(uint32_t, uint32_t *, uint32_t *, uint32_t *, uint32_t *))
+                (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_rumble_peak_at");
             /* A player2 preset gives the second user keys instead (#427),
              * so its pad never drives a controller as well. */
             if (!player2) {
@@ -2517,13 +2536,20 @@ int main(int argc, char **argv)
                     set_pad_at(i + 1, connected ? &state : NULL);
                     players_fed[i] = 1;
                 }
-                if (rumble_at && rumble_at(i + 1, &left, &right) == 1) {
-                    int vibrate = pw_pad_ps5_vibrate(player, pw_wine_rumble_level(left, game_input.rumble),
-                                                     pw_wine_rumble_level(right, game_input.rumble));
-                    if (!player_vibrations[i]++ || vibrate != PW_OK)
-                        PS5LOG_LOG("PW_WINE64 player=%u rumble left=%u right=%u scale=%u status=%s rc=%d trigger_rc=%d",
+                if (rumble_at) {
+                    uint32_t peak_left = 0, peak_right = 0;
+                    if (rumble_users[i] != player->user_id) {
+                        rumble_users[i] = player->user_id;
+                        rumble_holds[i + 1] = (PwRumbleHold){0};
+                    }
+                    int changed = rumble_peak_at ? rumble_peak_at(i + 1, &left, &right, &peak_left, &peak_right)
+                                                 : rumble_at(i + 1, &left, &right);
+                    int sent, vibrate = rumble_drive(player, &rumble_holds[i + 1], game_input.rumble, changed, left, right,
+                                                     peak_left, peak_right, &sent);
+                    if (sent && (!player_vibrations[i]++ || vibrate != PW_OK))
+                        PS5LOG_LOG("PW_WINE64 player=%u rumble left=%u right=%u scale=%u status=%s rc=%d",
                                    (unsigned)(i + 1), (unsigned)left, (unsigned)right, (unsigned)game_input.rumble,
-                                   pw_result_name(vibrate), player->vibration_rc, player->trigger_rc);
+                                   pw_result_name(vibrate), player->vibration_rc);
                 }
             }
         }
@@ -2544,15 +2570,18 @@ int main(int argc, char **argv)
             }
             /* The rumble the game asked for: XInput's left motor is the
              * DualSense's large one, speeds 0..65535 become 0..255, scaled
-             * by the profile's [input] rumble (the triggers follow them). */
+             * by the profile's [input] rumble. */
             uint32_t left, right;
-            if (rumble && rumble(&left, &right) == 1) {
-                int vibrate = pw_pad_ps5_vibrate(&pad, pw_wine_rumble_level(left, game_input.rumble),
-                                                 pw_wine_rumble_level(right, game_input.rumble));
-                if (!vibrations++ || vibrate != PW_OK)
-                    PS5LOG_LOG("PW_WINE64 rumble left=%u right=%u scale=%u status=%s rc=%d trigger_rc=%d",
+            if (rumble) {
+                uint32_t peak_left = 0, peak_right = 0;
+                int changed = rumble_peak_at ? rumble_peak_at(0, &left, &right, &peak_left, &peak_right)
+                                             : rumble(&left, &right);
+                int sent, vibrate = rumble_drive(&pad, &rumble_holds[0], game_input.rumble, changed, left, right,
+                                                 peak_left, peak_right, &sent);
+                if (sent && (!vibrations++ || vibrate != PW_OK))
+                    PS5LOG_LOG("PW_WINE64 rumble left=%u right=%u scale=%u status=%s rc=%d",
                                (unsigned)left, (unsigned)right, (unsigned)game_input.rumble,
-                               pw_result_name(vibrate), pad.vibration_rc, pad.trigger_rc);
+                               pw_result_name(vibrate), pad.vibration_rc);
             }
         }
         /* The console's own keyboard: the two-finger click or the menu's
