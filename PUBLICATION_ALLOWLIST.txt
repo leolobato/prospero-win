@@ -756,6 +756,9 @@ tools/build_wpf_ps5.sh
 tests/test_mf_probe_handles.py
 wine/patches/0482-rtworkq-cleanup-groups.patch
 wine/patches/0964-ntdll-ps5-retire-thread-alert-kqueues.patch
+wine/patches/0968-win32u-ps5-keep-the-pointer-in-a-window-under-a-display-mode.patch
+wine/patches/0977-kernelbase-list-drives-nothing-has-published.patch
+wine/patches/0979-ntdll-ps5-report-the-storage-for-a-title-s-root.patch
 tests/test_wine_alert_kqueue.py
 wine/patches/0981-win32u-register-builtin-classes-without-waiting.patch
 wine/patches/0980-server-ps5-dump-long-waiting-stacks-in-the-watchdog.patch

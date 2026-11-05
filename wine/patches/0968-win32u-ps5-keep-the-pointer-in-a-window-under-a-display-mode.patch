@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Thu, 5 Nov 2026 02:00:00 +0100
+Subject: [PATCH] win32u: Limit the PS5 pointer by a swapchain window's place
+ on the real screen.
+
+The pointer stays in the client area of the window whose swapchain last
+presented. The server keeps the pointer in real screen pixels, but that
+client area was read in the game's coordinates, so the two agree only
+while no display mode is set. Under a mode the game sets, the limit is
+the mode's size in real pixels: a game at 1024x768 had its pointer stop
+at (1024, 768) of a 1920x1080 screen, about 55% across and 72% down the
+image, and could not reach the buttons beyond. The client area is now
+mapped to real pixels, for the limit and for the place given to the
+hardware cursor.
+---
+diff --git a/dlls/win32u/ps5drv.c b/dlls/win32u/ps5drv.c
+index 3ab645a..d273970 100644
+--- a/dlls/win32u/ps5drv.c
++++ b/dlls/win32u/ps5drv.c
+@@ -927,6 +927,9 @@ void ps5drv_vulkan_cursor( void *vulkan_handle, HWND hwnd )
+     BOOL placed = hwnd && get_window_rects( hwnd, COORDS_SCREEN, &rects, get_dpi_for_window( hwnd ) ) &&
+                   rects.client.right > rects.client.left && rects.client.bottom > rects.client.top;
+ 
++    /* the pointer's place is the server's, so its limits are too: a display mode
++     * smaller than the desktop gives the window another size there */
++    if (placed) rects = map_window_rects_virt_to_raw( rects, get_dpi_for_window( hwnd ) );
+     if (!looked)
+     {
+         looked = TRUE;
+-- 
+2.43.0
