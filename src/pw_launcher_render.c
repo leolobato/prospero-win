@@ -281,13 +281,13 @@ int pw_launcher_render_message(const char *heading,const char *detail,const PwPr
     if(!heading || !target || !target->pixels)return PW_ERR_PRECONDITION;
     if(!target_fits(target))return PW_ERR_MALFORMED;
     const Canvas canvas={target->pixels,target->stride};
-    background(&canvas);
-    rounded(&canvas,PANEL_X,PANEL_Y,PANEL_W,PANEL_H,14,rgb(0xff,0xff,0xff),rgb(0xdc,0xe8,0xfa));
+    fill(&canvas,0,0,W,H,rgb(0x0b,0x0b,0x0a));
+    rounded(&canvas,PANEL_X,PANEL_Y,PANEL_W,PANEL_H,14,rgb(0x1a,0x1a,0x17),rgb(0x1a,0x1a,0x17));
     int32_t scale=fit(heading,7,3,ROOM);
-    text(&canvas,(W-text_width(heading,scale))/2,PANEL_Y+84,heading,scale,rgb(0x0a,0x44,0xc0),ROOM);
+    text(&canvas,(W-text_width(heading,scale))/2,PANEL_Y+84,heading,scale,rgb(0xf2,0xf0,0xea),ROOM);
     if(detail) {
         scale=fit(detail,4,2,ROOM);
-        text(&canvas,(W-text_width(detail,scale))/2,PANEL_Y+176,detail,scale,rgb(0x2c,0x3a,0x5c),ROOM);
+        text(&canvas,(W-text_width(detail,scale))/2,PANEL_Y+176,detail,scale,rgb(0xa7,0xa5,0x9e),ROOM);
     }
     return PW_OK;
 }
