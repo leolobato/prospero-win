@@ -18,6 +18,9 @@ typedef struct PwTitleLaunch {
     char recipe_version[65];
     char exit_policy[16];
     /* Schema 2 binds the recorded Steam download root independently of title.
+     * Schema 3 is the same, for a USB game: /mnt/usb/<folder> names no drive,
+     * and the title finds the drive that holds the program. /mnt/usb is never a
+     * mount, so stale use fails instead of reaching the wrong drive.
      * Schema 1 retains its legacy per-title inferred root. */
     char game_root[1024];
 } PwTitleLaunch;

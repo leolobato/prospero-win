@@ -326,7 +326,8 @@ static int is_pad_mode(PwGameInputMode mode)
 
 enum { PAD_CREATE = 0x1u, PAD_OPTIONS = 0x8u, PAD_UP = 0x10u, PAD_RIGHT = 0x20u,
        PAD_DOWN = 0x40u, PAD_LEFT = 0x80u, PAD_L1 = 0x400u, PAD_R1 = 0x800u,
-       PAD_CROSS = 0x4000u, PAD_SQUARE = 0x8000u, PAD_CLOSE = PAD_OPTIONS | PAD_CREATE };
+       PAD_CIRCLE = 0x2000u, PAD_CROSS = 0x4000u, PAD_SQUARE = 0x8000u,
+       PAD_CLOSE = PAD_OPTIONS | PAD_CREATE };
 /* The pad core needs a key map to open; the title reads raw edges and maps
  * them with the game's bindings (pw_game_profile). */
 static const PwPadKeyMap pad_open_map[] = { { PAD_CROSS, 0x20, 0, 0, "cross" } };
@@ -1077,6 +1078,78 @@ static void on_exit_report(void)
 
 /* ---- library ------------------------------------------------------------ */
 
+/* Admission found no drive with this USB game, or more than one. The screen
+ * says so instead of the system's error; Wine is not loaded yet. No lease is
+ * held while it shows, so Playden can publish meanwhile. A missing drive is
+ * looked for again every second, and Circle goes Home. Returns the result of
+ * the admission that ended the wait, with video and pad closed for Wine. */
+static int wait_for_game_drive(const PwTitlePublicationPlatform *platform, int status,
+                               char *error, size_t error_size)
+{
+    static PwVideoOutPs5 video;
+    static PwPadPs5 pad;
+    PwPadPs5Ops pad_ops;
+    const size_t frame_bytes = (size_t)PW_LAUNCHER_RENDER_WIDTH * PW_LAUNCHER_RENDER_HEIGHT * 4u;
+    uint8_t *frame = mmap(NULL, frame_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    int video_status = pw_videoout_ps5_open(&video), pad_status = pw_pad_ps5_platform_ops(&pad_ops);
+    int shown = 0, quit = 0;
+
+    if (pad_status == PW_OK)
+        pad_status = pw_pad_ps5_open(&pad, &pad_ops, pad_open_map,
+                                     sizeof(pad_open_map) / sizeof(pad_open_map[0]));
+    PS5LOG_LOG("PW_WINE64 game drive wait video=%s pad=%s frame=%d", pw_result_name(video_status),
+               pw_result_name(pad_status), frame != MAP_FAILED);
+    /* With no screen there is nothing to wait behind: refuse as before. So too on
+     * two drives with no pad: that screen only ends with Circle. */
+    for (uint64_t tick = 1; video_status == PW_OK && frame != MAP_FAILED && !quit; tick++) {
+        if (status != PW_TITLE_PUBLICATION_ADMISSION_DRIVE_MISSING &&
+            status != PW_TITLE_PUBLICATION_ADMISSION_DRIVE_AMBIGUOUS &&
+            status != PW_TITLE_PUBLICATION_ADMISSION_BUSY) break;
+        if (status == PW_TITLE_PUBLICATION_ADMISSION_DRIVE_AMBIGUOUS && pad_status != PW_OK) break;
+        if (status != shown && status != PW_TITLE_PUBLICATION_ADMISSION_BUSY) {
+            const PwPresentTarget target = { frame, PW_LAUNCHER_RENDER_WIDTH, PW_LAUNCHER_RENDER_HEIGHT,
+                                             PW_LAUNCHER_RENDER_WIDTH * 4u, frame_bytes };
+            const PwPresentView view = { frame, target.width, target.height, target.stride,
+                                         (uint32_t)frame_bytes };
+            int present;
+
+            present = status == PW_TITLE_PUBLICATION_ADMISSION_DRIVE_MISSING ?
+                pw_launcher_render_message("Connect the USB drive with this game", "Press Circle to quit", &target) :
+                pw_launcher_render_message("This game is on two USB drives",
+                                           "Open Playden to fix it. Press Circle to quit", &target);
+            if (present == PW_OK) present = pw_videoout_ps5_present(&video, &view);
+            if (present != PW_OK) PS5LOG_LOG("PW_WINE64 game drive present=%s", pw_result_name(present));
+            PS5LOG_LOG("PW_WINE64 game drive reason=%s", error);
+            shown = status;
+        }
+        if (pad_status == PW_OK && pw_pad_ps5_read(&pad) == PW_OK &&
+            (pad.core.pressed_edges & PAD_CIRCLE)) quit = 1;
+        pw_diagnostics_tick(now_ns());
+        usleep(PW_WINE64_TICK_US);
+        if (!quit && status != PW_TITLE_PUBLICATION_ADMISSION_DRIVE_AMBIGUOUS &&
+            tick % PW_WINE64_TICKS_PER_S == 0)
+            status = pw_title_publication_open(&title_descriptor, platform,
+                                               &title_publication, error, error_size);
+    }
+    const int pad_closed = pad_status == PW_OK ? pw_pad_ps5_close(&pad) : PW_OK;
+    const int video_closed = video_status == PW_OK ? pw_videoout_ps5_close(&video) : PW_OK;
+    if (frame != MAP_FAILED) munmap(frame, frame_bytes);
+    /* Wine opens these itself: a handle left open would stop the game's display. */
+    if (status == PW_OK && (pad_closed != PW_OK || video_closed != PW_OK)) {
+        PS5LOG_LOG("PW_WINE64 game drive close pad=%s video=%s", pw_result_name(pad_closed), pw_result_name(video_closed));
+        pw_title_publication_close(&title_publication);
+        snprintf(error, error_size, "the drive screen did not close");
+        status = PW_TITLE_PUBLICATION_ADMISSION_INVALID;
+    }
+    if (quit) {
+        PS5LOG_LOG("PW_WINE64 game drive wait ended by the player");
+        pw_diagnostics_close("game-drive-quit");
+        return_to_home();
+        pw_diagnostics_resume();
+    }
+    return status;
+}
+
 /* Complete the one-shot helper exchange before loading profiles or starting
  * Wine. A failed or incomplete request closes this process to Home. */
 static int open_library(void)
@@ -1115,11 +1188,24 @@ static int open_library(void)
             .host_root = NULL, .owner_uid = (uint32_t)geteuid(),
             .try_lock_shared = pw_title_publication_ps5_lock, .context = NULL
         };
-        if (pw_title_publication_open(&title_descriptor, &platform,
-                &title_publication, session_error, sizeof(session_error)) != 0) {
+        status = pw_title_publication_open(&title_descriptor, &platform,
+                &title_publication, session_error, sizeof(session_error));
+        if (status == PW_TITLE_PUBLICATION_ADMISSION_DRIVE_MISSING ||
+            status == PW_TITLE_PUBLICATION_ADMISSION_DRIVE_AMBIGUOUS)
+            status = wait_for_game_drive(&platform, status, session_error, sizeof(session_error));
+        if (status != 0) {
             PS5LOG_LOG("PW_WINE64 publication refused reason=%s", session_error);
             return -1;
         }
+        /* The profile's digest covers its /mnt/usb paths. From here on, and for
+         * the game, they are the drive's: Z:\\mnt\\usbN\\... */
+        if (pw_title_publication_use_game_mount(&title_publication.profile, title_publication.game_mount,
+                                                session_error, sizeof(session_error)) != 0) {
+            PS5LOG_LOG("PW_WINE64 publication refused reason=%s", session_error);
+            return -1;
+        }
+        if (title_publication.game_mount[0])
+            PS5LOG_LOG("PW_WINE64 game drive mount=%s", title_publication.game_mount);
         library_root = per_game_library_root;
         if ((exec_chain_depth && title_session_argument ?
                  pw_title_session_resume : pw_title_session_start)(

@@ -45,8 +45,32 @@ static void explicit_game_root_contract(void) {
         assert(parse(text, &out, error) != PW_OK);
     }
 }
+static void usb_search_root_contract(void) {
+    char text[2048], error[128]; PwTitleLaunch out;
+    const char *good[] = {"/mnt/usb/playden/games/220", "/mnt/usb/220", NULL};
+    const char *bad[] = {"/mnt/usb", "/mnt/usb/", "/mnt/usb0/playden/games/220", "/mnt/usbs/220", "/mnt/ext0/220",
+                         "/data/games/220", "/mnt/usb//220", "/mnt/usb/../220", "/mnt/usb/./220", NULL};
+    for (unsigned schema = 2; schema <= 3; ++schema) {
+        for (unsigned i = 0; good[i]; ++i) {
+            snprintf(text, sizeof(text), "{\"game_root\":\"%s\",%s", good[i], valid + 1);
+            char *field = strstr(text, "\"schema_version\":1"); field[strlen("\"schema_version\":")] = (char)('0' + schema);
+            memset(&out, 0, sizeof(out));
+            if (schema == 3) assert(parse(text, &out, error) == PW_OK && out.schema_version == 3 && !strcmp(out.game_root, good[i]));
+            else assert(parse(text, &out, error) != PW_OK); /* Schema 2 names a real place. */
+        }
+    }
+    snprintf(text, sizeof(text), "{\"game_root\":\"/mnt/usb\",%s", valid + 1);
+    char *field = strstr(text, "\"schema_version\":1"); field[strlen("\"schema_version\":")] = '2';
+    assert(parse(text, &out, error) != PW_OK);
+    for (unsigned i = 0; bad[i]; ++i) {
+        snprintf(text, sizeof(text), "{\"game_root\":\"%s\",%s", bad[i], valid + 1);
+        field = strstr(text, "\"schema_version\":1"); field[strlen("\"schema_version\":")] = '3';
+        assert(parse(text, &out, error) != PW_OK);
+    }
+}
 int main(void) {
     explicit_game_root_contract();
+    usb_search_root_contract();
     PwTitleLaunch out;
     char error[128], text[1024];
     assert(parse(valid, &out, error) == PW_OK);

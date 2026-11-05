@@ -74,8 +74,10 @@ static int title(const char *s) {
         if (i < 4 ? s[i] < 'A' || s[i] > 'Z' : s[i] < '0' || s[i] > '9') return 0;
     return 1;
 }
-static int game_root(const char *path) {
+static int game_root(const char *path, unsigned schema) {
     if (strncmp(path, "/data/", 6) && strncmp(path, "/mnt/", 5)) return 0;
+    if (schema == 3 ? strncmp(path, "/mnt/usb/", 9) != 0
+                    : !strcmp(path, "/mnt/usb") || !strncmp(path, "/mnt/usb/", 9)) return 0;
     /* Game files must stay outside Playden's private bottle/control tree. */
     if (!strncmp(path, "/data/playden", 13) && (!path[13] || path[13] == '/')) return 0;
     const char *part = path + 1;
@@ -143,7 +145,7 @@ int pw_title_launch_parse(const char *bytes, size_t length, const char *expected
             status = number(&r, &value);
             if (status != PW_OK) return fail(error, error_size, status, "invalid descriptor integer");
             if (field == 0) {
-                if (value != 1 && value != 2) return fail(error, error_size, PW_ERR_UNSUPPORTED, "unsupported descriptor schema");
+                if (value < 1 || value > 3) return fail(error, error_size, PW_ERR_UNSUPPORTED, "unsupported descriptor schema");
                 candidate.schema_version = (unsigned)value;
             } else if (field == 1) {
                 if (!value || value > UINT32_MAX) return fail(error, error_size, PW_ERR_MALFORMED, "invalid Steam app ID");
@@ -172,7 +174,7 @@ int pw_title_launch_parse(const char *bytes, size_t length, const char *expected
         if (!take(&r, ',')) return fail(error, error_size, PW_ERR_MALFORMED, "missing descriptor separator");
     }
     whitespace(&r);
-    if (r.next != r.end || seen != (1u << (candidate.schema_version == 2 ? 12 : 11)) - 1u)
+    if (r.next != r.end || seen != (1u << (candidate.schema_version >= 2 ? 12 : 11)) - 1u)
         return fail(error, error_size, PW_ERR_MALFORMED, "missing fields or trailing descriptor data");
     if (strcmp(candidate.title_id, expected_title_id) || !title(candidate.title_id))
         return fail(error, error_size, PW_ERR_MALFORMED, "descriptor title does not match this executable");
@@ -190,7 +192,7 @@ int pw_title_launch_parse(const char *bytes, size_t length, const char *expected
         if (!legacy_game_root(candidate.game_root, sizeof(candidate.game_root),
                               candidate.title_id, candidate.app_id))
             return fail(error, error_size, PW_ERR_LIMIT, "legacy game root outside bounds");
-    } else if (!game_root(candidate.game_root))
+    } else if (!game_root(candidate.game_root, candidate.schema_version))
         return fail(error, error_size, PW_ERR_MALFORMED, "game root is not a canonical console storage path");
     if (strcmp(candidate.exit_policy, "exit-title"))
         return fail(error, error_size, PW_ERR_UNSUPPORTED, "unsupported title exit policy");

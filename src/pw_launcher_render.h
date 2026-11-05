@@ -41,4 +41,9 @@ int pw_launcher_navigate(PwLauncherScene *scene, PwLauncherAction action, uint32
  * stride).  The page shown is the one containing the selection. */
 int pw_launcher_render(const PwLauncherScene *scene,const PwPresentTarget *target);
 
+/* Draws a screen that only says something: no library, no tiles, and none of
+ * the launcher's button hints. Both lines shown upper-cased and shrunk to fit;
+ * detail is optional. */
+int pw_launcher_render_message(const char *heading,const char *detail,const PwPresentTarget *target);
+
 #endif

@@ -134,5 +134,20 @@ int main(void)
     const PwLauncherScene bad_item={untitled,1,0,NULL};
     assert(pw_launcher_render(&bad_item,&target)==PW_ERR_PRECONDITION);
     assert(pw_launcher_render(NULL,&target)==PW_ERR_PRECONDITION);
+
+    /* A message: its own screen, drawn inside the frame whatever its length. */
+    memset(pixels,0x5a,sizeof(pixels));
+    assert(pw_launcher_render_message("Connect the USB drive with this game","Press Circle to quit",&target)==PW_OK);
+    for(uint32_t y=0;y<H;y++)for(uint32_t i=W*4u;i<STRIDE;i++)assert(pixels[y*STRIDE+i]==0x5a);
+    const uint32_t message=hash();
+    assert(message!=render(&library));
+    assert(pw_launcher_render_message("Connect the USB drive with this game",NULL,&target)==PW_OK);
+    assert(hash()!=message);
+    char long_text[400];memset(long_text,'W',sizeof(long_text)-1);long_text[sizeof(long_text)-1]=0;
+    assert(pw_launcher_render_message(long_text,long_text,&target)==PW_OK);
+    for(uint32_t y=0;y<H;y++)for(uint32_t i=W*4u;i<STRIDE;i++)assert(pixels[y*STRIDE+i]==0x5a);
+    assert(pw_launcher_render_message(NULL,"x",&target)==PW_ERR_PRECONDITION);
+    assert(pw_launcher_render_message("x",NULL,NULL)==PW_ERR_PRECONDITION);
+    assert(pw_launcher_render_message("x",NULL,&small)==PW_ERR_MALFORMED);
     return 0;
 }

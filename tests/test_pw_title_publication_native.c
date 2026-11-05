@@ -22,6 +22,7 @@ typedef struct Fixture {
     PwTitlePublicationPlatform platform;
     PwTitlePublicationDescriptor before;
     char game_root[1024];
+    char dxvk_root[1024];  /* where dxvk.conf is written, when not game_root */
     char descriptor[8192];
     char profile[8192];
     char input[8192];
@@ -174,7 +175,13 @@ static void fixture_refresh(Fixture *f)
     write_file(f, "/data/playden/games/install-220/library/input/gamepad.input", f->input, strlen(f->input), 0600);
     write_file(f, "/data/playden/games/install-220/library/profiles/.playden-publication", f->metadata, strlen(f->metadata), 0600);
     write_file(f, "/data/playden/games/install-220/.playden-control/publication-state.v1", f->receipt, strlen(f->receipt), 0600);
-    write_file(f, dxvk_file, dxvk, strlen(dxvk), 0644);
+    if (f->dxvk_root[0]) {
+        char real_file[1100];
+        CHECK(snprintf(real_file, sizeof(real_file), "%s/dxvk.conf", f->dxvk_root) > 0);
+        write_file(f, real_file, dxvk, strlen(dxvk), 0644);
+    } else {
+        write_file(f, dxvk_file, dxvk, strlen(dxvk), 0644);
+    }
     write_file(f, "/data/playden/games/install-220/library/prefixes/game/user.reg", user_reg, strlen(user_reg), 0644);
 }
 
@@ -606,8 +613,232 @@ static void unowned_game_root_contract(void)
     fixture_destroy(&f);
 }
 
+/* A USB game names no mount: the descriptor and the profile say /mnt/usb, and
+ * the title finds the drive that holds the program. */
+static void usb_game_at(Fixture *f, int *calls, unsigned mount, const char *folder)
+{
+    char real[64], text[32768];
+    const char *metadata = "/data/playden/games/install-220/library/profiles/.playden-publication";
+    fixture_init(f, calls);
+    strcpy(f->game_root, "/mnt/usb/games/220");
+    CHECK(snprintf(real, sizeof(real), "/mnt/usb%u/games/220", mount) > 0);
+    directory(f, real, 0777);
+    CHECK(snprintf(f->dxvk_root, sizeof(f->dxvk_root), "%s%s", real, folder) > 0);
+    if (folder[0]) directory(f, f->dxvk_root, 0777);
+    char exe[128]; CHECK(snprintf(exe, sizeof(exe), "%s/hl2.exe", real) > 0);
+    write_file(f, exe, "MZ", 2, 0666);
+    replace_once(f->descriptor, sizeof(f->descriptor), "\"schema_version\":1", "\"schema_version\":3");
+    replace_once(f->descriptor, sizeof(f->descriptor), "}\n", ",\"game_root\":\"/mnt/usb/games/220\"}\n");
+    replace_once(f->profile, sizeof(f->profile), "Z:\\data\\homebrew\\FAKE78001\\games\\220\\hl2.exe", "Z:\\mnt\\usb\\games\\220\\hl2.exe");
+    char working[128];
+    CHECK(snprintf(working, sizeof(working), "Z:\\mnt\\usb\\games\\220%s", folder[0] ? "\\bin" : "") > 0);
+    replace_once(f->profile, sizeof(f->profile), "Z:\\data\\homebrew\\FAKE78001\\games\\220", working);
+    if (folder[0]) strcat(f->game_root, folder);
+    fixture_refresh(f);
+    strcpy(f->game_root, "/mnt/usb/games/220");
+    read_file(f, metadata, text, sizeof(text));
+    replace_once(text, sizeof(text), "schema=2", "schema=3");
+    strcat(text, "game_root.unowned=1\n");
+    write_file(f, metadata, text, strlen(text), 0600);
+    publish_modified_metadata(f);
+    CHECK(pw_title_publication_descriptor_parse((const uint8_t *)f->descriptor, strlen(f->descriptor),
+                                                "FAKE78001", &f->before, NULL, 0) == PW_OK);
+}
+
+static void usb_drive_search_contract(void)
+{
+    Fixture f; PwTitlePublicationLease lease; int calls = 0; char mapped[1200], text[32768], error[256];
+    const char *metadata = "/data/playden/games/install-220/library/profiles/.playden-publication";
+
+    /* One drive holds it, whichever mount that is, and paths become real. */
+    usb_game_at(&f, &calls, 3, "");
+    CHECK(admit(&f, &lease) == PW_OK && !strcmp(lease.game_mount, "/mnt/usb3"));
+    CHECK(!strcmp(lease.profile.app.executable, "Z:\\mnt\\usb\\games\\220\\hl2.exe"));
+    CHECK(pw_title_publication_use_game_mount(&lease.profile, lease.game_mount, error, sizeof(error)) == PW_OK);
+    CHECK(!strcmp(lease.profile.app.executable, "Z:\\mnt\\usb3\\games\\220\\hl2.exe"));
+    CHECK(!strcmp(lease.profile.app.working_directory, "Z:\\mnt\\usb3\\games\\220"));
+    pw_title_publication_close(&lease);
+
+    /* Pulled, the lease is free and the title can ask again; back, it starts. */
+    path(mapped, sizeof(mapped), &f, "/mnt/usb3/games/220/hl2.exe");
+    CHECK(unlink(mapped) == 0);
+    CHECK(admit(&f, &lease) == PW_TITLE_PUBLICATION_ADMISSION_DRIVE_MISSING && lease.lock_fd == -1);
+    directory(&f, "/mnt/usb5/games/220", 0777);
+    write_file(&f, "/mnt/usb5/games/220/hl2.exe", "MZ", 2, 0666);
+    /* The program alone is not enough: this drive's working folder has no dxvk.conf. */
+    CHECK(admit(&f, &lease) == PW_TITLE_PUBLICATION_ADMISSION_INVALID);
+    write_file(&f, "/mnt/usb3/games/220/hl2.exe", "MZ", 2, 0666);
+    path(mapped, sizeof(mapped), &f, "/mnt/usb5/games/220/hl2.exe"); CHECK(unlink(mapped) == 0);
+    CHECK(admit(&f, &lease) == PW_OK); pw_title_publication_close(&lease);
+
+    /* On two drives, the title doesn't guess, and says which. */
+    directory(&f, "/mnt/usb1/games/220", 0777);
+    write_file(&f, "/mnt/usb1/games/220/hl2.exe", "MZ", 2, 0666);
+    error[0] = 0; pw_title_publication_lease_init(&lease);
+    CHECK(pw_title_publication_open(&f.before, &f.platform, &lease, error, sizeof(error)) ==
+          PW_TITLE_PUBLICATION_ADMISSION_DRIVE_AMBIGUOUS);
+    CHECK(lease.lock_fd == -1 && strstr(error, "/mnt/usb1") && strstr(error, "/mnt/usb3"));
+    path(mapped, sizeof(mapped), &f, "/mnt/usb1/games/220/hl2.exe"); CHECK(unlink(mapped) == 0);
+
+    /* A link doesn't count as a copy, as the file or on the way to it. */
+    char target[1200]; path(target, sizeof(target), &f, "/mnt/usb3/games/220/hl2.exe");
+    path(mapped, sizeof(mapped), &f, "/mnt/usb1/games/220/hl2.exe"); CHECK(symlink(target, mapped) == 0);
+    CHECK(admit(&f, &lease) == PW_OK && !strcmp(lease.game_mount, "/mnt/usb3")); pw_title_publication_close(&lease);
+    CHECK(unlink(mapped) == 0);
+    directory(&f, "/mnt/usb2", 0777);
+    path(target, sizeof(target), &f, "/mnt/usb3/games"); path(mapped, sizeof(mapped), &f, "/mnt/usb2/games");
+    CHECK(symlink(target, mapped) == 0);
+    CHECK(admit(&f, &lease) == PW_OK && !strcmp(lease.game_mount, "/mnt/usb3")); pw_title_publication_close(&lease);
+    CHECK(unlink(mapped) == 0);
+
+    /* A folder is not the program, and mounts stop at 7. */
+    directory(&f, "/mnt/usb4/games/220/hl2.exe", 0777);
+    CHECK(admit(&f, &lease) == PW_OK && !strcmp(lease.game_mount, "/mnt/usb3")); pw_title_publication_close(&lease);
+    directory(&f, "/mnt/usb8/games/220", 0777);
+    write_file(&f, "/mnt/usb8/games/220/hl2.exe", "MZ", 2, 0666);
+    CHECK(admit(&f, &lease) == PW_OK && !strcmp(lease.game_mount, "/mnt/usb3")); pw_title_publication_close(&lease);
+
+    /* /mnt/usb itself is never a drive. */
+    path(mapped, sizeof(mapped), &f, "/mnt/usb3/games/220/hl2.exe"); CHECK(unlink(mapped) == 0);
+    directory(&f, "/mnt/usb/games/220", 0777);
+    write_file(&f, "/mnt/usb/games/220/hl2.exe", "MZ", 2, 0666);
+    CHECK(admit(&f, &lease) == PW_TITLE_PUBLICATION_ADMISSION_DRIVE_MISSING);
+    write_file(&f, "/mnt/usb3/games/220/hl2.exe", "MZ", 2, 0666);
+    CHECK(admit(&f, &lease) == PW_OK); pw_title_publication_close(&lease);
+
+    /* The drive's own dxvk.conf is what gets checked. */
+    write_file(&f, "/mnt/usb3/games/220/dxvk.conf", "changed\n", 8, 0666);
+    CHECK(admit(&f, &lease) == PW_TITLE_PUBLICATION_ADMISSION_INVALID);
+    fixture_destroy(&f);
+
+    /* Published as having no dxvk.conf: one on the drive is refused, though
+     * /mnt/usb has none, and removing it admits the game. */
+    usb_game_at(&f, &calls, 3, "");
+    read_file(&f, metadata, text, sizeof(text));
+    replace_once(text, sizeof(text), "dxvk.present=1", "dxvk.present=0");
+    { char *hash = strstr(text, "dxvk.sha256="); CHECK(hash); hash += strlen("dxvk.sha256=");
+      memmove(hash, hash + 64, strlen(hash + 64) + 1); }
+    write_file(&f, metadata, text, strlen(text), 0600);
+    publish_modified_metadata(&f);
+    CHECK(admit(&f, &lease) == PW_TITLE_PUBLICATION_ADMISSION_INVALID);
+    path(mapped, sizeof(mapped), &f, "/mnt/usb3/games/220/dxvk.conf"); CHECK(unlink(mapped) == 0);
+    CHECK(admit(&f, &lease) == PW_OK); pw_title_publication_close(&lease);
+    fixture_destroy(&f);
+
+    /* The working folder is checked on the drive, not at /mnt/usb. */
+    usb_game_at(&f, &calls, 3, "/bin");
+    CHECK(admit(&f, &lease) == PW_OK); pw_title_publication_close(&lease);
+    directory(&f, "/mnt/usb/games/220/bin", 0777);
+    path(mapped, sizeof(mapped), &f, "/mnt/usb3/games/220/bin/dxvk.conf"); CHECK(unlink(mapped) == 0);
+    path(mapped, sizeof(mapped), &f, "/mnt/usb3/games/220/bin"); CHECK(rmdir(mapped) == 0);
+    CHECK(admit(&f, &lease) == PW_TITLE_PUBLICATION_ADMISSION_INVALID);
+    fixture_destroy(&f);
+
+    /* A publisher names the mount: no search, so another copy doesn't stop it. */
+    usb_game_at(&f, &calls, 3, "");
+    directory(&f, "/mnt/usb1/games/220", 0777);
+    write_file(&f, "/mnt/usb1/games/220/hl2.exe", "MZ", 2, 0666);
+    CHECK(admit(&f, &lease) == PW_TITLE_PUBLICATION_ADMISSION_DRIVE_AMBIGUOUS);
+    f.platform.known_game_mount = "/mnt/usb3";
+    CHECK(admit(&f, &lease) == PW_OK && !strcmp(lease.game_mount, "/mnt/usb3")); pw_title_publication_close(&lease);
+    f.platform.known_game_mount = "/mnt/usb8";
+    CHECK(admit(&f, &lease) == PW_TITLE_PUBLICATION_ADMISSION_INVALID);
+    f.platform.known_game_mount = "/data";
+    CHECK(admit(&f, &lease) == PW_TITLE_PUBLICATION_ADMISSION_INVALID);
+    f.platform.known_game_mount = "/mnt/usb5";  /* nothing there */
+    CHECK(admit(&f, &lease) == PW_TITLE_PUBLICATION_ADMISSION_INVALID);
+    fixture_destroy(&f);
+
+    /* A descriptor with no drive in it needs metadata that accepts any owner,
+     * even when this copy's owner and modes would pass without it. */
+    usb_game_at(&f, &calls, 3, "");
+    path(mapped, sizeof(mapped), &f, "/mnt/usb3/games/220"); CHECK(chmod(mapped, 0755) == 0);
+    path(mapped, sizeof(mapped), &f, "/mnt/usb3/games/220/dxvk.conf"); CHECK(chmod(mapped, 0644) == 0);
+    read_file(&f, metadata, text, sizeof(text));
+    replace_once(text, sizeof(text), "game_root.unowned=1", "game_root.unowned=0");
+    write_file(&f, metadata, text, strlen(text), 0600);
+    publish_modified_metadata(&f);
+    CHECK(admit(&f, &lease) == PW_TITLE_PUBLICATION_ADMISSION_INVALID);
+    fixture_destroy(&f);
+
+    /* A game on its own mount has nothing to find. */
+    fixture_init(&f, &calls);
+    CHECK(admit(&f, &lease) == PW_OK && lease.game_mount[0] == 0); pw_title_publication_close(&lease);
+    fixture_destroy(&f);
+}
+
+static void usb_drive_publisher_contract(void)
+{
+    Fixture f; int calls = 0, fd; PwTitlePublicationContents contents; char lock[1200], hash[65], error[256], mapped[1200];
+    char receipt[8192];
+    usb_game_at(&f, &calls, 2, "");
+    path(lock, sizeof(lock), &f, "/data/playden/games/install-220/.playden-control/publication.lock");
+    fd = open(lock, O_RDONLY); CHECK(fd >= 0);
+    read_file(&f, "/data/playden/games/install-220/.playden-control/publication-state.v1", receipt, sizeof(receipt));
+    char metadata[32768];
+    read_file(&f, "/data/playden/games/install-220/library/profiles/.playden-publication", metadata, sizeof(metadata));
+    digest(metadata, strlen(metadata), hash);
+    CHECK(pw_title_publication_verify_locked(&f.before, &f.platform, fd, (const uint8_t *)receipt, strlen(receipt),
+                                             hash, &contents, error, sizeof(error)) == PW_OK);
+    /* The publisher compares what it wrote: these stay the token form. */
+    CHECK(!strcmp(contents.game_mount, "/mnt/usb2"));
+    CHECK(!strcmp(contents.profile.app.executable, "Z:\\mnt\\usb\\games\\220\\hl2.exe"));
+    path(mapped, sizeof(mapped), &f, "/mnt/usb2/games/220/hl2.exe"); CHECK(unlink(mapped) == 0);
+    CHECK(pw_title_publication_verify_locked(&f.before, &f.platform, fd, (const uint8_t *)receipt, strlen(receipt),
+                                             hash, &contents, error, sizeof(error)) == PW_TITLE_PUBLICATION_ADMISSION_DRIVE_MISSING);
+    close(fd);
+    fixture_destroy(&f);
+}
+
+static void usb_drive_substitution_contract(void)
+{
+    static PwGameProfile profile, untouched; char error[128];
+    memset(&profile, 0, sizeof(profile));
+    strcpy(profile.app.executable, "Z:\\mnt\\usb\\g\\a.exe");
+    strcpy(profile.app.working_directory, "Z:\\mnt\\usb\\g");
+    strcpy(profile.app.arguments, "-a Z:\\mnt\\usb\\g\\x -b Z:\\mnt\\usb\\g\\y");
+    profile.environment_count = 2;
+    strcpy(profile.environment[0].name, "A"); strcpy(profile.environment[0].value, "Z:\\mnt\\usb\\g");
+    strcpy(profile.environment[1].name, "B"); strcpy(profile.environment[1].value, "Z:\\data\\usb\\g");
+    untouched = profile;
+    /* Nothing to do without a mount; anything else that isn't a search mount is refused. */
+    CHECK(pw_title_publication_use_game_mount(&profile, "", error, sizeof(error)) == PW_OK);
+    CHECK(!memcmp(&profile, &untouched, sizeof(profile)));
+    CHECK(pw_title_publication_use_game_mount(&profile, "/mnt/usb8", error, sizeof(error)) != PW_OK);
+    CHECK(pw_title_publication_use_game_mount(&profile, "/mnt/usb", error, sizeof(error)) != PW_OK);
+    CHECK(pw_title_publication_use_game_mount(&profile, "/mnt/usb12", error, sizeof(error)) != PW_OK);
+    CHECK(pw_title_publication_use_game_mount(&profile, "/data/usb1", error, sizeof(error)) != PW_OK);
+    CHECK(!memcmp(&profile, &untouched, sizeof(profile)));
+    CHECK(pw_title_publication_use_game_mount(&profile, "/mnt/usb7", error, sizeof(error)) == PW_OK);
+    CHECK(!strcmp(profile.app.executable, "Z:\\mnt\\usb7\\g\\a.exe"));
+    CHECK(!strcmp(profile.app.working_directory, "Z:\\mnt\\usb7\\g"));
+    CHECK(!strcmp(profile.app.arguments, "-a Z:\\mnt\\usb7\\g\\x -b Z:\\mnt\\usb7\\g\\y"));
+    CHECK(!strcmp(profile.environment[0].value, "Z:\\mnt\\usb7\\g"));
+    CHECK(!strcmp(profile.environment[1].value, "Z:\\data\\usb\\g"));
+    /* Admission reads either case of the letter, so this does; other drives keep their path. */
+    memset(&profile, 0, sizeof(profile));
+    strcpy(profile.app.executable, "z:\\mnt\\usb\\g\\a.exe");
+    strcpy(profile.app.arguments, "C:\\mnt\\usb\\x Z:\\mnt\\usb\\y :\\mnt\\usb\\z");
+    CHECK(pw_title_publication_use_game_mount(&profile, "/mnt/usb2", error, sizeof(error)) == PW_OK);
+    CHECK(!strcmp(profile.app.executable, "z:\\mnt\\usb2\\g\\a.exe"));
+    CHECK(!strcmp(profile.app.arguments, "C:\\mnt\\usb\\x Z:\\mnt\\usb2\\y :\\mnt\\usb\\z"));
+    /* The real path is a byte longer: the longest that still fits, then one more. */
+    memset(&profile, 0, sizeof(profile));
+    memset(profile.app.executable, 'a', PW_APP_PATH_CAPACITY - 2);
+    memcpy(profile.app.executable, "Z:\\mnt\\usb\\", 11);
+    CHECK(pw_title_publication_use_game_mount(&profile, "/mnt/usb0", error, sizeof(error)) == PW_OK);
+    CHECK(strlen(profile.app.executable) == PW_APP_PATH_CAPACITY - 1);
+    memset(&profile, 0, sizeof(profile));
+    memset(profile.app.executable, 'a', PW_APP_PATH_CAPACITY - 1);
+    memcpy(profile.app.executable, "Z:\\mnt\\usb\\", 11);
+    CHECK(pw_title_publication_use_game_mount(&profile, "/mnt/usb0", error, sizeof(error)) != PW_OK);
+}
+
 int main(void)
 {
+    usb_drive_search_contract();
+    usb_drive_publisher_contract();
+    usb_drive_substitution_contract();
     explicit_download_root_contract();
     publisher_verification_contract();
     valid_and_descriptor_contract();

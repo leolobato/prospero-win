@@ -269,12 +269,34 @@ static void taskbar(const Canvas *c,const char *status)
     }
 }
 
+static int target_fits(const PwPresentTarget *target)
+{
+    return target->width==W && target->height==H && target->stride>=(uint32_t)W*4u &&
+           !(target->stride%4u) && (uint64_t)target->stride*H<=target->bytes;
+}
+
+int pw_launcher_render_message(const char *heading,const char *detail,const PwPresentTarget *target)
+{
+    enum { PANEL_W=1500,PANEL_H=280,PANEL_X=(W-PANEL_W)/2,PANEL_Y=(H-PANEL_H)/2,ROOM=PANEL_W-96 };
+    if(!heading || !target || !target->pixels)return PW_ERR_PRECONDITION;
+    if(!target_fits(target))return PW_ERR_MALFORMED;
+    const Canvas canvas={target->pixels,target->stride};
+    background(&canvas);
+    rounded(&canvas,PANEL_X,PANEL_Y,PANEL_W,PANEL_H,14,rgb(0xff,0xff,0xff),rgb(0xdc,0xe8,0xfa));
+    int32_t scale=fit(heading,7,3,ROOM);
+    text(&canvas,(W-text_width(heading,scale))/2,PANEL_Y+84,heading,scale,rgb(0x0a,0x44,0xc0),ROOM);
+    if(detail) {
+        scale=fit(detail,4,2,ROOM);
+        text(&canvas,(W-text_width(detail,scale))/2,PANEL_Y+176,detail,scale,rgb(0x2c,0x3a,0x5c),ROOM);
+    }
+    return PW_OK;
+}
+
 int pw_launcher_render(const PwLauncherScene *scene,const PwPresentTarget *target)
 {
     if(!scene || !target || !target->pixels || (scene->count && !scene->items))
         return PW_ERR_PRECONDITION;
-    if(target->width!=W || target->height!=H || target->stride<(uint32_t)W*4u ||
-       target->stride%4u || (uint64_t)target->stride*H>target->bytes)return PW_ERR_MALFORMED;
+    if(!target_fits(target))return PW_ERR_MALFORMED;
     if(scene->selected!=PW_LAUNCHER_RENDER_NONE && scene->selected>=scene->count)
         return PW_ERR_PRECONDITION;
     for(uint32_t i=0;i<scene->count;i++)if(!scene->items[i].title)return PW_ERR_PRECONDITION;

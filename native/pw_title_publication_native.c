@@ -312,7 +312,45 @@ static int metadata_matches(const PwTitlePublicationMetadata *m,
         !strcmp(m->profile_id, l->default_profile_id) &&
         !strcmp(m->runtime_bundle_id, l->runtime_bundle_id) &&
         !strcmp(m->recipe_id, l->recipe_id) && !strcmp(m->recipe_version, l->recipe_version) &&
-        !strcmp(m->kit_id, r->kit_id) && m->settings_revision == l->settings_revision;
+        !strcmp(m->kit_id, r->kit_id) && m->settings_revision == l->settings_revision &&
+        /* A game found on a USB drive is on exFAT, which records no owners. */
+        (l->schema_version != 3 || m->game_root_unowned);
+}
+
+/* Where a USB game is. The token is the mount without its number. */
+enum { USB_MOUNTS = 8 };
+static const char usb_token[] = "/mnt/usb";
+
+/* A token path on the drive that was found; any other path as it is. */
+static int game_path(const char *token_path, const char *mount, char *output, size_t capacity)
+{
+    int used = mount[0] ? snprintf(output, capacity, "%s%s", mount, token_path + sizeof(usb_token) - 1)
+                        : snprintf(output, capacity, "%s", token_path);
+    return used < 0 || (size_t)used >= capacity ? -1 : 0;
+}
+
+/* Which drive holds the program: 0 with the mount, or DRIVE_MISSING or
+ * DRIVE_AMBIGUOUS. Only a regular file with no link on the way to it counts. */
+static int find_game_mount(const PwTitlePublicationPlatform *platform, const char *executable,
+                           char mount[PW_TITLE_PUBLICATION_MOUNT], char *error, size_t error_size)
+{
+    char found[USB_MOUNTS * PW_TITLE_PUBLICATION_MOUNT] = ""; unsigned matches = 0;
+    for (unsigned number = 0; number < USB_MOUNTS; ++number) {
+        char candidate[PW_TITLE_PUBLICATION_MOUNT], console[1024], path[2048]; struct stat info;
+        snprintf(candidate, sizeof(candidate), "%s%c", usb_token, (char)('0' + number));
+        if (game_path(executable, candidate, console, sizeof(console)) ||
+            mapped_path(platform, console, path, sizeof(path)) || !no_symlink_ancestors(path) ||
+            lstat(path, &info) || !S_ISREG(info.st_mode)) continue;
+        if (!matches++) strcpy(mount, candidate);
+        strcat(found, " "); strcat(found, candidate);
+    }
+    if (matches == 1) return PW_OK;
+    if (error && error_size) {
+        if (matches) snprintf(error, error_size, "game is on more than one USB drive:%s", found);
+        else snprintf(error, error_size, "game is on none of %s0 to %s%d", usb_token, usb_token, USB_MOUNTS - 1);
+    }
+    mount[0] = 0;
+    return matches ? PW_TITLE_PUBLICATION_ADMISSION_DRIVE_AMBIGUOUS : PW_TITLE_PUBLICATION_ADMISSION_DRIVE_MISSING;
 }
 
 static int hex_digit(unsigned value);
@@ -583,6 +621,7 @@ static int verify_publication(const PwTitlePublicationDescriptor *before,
     char control[1024], lock_path[1024], receipt_path[1024], metadata_path[1024];
     char profile_path[1024], catalog_path[1024], input_path[1024], prefix_path[1024], user_reg[1024];
     char host_lock[2048], digest[65], expected_catalog[128], working[1024], executable[1024];
+    char game_mount[PW_TITLE_PUBLICATION_MOUNT] = "", working_real[1024], dxvk_real[1100];
     char expected_dxvk[1100];
     const char *game_root = NULL;
     FileIdentity directories[7], control_before, control_after, lock_before, lock_opened, lock_after;
@@ -694,19 +733,35 @@ static int verify_publication(const PwTitlePublicationDescriptor *before,
         (strcmp(working, game_root) &&
          (strncmp(working, game_root, strlen(game_root)) || working[strlen(game_root)] != '/')) ||
         strncmp(executable, game_root, strlen(game_root)) ||
-        (executable[strlen(game_root)] != '/' && executable[strlen(game_root)] != 0) ||
-        !checked_approved_directory(platform, working, (int)metadata.game_root_unowned,
+        (executable[strlen(game_root)] != '/' && executable[strlen(game_root)] != 0)) goto done;
+    /* Everything compared above and below is the published token form. Only
+     * what touches the game's files goes to the drive. */
+    if (reread.launch.schema_version == 3) {
+        if (platform->known_game_mount) {
+            if (strncmp(platform->known_game_mount, usb_token, sizeof(usb_token) - 1) ||
+                platform->known_game_mount[sizeof(usb_token) - 1] < '0' ||
+                platform->known_game_mount[sizeof(usb_token) - 1] >= '0' + USB_MOUNTS ||
+                platform->known_game_mount[sizeof(usb_token)]) goto done;
+            strcpy(game_mount, platform->known_game_mount);
+        } else {
+            int found = find_game_mount(platform, executable, game_mount, error, error_size);
+            if (found != PW_OK) { result = found; goto done; }
+        }
+    }
+    if (game_path(working, game_mount, working_real, sizeof(working_real)) ||
+        !checked_approved_directory(platform, working_real, (int)metadata.game_root_unowned,
                                     &working_before)) goto done;
     if (append_path(expected_dxvk, sizeof(expected_dxvk), working, "dxvk.conf") ||
-        strcmp(expected_dxvk, metadata.dxvk_path)) goto done;
+        strcmp(expected_dxvk, metadata.dxvk_path) ||
+        game_path(expected_dxvk, game_mount, dxvk_real, sizeof(dxvk_real))) goto done;
     if (metadata.dxvk_present) {
-        bytes = read_regular(platform, expected_dxvk, 1024 * 1024,
+        bytes = read_regular(platform, dxvk_real, 1024 * 1024,
                              metadata.game_root_unowned ? READ_GAME_UNOWNED : READ_LEGACY, &length);
         if (!bytes || digest_hex(bytes, length, digest) || strcmp(digest, metadata.dxvk_sha256)) goto done;
         free(bytes); bytes = NULL;
     } else {
         char mapped[2048];
-        if (mapped_path(platform, expected_dxvk, mapped, sizeof(mapped))) goto done;
+        if (mapped_path(platform, dxvk_real, mapped, sizeof(mapped))) goto done;
         errno = 0; if (!lstat(mapped, &info) || errno != ENOENT) goto done;
     }
     if (append_path(user_reg, sizeof(user_reg), prefix_path, "user.reg")) goto done;
@@ -715,16 +770,17 @@ static int verify_publication(const PwTitlePublicationDescriptor *before,
     if (!bytes || !registry_semantics(bytes, length, &metadata, &profile)) goto done;
     free(bytes); bytes = NULL;
     stage = 8;
-    if (!checked_approved_directory(platform, working, (int)metadata.game_root_unowned,
+    if (!checked_approved_directory(platform, working_real, (int)metadata.game_root_unowned,
                                     &working_after) ||
         !same_identity(working_before, working_after) ||
         !private_tree_unchanged(platform, directories, directory_paths)) goto done;
     lease->lock_fd = borrowed_fd >= 0 ? -1 : lock_fd; lease->lock_device = lock_opened.device; lease->lock_inode = lock_opened.inode;
     lease->profile = profile; lease->preset = selected; lease->has_preset = has_selected;
+    memcpy(lease->game_mount, game_mount, sizeof(lease->game_mount));
     lock_fd = -1; result = PW_OK;
 done:
     free(bytes); if (lock_fd >= 0 && borrowed_fd < 0) close(lock_fd);
-    if (result != PW_OK && result != PW_TITLE_PUBLICATION_ADMISSION_BUSY)
+    if (result == PW_TITLE_PUBLICATION_ADMISSION_INVALID)
         if (error && error_size) snprintf(error, error_size, "publication admission refused at stage %d", stage);
     return result;
 }
@@ -735,6 +791,41 @@ int pw_title_publication_open(const PwTitlePublicationDescriptor *before,
                               char *error, size_t error_size)
 {
     return verify_publication(before, platform, lease, error, error_size, -1, NULL, 0, NULL);
+}
+
+/* Every "Z:\\mnt\\usb\\" in text gets the drive's number. The letter's case doesn't
+ * matter, as it doesn't when admission reads the path. */
+static int use_mount_in(char *text, size_t capacity, char number)
+{
+    static const char token[] = ":\\mnt\\usb\\";
+    size_t length = strlen(text);
+    for (char *at = strstr(text, token); at; at = strstr(at, token)) {
+        const int letter = at > text && (at[-1] == 'Z' || at[-1] == 'z');
+        at += sizeof(token) - 2;  /* the separator after "usb" */
+        if (!letter) continue;
+        if (length + 1 >= capacity) return -1;
+        memmove(at + 1, at, strlen(at) + 1);
+        *at = number; at += 2; ++length;
+    }
+    return 0;
+}
+
+int pw_title_publication_use_game_mount(PwGameProfile *profile, const char *mount,
+                                        char *error, size_t error_size)
+{
+    size_t token = sizeof(usb_token) - 1;
+    if (!profile || !mount) return failure(error, error_size, "invalid game mount");
+    if (!mount[0]) return PW_OK;
+    if (strncmp(mount, usb_token, token) || mount[token] < '0' || mount[token] >= '0' + USB_MOUNTS ||
+        mount[token + 1]) return failure(error, error_size, "invalid game mount");
+    if (use_mount_in(profile->app.executable, sizeof(profile->app.executable), mount[token]) ||
+        use_mount_in(profile->app.working_directory, sizeof(profile->app.working_directory), mount[token]) ||
+        use_mount_in(profile->app.arguments, sizeof(profile->app.arguments), mount[token]))
+        return failure(error, error_size, "game path too long for its drive");
+    for (size_t i = 0; i < profile->environment_count; ++i)
+        if (use_mount_in(profile->environment[i].value, sizeof(profile->environment[i].value), mount[token]))
+            return failure(error, error_size, "game path too long for its drive");
+    return PW_OK;
 }
 
 int pw_title_publication_verify_locked(
@@ -761,6 +852,7 @@ int pw_title_publication_verify_locked(
     if (rc == PW_OK) {
         contents->profile = verified.profile; contents->preset = verified.preset;
         contents->has_preset = verified.has_preset;
+        memcpy(contents->game_mount, verified.game_mount, sizeof(contents->game_mount));
     }
     return rc;
 }
