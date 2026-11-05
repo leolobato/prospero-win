@@ -18,15 +18,17 @@ dialog. Nothing repainted what a closed or moved window uncovered, which
 stayed black, as each top-level window keeps its own surface and Windows
 asks only the compositor to redraw. Paint now stops at the windows above,
 and windows uncovered by a change, and those moved or raised, repaint.
----
- dlls/win32u/ps5drv.c | 126 +++
- 1 file changed, 109 insertions(+), 17 deletions(-)
 
+A fullscreen window's visible rect is stretched over the whole monitor
+when a smaller display mode is set, but its surface starts where the
+window does: windows are kept with their visible rect clipped to the
+window, which is where their surface goes.
+---
 diff --git a/dlls/win32u/ps5drv.c b/dlls/win32u/ps5drv.c
-index 972836a..3ab645a 100644
+index b5c0b94..c96da6f 100644
 --- a/dlls/win32u/ps5drv.c
 +++ b/dlls/win32u/ps5drv.c
-@@ -73,6 +73,8 @@ struct ps5_input
+@@ -74,6 +74,8 @@ struct ps5_input
  };
  
  enum { PS5_MAX_WINDOWS = 64, PS5_INPUT_BATCH = 64 };
@@ -35,7 +37,7 @@ index 972836a..3ab645a 100644
  
  struct ps5_window
  {
-@@ -97,6 +99,8 @@ static UINT32 *screen;
+@@ -99,6 +101,8 @@ static UINT32 *screen;
  static struct ps5_window windows[PS5_MAX_WINDOWS];
  static UINT window_count;
  static POINT cursor;
@@ -44,7 +46,7 @@ index 972836a..3ab645a 100644
  /* The cursor image, straight-alpha ARGB, NULL when hidden; frame is the
   * screen with the cursor drawn over it, what the title is given. */
  static UINT32 *cursor_image, *frame;
-@@ -148,8 +152,14 @@ static void draw_cursor( UINT32 *out, POINT origin, INT width, INT height )
+@@ -150,8 +154,14 @@ static void draw_cursor( UINT32 *out, POINT origin, INT width, INT height )
  {
      INT left = cursor.x - cursor_hotspot.x - origin.x, top = cursor.y - cursor_hotspot.y - origin.y, x, y;
  
@@ -61,7 +63,7 @@ index 972836a..3ab645a 100644
      for (y = max( top, 0 ); y < min( top + (INT)cursor_height, height ); y++)
      {
          const UINT32 *src = cursor_image + (y - top) * cursor_width;
-@@ -297,6 +307,34 @@ static LONG ps5_ChangeDisplaySettings( DEVMODEW *displays, const WCHAR *primary_
+@@ -310,6 +320,34 @@ static LONG ps5_ChangeDisplaySettings( DEVMODEW *displays, const WCHAR *primary_
  /***********************************************************************
   *           window surfaces
   */
@@ -96,7 +98,7 @@ index 972836a..3ab645a 100644
  static void ps5_surface_set_clip( struct window_surface *surface, const RECT *rects, UINT count )
  {
  }
-@@ -306,11 +344,28 @@ static BOOL ps5_surface_flush( struct window_surface *surface, const RECT *rect,
+@@ -319,11 +357,28 @@ static BOOL ps5_surface_flush( struct window_surface *surface, const RECT *rect,
                                 const BITMAPINFO *shape_info, const void *shape_bits )
  {
      struct ps5_window *window;
@@ -130,7 +132,7 @@ index 972836a..3ab645a 100644
      if ((window = find_window( surface->hwnd )) && window->shown)
      {
          /* dirty is relative to the surface, whose origin is the visible rect's */
-@@ -318,12 +373,7 @@ static BOOL ps5_surface_flush( struct window_surface *surface, const RECT *rect,
+@@ -331,12 +386,7 @@ static BOOL ps5_surface_flush( struct window_surface *surface, const RECT *rect,
          OffsetRect( &target, window->visible.left, window->visible.top );
          if (intersect_rect( &target, &target, &clip ) && intersect_rect( &target, &target, &window->visible ))
          {
@@ -144,7 +146,7 @@ index 972836a..3ab645a 100644
              /* the presenting window's GDI paint is behind its own Vulkan frames;
               * other windows' content (a movie drawn with GDI) still shows, and
               * a second after the last Vulkan present the window's too */
-@@ -331,6 +381,7 @@ static BOOL ps5_surface_flush( struct window_surface *surface, const RECT *rect,
+@@ -344,6 +394,7 @@ static BOOL ps5_surface_flush( struct window_surface *surface, const RECT *rect,
          }
      }
      pthread_mutex_unlock( &screen_lock );
@@ -152,7 +154,7 @@ index 972836a..3ab645a 100644
      return TRUE;
  }
  
-@@ -402,6 +453,25 @@ static void register_input_fd(void)
+@@ -415,6 +466,25 @@ static void register_input_fd(void)
      NtClose( handle );
  }
  
@@ -178,21 +180,27 @@ index 972836a..3ab645a 100644
  static BOOL ps5_CreateWindow( HWND hwnd )
  {
      register_input_fd();
-@@ -415,6 +485,8 @@ static void ps5_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint,
+@@ -428,6 +498,14 @@ static void ps5_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint,
      BOOL shown = (NtUserGetWindowLongW( hwnd, GWL_STYLE ) & WS_VISIBLE) &&
                   NtUserGetAncestor( hwnd, GA_PARENT ) == get_desktop_window();
      BOOL repaint = FALSE;
 +    HWND uncovered[PS5_MAX_WINDOWS];
 +    UINT uncovered_count = 0, i;
++    RECT visible;
++
++    /* win32u stretches a fullscreen window's visible rect over the whole
++     * monitor, past the window under a smaller display mode; the surface
++     * still starts where the window does */
++    if (!intersect_rect( &visible, &new_rects->visible, &new_rects->window )) visible = new_rects->visible;
  
      pthread_mutex_lock( &screen_lock );
      if (!(window = find_window( hwnd )) && shown && window_count < PS5_MAX_WINDOWS)
-@@ -425,36 +497,56 @@ static void ps5_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint,
+@@ -438,36 +516,56 @@ static void ps5_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint,
      }
      if (window)
      {
 -        if (window->shown && (!shown || !EqualRect( &window->visible, &new_rects->visible )))
-+        BOOL moved = window->shown && shown && !EqualRect( &window->visible, &new_rects->visible );
++        BOOL moved = window->shown && shown && !EqualRect( &window->visible, &visible );
 +
 +        layout_generation++;
 +        /* a window just shown may have painted before it had this surface, and
@@ -203,19 +211,20 @@ index 972836a..3ab645a 100644
 +            RECT touched = window->visible;
 +
              clear_screen_rect( &window->visible );
-+            if (moved) union_rect( &touched, &touched, &new_rects->visible );
++            if (moved) union_rect( &touched, &touched, &visible );
 +            uncovered_count = windows_under( hwnd, &touched, uncovered );
              present_screen_for_change();
          }
 -        /* a window just shown may have painted before it had this surface */
 -        repaint = shown && !window->shown;
+-        window->visible = new_rects->visible;
 +        else if (window->shown && shown && !(swp_flags & SWP_NOZORDER))
 +        {
 +            /* restacked: whichever is now above owes the overlap its paint */
 +            uncovered_count = windows_under( hwnd, &window->visible, uncovered );
 +            repaint = uncovered_count != 0;
 +        }
-         window->visible = new_rects->visible;
++        window->visible = visible;
          window->shown = shown;
      }
      pthread_mutex_unlock( &screen_lock );
@@ -248,5 +257,3 @@ index 972836a..3ab645a 100644
  }
  
  /* No explorer sizes the desktop the server created: make it the monitor. */
--- 
-2.39.5

@@ -759,6 +759,7 @@ wine/patches/0964-ntdll-ps5-retire-thread-alert-kqueues.patch
 wine/patches/0968-win32u-ps5-keep-the-pointer-in-a-window-under-a-display-mode.patch
 wine/patches/0969-msvcp90-make-ctype-char-narrow-a-vtable-tail-call-like-native.patch
 wine/patches/0977-kernelbase-list-drives-nothing-has-published.patch
+wine/patches/0978-win32u-ps5-show-a-smaller-display-mode-where-win32u-puts-it.patch
 wine/patches/0979-ntdll-ps5-report-the-storage-for-a-title-s-root.patch
 tests/test_wine_alert_kqueue.py
 wine/patches/0981-win32u-register-builtin-classes-without-waiting.patch

@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Thu, 5 Nov 2026 17:30:00 +0100
+Subject: [PATCH] win32u: Show a smaller PS5 display mode where win32u puts
+ it.
+
+win32u maps a display mode smaller than the desktop onto the middle of
+it, centre on centre, but the PS5 driver took the mode's picture from the
+desktop's top left. The pointer, which the server keeps in win32u's
+coordinates, then did not match the picture: an 800x600 DirectDraw game
+on a 1920x1080 desktop could not move its pointer past x = 666. The
+driver now keeps the mode's size and takes the part win32u covers, each
+edge mapped and rounded as map_monitor_rect() does.
+---
+diff --git a/dlls/win32u/ps5drv.c b/dlls/win32u/ps5drv.c
+index cde2634..47800fb 100644
+--- a/dlls/win32u/ps5drv.c
++++ b/dlls/win32u/ps5drv.c
+@@ -41,6 +41,7 @@
+ #include "config.h"
+ 
+ #include <dlfcn.h>
++#include <math.h>
+ #include <pthread.h>
+ #include <stdint.h>
+ #include <stdio.h>
+@@ -87,10 +88,11 @@ static int (*input_fd)(void);
+ static pthread_mutex_t screen_lock = PTHREAD_MUTEX_INITIALIZER;
+ static UINT screen_width = 800, screen_height = 600;
+ /* The display mode an application set, at most the desktop's. win32u maps
+- * a smaller mode onto the desktop scaled uniformly from its top left, so
+- * frames show that part, content_width x content_height, which the title
+- * then centres on the TV as it does any frame. */
++ * a smaller mode onto the desktop scaled uniformly, its centre on the
++ * desktop's, so frames show that part, content_width x content_height in
++ * the middle, which the title then centres on the TV as it does any frame. */
+ static UINT content_width, content_height;
++static UINT mode_width, mode_height;
+ static UINT32 *screen;
+ static struct ps5_window windows[PS5_MAX_WINDOWS];
+ static UINT window_count;
+@@ -167,9 +169,18 @@ static void draw_cursor( UINT32 *out, POINT origin, INT width, INT height )
+ /* screen_lock held: the part of the screen a frame shows */
+ static RECT view_rect(void)
+ {
+-    RECT screen_rect = {0, 0, content_width, content_height}, box = {0, 0, 0, 0};
++    RECT screen_rect, box = {0, 0, 0, 0};
++    double scale = (UINT64)screen_width * mode_height <= (UINT64)screen_height * mode_width ?
++                   (double)screen_width / mode_width : (double)screen_height / mode_height;
+     UINT i;
+ 
++    if (!mode_width || !mode_height) return (RECT){0, 0, screen_width, screen_height};
++    /* where win32u puts the mode: each edge mapped and rounded as map_monitor_rect does */
++    screen_rect.left = roundf( screen_width / 2.0 - mode_width / 2.0 * scale );
++    screen_rect.right = roundf( screen_width / 2.0 + mode_width / 2.0 * scale );
++    screen_rect.top = roundf( screen_height / 2.0 - mode_height / 2.0 * scale );
++    screen_rect.bottom = roundf( screen_height / 2.0 + mode_height / 2.0 * scale );
++
+     if (!view_windows) return screen_rect;
+     for (i = 0; i < window_count; i++)
+         if (windows[i].shown) union_rect( &box, &box, &windows[i].visible );
+@@ -272,6 +283,8 @@ static LONG ps5_ChangeDisplaySettings( DEVMODEW *displays, const WCHAR *primary_
+             content_width = screen_width;
+             content_height = (UINT)((UINT64)height * screen_width / width);
+         }
++        mode_width = width;
++        mode_height = height;
+         TRACE( "mode %ux%u shown as %ux%u\n", width, height, content_width, content_height );
+         present_screen();
+         pthread_mutex_unlock( &screen_lock );
+@@ -977,6 +990,8 @@ void ps5_install_user_driver(void)
+     }
+     content_width = screen_width;
+     content_height = screen_height;
++    mode_width = screen_width;
++    mode_height = screen_height;
+     view_windows = mode && !strcmp( mode, "window" );
+     SetRect( &view, 0, 0, screen_width, screen_height );
+     if (!(screen = calloc( (size_t)screen_width * screen_height, sizeof(*screen) )) ||
