@@ -15,7 +15,8 @@
 #
 # Patch numbers are owned by range: 0100-0499 services, loader and
 # presentation; 0500-0899 execution core (signals, TEB, virtual memory);
-# 0900-0999 shared clock and input fast paths.
+# 0900-0999 shared clock and input fast paths; 1000-1999 later changes of any
+# kind, once 0100-0999 had no room left after the patches they build on.
 #
 # Two links follow. The ELF link builds Wine's own targets against the
 # payload SDK and reports, rather than fails on, unresolved symbols. The PRX
@@ -110,8 +111,11 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # wined3d: it carries vkd3d-shader, which d3dcompiler uses to compile D3DX
 # effects with samplers and in-pass shaders (patches 0959-0963).
 # hidclass.sys: the minidriver hears when a device is first opened (patch 0966).
+# d3dx9_24 to d3dx9_43, all built from d3dx9_36's source: the effect compiler
+# compiles a function of its source (patch 1001).
 PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan kernelbase ntoskrnl.exe winebus.sys hidclass.sys setupapi gdi32 wined3d rtworkq msvcp80 msvcp90"
 PE_MODULES="$PE_MODULES xaudio2_0 xaudio2_1 xaudio2_2 xaudio2_3 xaudio2_4 xaudio2_5 xaudio2_6 xaudio2_7 xaudio2_8 xaudio2_9 xactengine2_0 xactengine2_4 xactengine2_7 xactengine2_9 xactengine3_0 xactengine3_1 xactengine3_2 xactengine3_3 xactengine3_4 xactengine3_5 xactengine3_6 xactengine3_7"
+PE_MODULES="$PE_MODULES d3dx9_24 d3dx9_25 d3dx9_26 d3dx9_27 d3dx9_28 d3dx9_29 d3dx9_30 d3dx9_31 d3dx9_32 d3dx9_33 d3dx9_34 d3dx9_35 d3dx9_36 d3dx9_37 d3dx9_38 d3dx9_39 d3dx9_40 d3dx9_41 d3dx9_42 d3dx9_43"
 # Everything optional but FreeType (built below) is off: the console has none
 # of these libraries, and a configure-time probe against the payload SDK must
 # not pick up host headers.
@@ -174,8 +178,8 @@ series() {
             fail "patch name must be NNNN-lower-case-words.patch: $patch"
         number=$(printf '%s' "$patch" | cut -c1-4 | sed 's/^0*//')
         number=${number:-0}
-        [ "$number" -ge 100 ] && [ "$number" -le 999 ] ||
-            fail "patch number outside 0100-0999: $patch"
+        [ "$number" -ge 100 ] && [ "$number" -le 1999 ] ||
+            fail "patch number outside 0100-1999: $patch"
         [ "$number" -ne "$last" ] || fail "duplicate patch number: $patch"
         last=$number
         grep -q '^Subject: ' "$patches/$patch" || fail "patch has no Subject: $patch"

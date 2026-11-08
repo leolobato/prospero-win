@@ -780,6 +780,9 @@ wine/patches/0996-ntdll-ps5-end-a-launcher-that-waits-for-the-program-it-started
 wine/patches/0997-ntdll-ps5-say-which-program-could-not-start.patch
 wine/patches/0998-win32u-keep-the-video-memory-size-within-32-bits.patch
 wine/patches/0999-winegstreamer-ps5-play-mp3-and-wav-through-directshow.patch
+wine/patches/1000-ntdll-let-wine-large-address-aware-give-a-32-bit-program-4-gb.patch
+wine/patches/1001-d3dx9-compile-a-function-of-the-source-in-effect-compiler-compileshader.patch
+wine/patches/1002-server-ps5-say-what-holds-the-files-when-an-open-runs-out.patch
 wine/patches/0985-ntdll-ps5-start-hosted-drivers-without-thread-attach.patch
 
 # Rumble

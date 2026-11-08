@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sun, 8 Nov 2026 19:20:00 +0100
+Subject: [PATCH 3/3] server: Say what holds the files when an open runs out of
+ them on PS5.
+
+Patch 0993 parks read-only files to keep a PS5 title under its limit of
+about 249 open files, and parks every live one when open() still fails
+with EMFILE. When even that leaves no slot, every file is held by an fd
+the pool doesn't park, and nothing said which.
+
+That failure now logs the server's descriptors by class: pinned (cached
+by the client), live (parkable), held by a section (a dup of the file's
+descriptor, which keeps the open file even when the file is parked),
+opened for writing, busy (asyncs, a completion port, locks or a poll),
+other, and closed (a handle closed while its locks remain), with the
+parked files, directories, inodes and the two limits. The first four
+failures are logged, then one in 64.
+---
+ server/fd.c | 67 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 67 insertions(+)
+
+diff --git a/server/fd.c b/server/fd.c
+index 54b2b95..df1ef68 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -2136,6 +2136,71 @@ static void ps5_trim_live_files( unsigned int limit, struct fd *keep, int force
+     if (!force && ps5_live_count > limit + limit / 2) ps5_trim_live_files( limit + limit / 2, keep, 1 );
+ }
+ 
++/* open() failed with EMFILE, even after parking what could be: say what
++ * holds the server's descriptors, by class, so the reason is in the log.
++ * Each fd is counted once, in the first class that fits; a section's fd is
++ * a dup() of its file's, which keeps the open file alive even when that
++ * file is parked. The first few failures are logged, then one in 64. */
++static void ps5_log_file_slots( const char *name )
++{
++    static unsigned int failures;
++    unsigned int pinned = 0, live = 0, section = 0, writable = 0, busy = 0, other = 0, open_fds = 0;
++    unsigned int parked = 0, inodes = 0, kept = 0, i, j;
++    struct device *device;
++    struct inode *inode;
++    struct fd *fd;
++    int saved = errno;
++
++    failures++;
++    if (failures > 4 && failures % 64) goto done;
++    for (i = 0; i < DEVICE_HASH_SIZE; i++)
++    {
++        if (!device_hash[i].next) continue;
++        LIST_FOR_EACH_ENTRY( device, &device_hash[i], struct device, entry )
++        {
++            for (j = 0; j < INODE_HASH_SIZE; j++)
++            {
++                LIST_FOR_EACH_ENTRY( inode, &device->inode_hash[j], struct inode, entry )
++                {
++                    struct closed_fd *closed;
++                    int held = 0;
++
++                    LIST_FOR_EACH_ENTRY( fd, &inode->open, struct fd, inode_entry )
++                    {
++                        if (fd->ps5_file && fd->ps5_parked) parked++;
++                        if (fd->unix_fd == -1) continue;
++                        held = 1;
++                        open_fds++;
++                        if (fd->ps5_pinned) pinned++;
++                        else if (fd->ps5_live) live++;
++                        else if (fd->user && fd->user->ops->type == &mapping_type) section++;
++                        else if (fd->access & (FILE_WRITE_DATA | FILE_APPEND_DATA)) writable++;
++                        else if (fd->completion || !list_empty( &fd->locks ) || async_queued( &fd->read_q ) ||
++                                 async_queued( &fd->write_q ) || async_queued( &fd->wait_q ) ||
++                                 (fd->poll_index != -1 && pollfd[fd->poll_index].fd != -1))
++                            busy++;
++                        else other++;
++                    }
++                    /* a handle closed while its locks remain keeps its descriptor here */
++                    LIST_FOR_EACH_ENTRY( closed, &inode->closed, struct closed_fd, entry )
++                    {
++                        if (closed->unix_fd == -1) continue;
++                        held = 1;
++                        kept++;
++                    }
++                    inodes += held;
++                }
++            }
++        }
++    }
++    fprintf( stderr, "wineserver: EMFILE #%u opening %s: inodes=%u fds=%u pinned=%u live=%u parked=%u section=%u "
++             "write=%u busy=%u other=%u closed=%u directories=%u (limits: cached=%u live=%u)\n",
++             failures, name, inodes, open_fds, pinned, live, parked, section, writable, busy, other, kept,
++             ps5_directory_fds, ps5_cached_files_limit(), ps5_live_files_limit() );
++done:
++    errno = saved;
++}
++
+ /* open() failed with EMFILE: park every live file that can be, so that a
+  * budget set too high for what else the title holds costs reopens instead
+  * of failing; non-zero when one was parked and the open is worth a retry */
+@@ -2202,6 +2267,7 @@ static int ps5_reopen_file( struct fd *fd )
+     ps5_trim_live_files( ps5_live_files_limit() ? ps5_live_files_limit() - 1 : 0, fd, 0 );
+     if ((unix_fd = open( fd->unix_name, fd->ps5_park_flags )) == -1 && errno == EMFILE && ps5_free_files( fd ))
+         unix_fd = open( fd->unix_name, fd->ps5_park_flags );
++    if (unix_fd == -1 && errno == EMFILE) ps5_log_file_slots( fd->unix_name );
+     if (unix_fd == -1)
+     {
+         file_set_error();
+@@ -2534,6 +2600,7 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
+ #ifdef PS5_PARK_FILES
+     if (fd->unix_fd == -1 && errno == EMFILE && ps5_free_files( NULL ))
+         fd->unix_fd = open( name, rw_mode | (flags & ~O_TRUNC), *mode );
++    if (fd->unix_fd == -1 && errno == EMFILE) ps5_log_file_slots( name );
+ #endif
+     if (fd->unix_fd == -1)
+     {

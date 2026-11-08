@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sun, 8 Nov 2026 19:00:00 +0100
+Subject: [PATCH 1/3] ntdll: Let WINE_LARGE_ADDRESS_AWARE give a 32-bit program
+ 4 GB.
+
+A 32-bit program that isn't marked large-address-aware gets 2 GB of
+address space under WoW64, and older games that load a lot can run out
+of it. On Windows the fix is to set the image's large-address-aware
+flag, which changes the game's file.
+
+WINE_LARGE_ADDRESS_AWARE=1 now gives such a program the same 4 GB limit
+and top-down reservation a flagged image gets. Any other value, or no
+variable, keeps the image's own flag.
+
+On PS5, mmap_init reserves only the low 2 GB, so a 4 GB limit alone
+adds no room the guest can use: the range above 2 GB is now reserved
+too when the limit is 4 GB, for a flagged image as well. A startup line
+gives the limit, why, and how much of the range above 2 GB the kernel
+let the reservation take.
+---
+ dlls/ntdll/unix/virtual.c | 54 +++++++++++++++++++++++++++++++++++----
+ 1 file changed, 49 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 1159338..d9ec513 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5954,6 +5954,31 @@ static void virtual_release_address_space(void)
+ #endif  /* _WIN64 */
+ 
+ 
++/* WINE_LARGE_ADDRESS_AWARE=1 gives a 32-bit program the 4 GB address space
++ * of a large-address-aware image without changing its file, as the Windows
++ * linker flag would after "editbin /LARGEADDRESSAWARE". */
++static BOOL large_address_aware_requested(void)
++{
++    const char *value = getenv( "WINE_LARGE_ADDRESS_AWARE" );
++    return value && value[0] == '1' && !value[1];
++}
++
++#ifdef __PROSPERO__
++/* How much of base-end the address space reservations hold, in MiB. */
++static size_t ps5_reserved_mib( char *base, char *end )
++{
++    struct reserved_area *area;
++    size_t total = 0;
++
++    LIST_FOR_EACH_ENTRY( area, &reserved_areas, struct reserved_area, entry )
++    {
++        char *start = max( (char *)area->base, base ), *stop = min( (char *)area->base + area->size, end );
++        if (start < stop) total += stop - start;
++    }
++    return total >> 20;
++}
++#endif
++
+ /***********************************************************************
+  *           virtual_set_large_address_space
+  *
+@@ -5972,13 +5997,32 @@ void virtual_set_large_address_space(void)
+                 free_reserved_memory( 0, (char *)0x7ffe0000 );
+ #endif
+         }
+-        else if (main_image_info.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE)
++        else
+         {
+-            user_space_wow_limit = limit_4g - 1;
+-            /* reserve space for top-down allocations; some apps break if the entire high 2G is available */
+-            reserve_area( (void *)0xfff00000, (void *)0xffff0000 );
++            BOOL image = !!(main_image_info.ImageCharacteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE);
++            BOOL requested = large_address_aware_requested();
++
++            if (image || requested)
++            {
++                user_space_wow_limit = limit_4g - 1;
++#ifdef __PROSPERO__
++                /* mmap_init reserves only the low 2 GiB: reserve the rest of
++                 * the 4 GiB too, as the console places plain mappings
++                 * anywhere and a reservation is what keeps a range for the
++                 * guest. The reservation refuses to overwrite, so anything
++                 * already there keeps its place. */
++                reserve_area( (void *)0x80000000, (void *)0xfff00000 );
++#endif
++                /* reserve space for top-down allocations; some apps break if the entire high 2G is available */
++                reserve_area( (void *)0xfff00000, (void *)0xffff0000 );
++            }
++            else user_space_wow_limit = limit_2g - 1;
++#ifdef __PROSPERO__
++            fprintf( stderr, "wine-ps5: 32-bit address space %s (image flag %d, WINE_LARGE_ADDRESS_AWARE %d), "
++                     "%zu MiB reserved above 2 GiB\n", image || requested ? "4 GiB" : "2 GiB", image, requested,
++                     ps5_reserved_mib( (char *)0x80000000, (char *)0x100000000 ) );
++#endif
+         }
+-        else user_space_wow_limit = limit_2g - 1;
+     }
+     else
+     {
