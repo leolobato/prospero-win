@@ -227,6 +227,23 @@ int main(void)
     assert(pw_app_profile_parse(valid_profile, sizeof(valid_profile) - 1u,
                                 NULL) == PW_ERR_PRECONDITION);
     {
+        /* arguments up to 4096 bytes: a long mod list on one command line */
+        _Static_assert(PW_APP_ARGUMENTS_CAPACITY >= 4097, "4096 bytes of arguments fit");
+        static char text[PW_APP_PROFILE_MAX_BYTES];
+        size_t at = (size_t)snprintf(text, sizeof(text),
+            "[application]\nid=g\nname=G\nexecutable=C:\\g.exe\nworking_directory=C:\\\n"
+            "prefix=g\nruntime=r\narchitecture=pe32\ngraphics=auto\narguments=");
+        memset(text + at, 'a', PW_APP_ARGUMENTS_CAPACITY - 1u);
+        text[at + PW_APP_ARGUMENTS_CAPACITY - 1u] = '\n';
+        text[at + PW_APP_ARGUMENTS_CAPACITY] = '\0';
+        assert(parse_text(text, &profile) == PW_OK);
+        assert(strlen(profile.arguments) == PW_APP_ARGUMENTS_CAPACITY - 1u);
+        memset(text + at, 'a', PW_APP_ARGUMENTS_CAPACITY);
+        text[at + PW_APP_ARGUMENTS_CAPACITY] = '\n';
+        text[at + PW_APP_ARGUMENTS_CAPACITY + 1u] = '\0';
+        assert(parse_text(text, &profile) == PW_ERR_LIMIT);
+    }
+    {
         uint8_t oversized[PW_APP_PROFILE_MAX_BYTES + 1u] = { 0 };
         assert(pw_app_profile_parse(oversized, sizeof(oversized), &profile) ==
                PW_ERR_LIMIT);
