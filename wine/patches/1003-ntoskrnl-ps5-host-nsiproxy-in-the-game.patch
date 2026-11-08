@@ -1,0 +1,199 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 9 Nov 2026 00:00:00 +0100
+Subject: [PATCH] ntoskrnl: Host nsiproxy in a PS5 title's game too.
+
+iphlpapi and nsi read the network interfaces, addresses and tables from
+nsiproxy's \\.\Nsi device. In Wine winedevice runs nsiproxy, and a PS5
+title cannot start it (patch 0550), so the device never exists there:
+every GetAdaptersAddresses, GetIfTable or NotifyIpInterfaceChange call
+fails to open it. A RE Engine game waited forever after the second
+failed open, before creating its swap chain (measured).
+
+ntdll now hosts nsiproxy in a 64-bit game, before its entry point, in
+every mode WINE_NTOSKRNL_HOSTED is set in: with the value 1 after the
+controller's drivers (winebus waits for the pad as before), loaded into
+their loop by the new wine_ntoskrnl_host_load; with any other value as
+the only driver, without waiting for a pad. nsiproxy has no device the
+game must find first, so nothing waits on it; a failure is logged and
+the game starts as before. Its Unix side has no WoW64 thunks, so a
+32-bit game gets the controller's drivers only, as before.
+
+nsiproxy's service key is already in wine.inf. Its Unix side is built
+for the console with the interface name calls the console's C library
+lacks.
+---
+ dlls/ntdll/loader.c                 | 40 ++++++++++++++++++++++++-----
+ dlls/ntoskrnl.exe/ntoskrnl.c        | 40 +++++++++++++++++++++++++----
+ dlls/ntoskrnl.exe/ntoskrnl.exe.spec |  1 +
+ 3 files changed, 70 insertions(+), 11 deletions(-)
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index 7987b8c..ba2a431 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -4444,17 +4444,24 @@ static void release_address_space(void)
+ static BOOL hosted_drivers;
+ 
+ /* A PS5 title's game cannot start winedevice. With WINE_NTOSKRNL_HOSTED
+- * set, ntoskrnl runs the controller's HID drivers (winebus and the ones it
+- * loads) on threads of this process, started before the game's entry
+- * point so that it finds the controller when it first looks. */
++ * set, ntoskrnl runs drivers on threads of this process, started before the
++ * game's entry point: with the value 1, the controller's HID drivers
++ * (winebus and the ones it loads), so that the game finds the controller
++ * when it first looks, then nsiproxy; with any other value nsiproxy only.
++ * iphlpapi reads the network interfaces from nsiproxy's \\.\Nsi device.
++ * nsiproxy's Unix side has no WoW64 thunks, so a 32-bit game gets the
++ * controller's drivers only. */
+ static void start_hosted_drivers(void)
+ {
+     static const ANSI_STRING host_startA = RTL_CONSTANT_STRING( "wine_ntoskrnl_host_start" );
++    static const ANSI_STRING host_loadA = RTL_CONSTANT_STRING( "wine_ntoskrnl_host_load" );
+     UNICODE_STRING name = RTL_CONSTANT_STRING( L"WINE_NTOSKRNL_HOSTED" );
+     UNICODE_STRING dll = RTL_CONSTANT_STRING( L"ntoskrnl.exe" );
+     NTSTATUS (CDECL *host_start)( const WCHAR *driver, DWORD timeout_ms );
++    NTSTATUS (CDECL *host_load)( const WCHAR *driver );
+     UNICODE_STRING value;
+-    WCHAR buffer[8];
++    WCHAR buffer[16];
++    BOOL pad, nsi;
+     HMODULE module;
+     NTSTATUS status;
+ 
+@@ -4463,10 +4470,18 @@ static void start_hosted_drivers(void)
+     value.Buffer = buffer;
+     value.Length = 0;
+     value.MaximumLength = sizeof(buffer);
+-    if (RtlQueryEnvironmentVariable_U( NULL, &name, &value ) == STATUS_VARIABLE_NOT_FOUND) return;
++    status = RtlQueryEnvironmentVariable_U( NULL, &name, &value );
++    if (status == STATUS_VARIABLE_NOT_FOUND) return;
+     /* Only the game: Wine's own programs (explorer, services) inherit the variable too. */
+     if (image->Buffer && (!wcsnicmp( image->Buffer, system_dir, wcslen(system_dir) ) ||
+                           !wcsnicmp( image->Buffer, L"C:\\windows\\syswow64\\", 20 ))) return;
++    pad = !status && value.Length == sizeof(WCHAR) && buffer[0] == '1';
++#ifdef _WIN64
++    nsi = !NtCurrentTeb()->WowTebOffset;
++#else
++    nsi = FALSE;
++#endif
++    if (!pad && !nsi) return;
+     hosted_drivers = TRUE;
+     if ((status = LdrLoadDll( NULL, 0, &dll, &module )))
+     {
+@@ -4478,7 +4493,20 @@ static void start_hosted_drivers(void)
+         ERR( "ntoskrnl.exe has no hosted mode, status %lx\n", status );
+         return;
+     }
+-    if ((status = host_start( L"winebus", 1000 ))) ERR( "hosted drivers failed, status %lx\n", status );
++    if (!pad)
++    {
++        if ((status = host_start( L"nsiproxy", 0 ))) ERR( "nsiproxy not hosted, status %lx\n", status );
++        return;
++    }
++    if ((status = host_start( L"winebus", 1000 )))
++    {
++        ERR( "hosted drivers failed, status %lx\n", status );
++        return;
++    }
++    if (!nsi) return;
++    if ((status = LdrGetProcedureAddress( module, &host_loadA, 0, (void **)&host_load )) ||
++        (status = host_load( L"nsiproxy" )))
++        ERR( "nsiproxy not hosted, status %lx\n", status );
+ }
+ 
+ /* Whether the calling thread runs a hosted driver: it starts in ntoskrnl.exe or in a
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.c b/dlls/ntoskrnl.exe/ntoskrnl.c
+index b9ae9f1..bdfcbed 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.c
++++ b/dlls/ntoskrnl.exe/ntoskrnl.c
+@@ -60,6 +60,8 @@ KSERVICE_TABLE_DESCRIPTOR KeServiceDescriptorTable[4] = { { 0 } };
+  * wine_ntoskrnl_host_start). Set from WINE_NTOSKRNL_HOSTED at load. */
+ static BOOL hosted;
+ static HANDLE host_ready, host_gamepad;
++/* The hosted driver loop: 0: not started, 1: starting, 2: started. */
++static LONG host_state;
+ 
+ static TP_POOL *dpc_call_tp;
+ static TP_CALLBACK_ENVIRON dpc_call_tpe;
+@@ -4416,7 +4418,6 @@ void hosted_interface_enabled( const GUID *interface_class )
+  */
+ NTSTATUS CDECL wine_ntoskrnl_host_start( const WCHAR *driver_name, DWORD timeout_ms )
+ {
+-    static LONG state;  /* 0: not started, 1: starting, 2: started */
+     HANDLE stop_event = NULL, thread = NULL;
+     WCHAR path[MAX_PATH], pad[16];
+     UNICODE_STRING name;
+@@ -4425,7 +4426,7 @@ NTSTATUS CDECL wine_ntoskrnl_host_start( const WCHAR *driver_name, DWORD timeout
+ 
+     if (!hosted) return STATUS_NOT_SUPPORTED;
+     if (wcslen( servicesW ) + wcslen( driver_name ) >= ARRAY_SIZE(path)) return STATUS_INVALID_PARAMETER;
+-    if (InterlockedCompareExchange( &state, 1, 0 )) return STATUS_IMAGE_ALREADY_LOADED;
++    if (InterlockedCompareExchange( &host_state, 1, 0 )) return STATUS_IMAGE_ALREADY_LOADED;
+ 
+     length = GetEnvironmentVariableW( L"WINE_PS5_PAD", pad, ARRAY_SIZE(pad) );
+     host_gamepad_class = length && length < ARRAY_SIZE(pad) && !wcscmp( pad, L"dualshock4" )
+@@ -4460,13 +4461,15 @@ NTSTATUS CDECL wine_ntoskrnl_host_start( const WCHAR *driver_name, DWORD timeout
+     }
+ 
+     start = GetTickCount();
+-    if (WaitForSingleObject( host_gamepad, timeout_ms ))
++    if (!timeout_ms)
++        TRACE( "%s started\n", debugstr_w(driver_name) );
++    else if (WaitForSingleObject( host_gamepad, timeout_ms ))
+         WARN( "%s started, no gamepad after %lu ms\n", debugstr_w(driver_name), GetTickCount() - start );
+     else
+         TRACE( "%s started, gamepad after %lu ms\n", debugstr_w(driver_name), GetTickCount() - start );
+     /* The loop runs for the rest of the process: its stop event is never set. */
+     CloseHandle( thread );
+-    InterlockedExchange( &state, 2 );
++    InterlockedExchange( &host_state, 2 );
+     return STATUS_SUCCESS;
+ 
+ failed:
+@@ -4481,7 +4484,34 @@ failed:
+     if (host_ready) CloseHandle( host_ready );
+     if (stop_event) CloseHandle( stop_event );
+     host_gamepad = host_ready = NULL;
+-    InterlockedExchange( &state, 0 );
++    InterlockedExchange( &host_state, 0 );
++    return status;
++}
++
++/***********************************************************************
++ *           wine_ntoskrnl_host_load   (Not a Windows API)
++ *
++ * Loads one more driver into the loop wine_ntoskrnl_host_start runs, for a
++ * driver the game needs no device of before it starts: nsiproxy, whose
++ * \\.\Nsi device iphlpapi reads the network interfaces from. Its service
++ * must be in the registry, as for the first driver. Fails while the loop
++ * is not running.
++ */
++NTSTATUS CDECL wine_ntoskrnl_host_load( const WCHAR *driver_name )
++{
++    WCHAR path[MAX_PATH];
++    UNICODE_STRING name;
++    NTSTATUS status;
++
++    if (!hosted) return STATUS_NOT_SUPPORTED;
++    if (ReadAcquire( &host_state ) != 2) return STATUS_DEVICE_NOT_READY;
++    if (wcslen( servicesW ) + wcslen( driver_name ) >= ARRAY_SIZE(path)) return STATUS_INVALID_PARAMETER;
++
++    wcscpy( path, servicesW );
++    wcscat( path, driver_name );
++    RtlInitUnicodeString( &name, path );
++    if ((status = ZwLoadDriver( &name ))) ERR( "failed to load %s, status %#lx\n", debugstr_w(driver_name), status );
++    else TRACE( "%s started\n", debugstr_w(driver_name) );
+     return status;
+ }
+ 
+diff --git a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+index b22da9c..2cac0fb 100644
+--- a/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
++++ b/dlls/ntoskrnl.exe/ntoskrnl.exe.spec
+@@ -1721,4 +1721,5 @@
+ 
+ @ cdecl wine_ntoskrnl_main_loop(long)
+ @ cdecl wine_ntoskrnl_host_start(wstr long)
++@ cdecl wine_ntoskrnl_host_load(wstr)
+ @ cdecl wine_enumerate_root_devices(wstr)

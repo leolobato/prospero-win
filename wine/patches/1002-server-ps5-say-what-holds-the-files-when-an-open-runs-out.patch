@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: prospero-win <prospero-win@invalid>
 Date: Sun, 8 Nov 2026 19:20:00 +0100
-Subject: [PATCH 3/3] server: Say what holds the files when an open runs out of
+Subject: [PATCH] server: Say what holds the files when an open runs out of
  them on PS5.
 
 Patch 0993 parks read-only files to keep a PS5 title under its limit of

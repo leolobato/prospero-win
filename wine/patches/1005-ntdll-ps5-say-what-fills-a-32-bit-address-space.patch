@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 9 Nov 2026 00:20:00 +0100
+Subject: [PATCH] ntdll: Say what fills a 32-bit program's address space on
+ PS5.
+
+When an allocation of a 32-bit program finds no room below its limit,
+the log only said "out of memory for allocation". The first two such
+failures now also log the limit asked for and the WoW64 limit, the views
+below 4 GB per 2 GB half (count, size, committed pages, the largest free
+gap) and the largest views, so the log tells a space full of
+reservations from one the allocator never reaches.
+---
+ dlls/ntdll/unix/virtual.c | 78 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 78 insertions(+)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index d9ec513..ca34415 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -6033,6 +6033,79 @@ void virtual_set_large_address_space(void)
+ }
+ 
+ 
++#ifdef __PROSPERO__
++/* Adds the part of start-stop in each 2 GiB half below 4 GiB to sums[0] and sums[1]. */
++static void ps5_add_halves( SIZE_T sums[2], char *start, char *stop )
++{
++    char *half = (char *)0x80000000;
++
++    if (start < half) sums[0] += min( stop, half ) - start;
++    if (stop > half) sums[1] += stop - max( start, half );
++}
++
++/* The largest part of a gap start-stop in each 2 GiB half below 4 GiB. */
++static void ps5_max_halves( SIZE_T gaps[2], char *start, char *stop )
++{
++    char *half = (char *)0x80000000;
++
++    if (start < half) gaps[0] = max( gaps[0], (SIZE_T)(min( stop, half ) - start) );
++    if (stop > half) gaps[1] = max( gaps[1], (SIZE_T)(stop - max( start, half )) );
++}
++
++/* An allocation of a 32-bit program found no room below its limit: log what
++ * the views hold below 4 GiB, per 2 GiB half (views by where they start, their
++ * size, committed pages and the largest free gap, each split at 2 GiB) and the largest views, so the
++ * log says whether the space is full and with what. The first two failures
++ * are logged. */
++static void ps5_log_wow_views( ULONG_PTR limit_high, SIZE_T size )
++{
++    static LONG failures;
++    struct { char *base; SIZE_T size; unsigned int protect; } top[6] = {{0}};
++    SIZE_T views[2] = {0}, bytes[2] = {0}, committed[2] = {0}, gap[2] = {0};
++    char *end = (char *)0x100000000, *prev = (char *)address_space_start;
++    struct file_view *view;
++    sigset_t sigset;
++    unsigned int i, j;
++
++    if (InterlockedIncrement( &failures ) > 2) return;
++    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++    WINE_RB_FOR_EACH_ENTRY( view, &views_tree, struct file_view, entry )
++    {
++        char *base = view->base, *stop = min( (char *)view->base + view->size, end ), *page;
++
++        if (base >= end) break;
++        if (base > prev) ps5_max_halves( gap, prev, base );
++        views[base >= (char *)0x80000000]++;
++        ps5_add_halves( bytes, base, stop );
++        for (page = base; page < stop; page += page_size)
++            if (get_page_vprot( page ) & VPROT_COMMITTED) committed[page >= (char *)0x80000000] += page_size;
++        for (i = 0; i < ARRAY_SIZE(top); i++) if (view->size > top[i].size) break;
++        if (i < ARRAY_SIZE(top))
++        {
++            for (j = ARRAY_SIZE(top) - 1; j > i; j--) top[j] = top[j - 1];
++            top[i].base = base;
++            top[i].size = view->size;
++            top[i].protect = view->protect;
++        }
++        prev = max( prev, stop );
++    }
++    if (end > prev) ps5_max_halves( gap, prev, end );
++    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++
++    fprintf( stderr, "wine-ps5: 32-bit out of address space for %#lx (limit %#lx, wow limit %#lx): "
++             "below 2 GiB views=%lu %lu MiB committed %lu MiB gap %lu MiB; "
++             "2-4 GiB views=%lu %lu MiB committed %lu MiB gap %lu MiB; %lu MiB reserved above 2 GiB\n",
++             (unsigned long)size, (unsigned long)limit_high, (unsigned long)get_wow_user_space_limit(),
++             (unsigned long)views[0], (unsigned long)(bytes[0] >> 20), (unsigned long)(committed[0] >> 20),
++             (unsigned long)(gap[0] >> 20), (unsigned long)views[1], (unsigned long)(bytes[1] >> 20),
++             (unsigned long)(committed[1] >> 20), (unsigned long)(gap[1] >> 20),
++             (unsigned long)ps5_reserved_mib( (char *)0x80000000, end ) );
++    for (i = 0; i < ARRAY_SIZE(top) && top[i].size; i++)
++        fprintf( stderr, "wine-ps5:   view %p %lu MiB protect %#x\n", top[i].base,
++                 (unsigned long)(top[i].size >> 20), top[i].protect );
++}
++#endif
++
+ /***********************************************************************
+  *             allocate_virtual_memory
+  *
+@@ -6166,7 +6239,12 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
+         *size_ptr = size;
+     }
+     else if (status == STATUS_NO_MEMORY)
++    {
+         ERR( "out of memory for allocation, base %p size %08lx\n", base, size );
++#ifdef __PROSPERO__
++        if (is_wow64()) ps5_log_wow_views( limit_high, size );
++#endif
++    }
+ 
+     return status;
+ }

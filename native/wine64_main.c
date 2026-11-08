@@ -2020,6 +2020,14 @@ int main(int argc, char **argv)
                 installed = installed < 0 || result < 0 ? -1 : installed + result;
             }
             PS5LOG_LOG("PW_WINE64 hid hosted=1 drivers_copied=%d", installed);
+        } else if (game->app.architecture != PW_APP_ARCH_PE32) {
+            /* The other modes: a 64-bit game hosts nsiproxy only (patch
+             * 1003), whose \\.\Nsi device iphlpapi reads the network
+             * interfaces from; with the value 1 above it follows the HID
+             * drivers. nsiproxy's Unix side has no WoW64 thunks, so a 32-bit
+             * game hosts nothing and gets no variable: the hosted flag and
+             * setupapi's own service keys (patch 0954) stay off for it. */
+            extra[config.extra_env_count++] = (PwWineStartEnv){ "WINE_NTOSKRNL_HOSTED", "nsiproxy" };
         }
         /* [runtime]: opt-in runtime settings for this game. */
         {

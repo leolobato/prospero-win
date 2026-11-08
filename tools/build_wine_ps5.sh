@@ -92,7 +92,7 @@ FREETYPE_EXPORTS="FT_Activate_Size FT_Done_Face FT_Done_FreeType FT_Done_Glyph F
  FT_Set_Pixel_Sizes FT_Vector_Length FT_Vector_Transform FT_Vector_Unit"
 TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevulkan/winevulkan.so
  dlls/opengl32/opengl32.so dlls/ws2_32/ws2_32.so dlls/crypt32/crypt32.so dlls/dwrite/dwrite.so
- dlls/winebus.sys/winebus.so"
+ dlls/winebus.sys/winebus.so dlls/nsiproxy.sys/nsiproxy.so"
 # The PE modules the patches change: every xinput built from xinput1_3's
 # source reads the title's controller (patch 0470); xinput9_1_0 forwards to
 # xinput1_4. quartz: its renderers wait for a state change without the filter
@@ -113,7 +113,9 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # hidclass.sys: the minidriver hears when a device is first opened (patch 0966).
 # d3dx9_24 to d3dx9_43, all built from d3dx9_36's source: the effect compiler
 # compiles a function of its source (patch 1001).
-PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan kernelbase ntoskrnl.exe winebus.sys hidclass.sys setupapi gdi32 wined3d rtworkq msvcp80 msvcp90"
+# ntoskrnl.exe and ntdll: the game hosts nsiproxy too (patch 1003). dnsapi:
+# it fails its calls when its Unix side (libresolv) did not load (patch 1004).
+PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan kernelbase ntoskrnl.exe winebus.sys hidclass.sys setupapi gdi32 wined3d rtworkq msvcp80 msvcp90 dnsapi"
 PE_MODULES="$PE_MODULES xaudio2_0 xaudio2_1 xaudio2_2 xaudio2_3 xaudio2_4 xaudio2_5 xaudio2_6 xaudio2_7 xaudio2_8 xaudio2_9 xactengine2_0 xactengine2_4 xactengine2_7 xactengine2_9 xactengine3_0 xactengine3_1 xactengine3_2 xactengine3_3 xactengine3_4 xactengine3_5 xactengine3_6 xactengine3_7"
 PE_MODULES="$PE_MODULES d3dx9_24 d3dx9_25 d3dx9_26 d3dx9_27 d3dx9_28 d3dx9_29 d3dx9_30 d3dx9_31 d3dx9_32 d3dx9_33 d3dx9_34 d3dx9_35 d3dx9_36 d3dx9_37 d3dx9_38 d3dx9_39 d3dx9_40 d3dx9_41 d3dx9_42 d3dx9_43"
 # Everything optional but FreeType (built below) is off: the console has none
@@ -352,6 +354,10 @@ for unit in pw_wine_dmem pw_wine_sections pw_wine_dmem_ps5; do
         -c "$root/wine/ps5/$unit.c" -o "$work/heap/$unit.o" || fail "cannot compile $unit.c"
     dmem="$dmem $work/heap/$unit.o"
 done
+# nsiproxy.so's if_nameindex and if_freenameindex, which the SDK's libc lacks.
+"$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC \
+    -c "$root/wine/ps5/pw_nsiproxy_libc.c" -o "$work/heap/pw_nsiproxy_libc.o" ||
+    fail "cannot compile pw_nsiproxy_libc.c"
 base="-L$work/ps5lib -lunwind -Wl,--warn-unresolved-symbols"
 status=0
 : > "$work/make.log"
@@ -360,6 +366,7 @@ status=0
 for step in "dlls/ntdll/ntdll.so|$heap $dmem" "dlls/win32u/win32u.so|" "server/wineserver|$heap" \
         "dlls/winevulkan/winevulkan.so|" "dlls/opengl32/opengl32.so|" "dlls/ws2_32/ws2_32.so|" \
         "dlls/crypt32/crypt32.so|" "dlls/dwrite/dwrite.so|" "dlls/winebus.sys/winebus.so|" \
+        "dlls/nsiproxy.sys/nsiproxy.so|$work/heap/pw_nsiproxy_libc.o" \
         $([ -f "$tls/lib/libgnutls.a" ] && echo "dlls/secur32/secur32.so|") \
         $([ -n "$media_root" ] && echo "dlls/winegstreamer/winegstreamer.so|"); do
     target=${step%%|*}; objects=${step#*|}
@@ -482,6 +489,7 @@ if [ "$prx_status" = 0 ]; then
         __wine_unix_call_funcs __wine_unix_call_wow64_funcs
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/winebus_desc.c" \
         __wine_unix_call_funcs __wine_unix_call_wow64_funcs
+    python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/nsiproxy_desc.c" __wine_unix_call_funcs
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/winevulkan_desc.c" \
         __wine_unix_call_funcs __wine_unix_call_wow64_funcs
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/opengl32_desc.c" \
@@ -510,7 +518,7 @@ if [ "$prx_status" = 0 ]; then
     # shellcheck disable=SC2086
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/libfreetype_desc.c" $FREETYPE_EXPORTS
     for unit in ntdll_desc win32u_desc wineserver_desc wowprospero_desc wineps5_desc \
-            libfreetype_desc xinput_desc winebus_desc winevulkan_desc opengl32_desc ws2_32_desc crypt32_desc dwrite_desc \
+            libfreetype_desc xinput_desc winebus_desc nsiproxy_desc winevulkan_desc opengl32_desc ws2_32_desc crypt32_desc dwrite_desc \
             libvulkan_desc $([ -f "$tls/lib/libgnutls.a" ] && echo secur32_desc libgnutls_desc) \
             $([ -n "$media_root" ] && echo winegstreamer_desc); do
         "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC -I"$root/wine/ps5" \
@@ -569,6 +577,12 @@ if [ "$prx_status" = 0 ]; then
     # winebus's Unix side (patches 0951-0953): its PS5 bus reads the title's
     # controller through ntdll's dlsym, for the HID drivers the game hosts.
     link_prx winebus dlls/winebus.sys/winebus.so "$prx/obj/winebus_desc.o" "$prx/ntdll.shared.elf"
+    # nsiproxy's Unix side (patch 1003): the network interface tables iphlpapi
+    # reads (GetAdaptersAddresses, GetIfTable), from the driver the game hosts.
+    # The SDK's libc has no if_nameindex; pw_nsiproxy_libc builds it from
+    # getifaddrs (compiled with the heap above).
+    link_prx nsiproxy dlls/nsiproxy.sys/nsiproxy.so "$prx/obj/nsiproxy_desc.o $work/heap/pw_nsiproxy_libc.o" \
+        "$prx/ntdll.shared.elf"
     # Wine's Vulkan Unix side: it calls into ntdll and into win32u's Vulkan
     # driver (__wine_get_vulkan_driver).
     link_prx winevulkan dlls/winevulkan/winevulkan.so "$prx/obj/winevulkan_desc.o" \
@@ -682,7 +696,7 @@ owners = {"dlls/ntdll/": "dlls/ntdll/ntdll.so", "dlls/win32u/": "dlls/win32u/win
           "server/": "server/wineserver", "dlls/winevulkan/": "dlls/winevulkan/winevulkan.so",
           "dlls/opengl32/": "dlls/opengl32/opengl32.so", "dlls/ws2_32/": "dlls/ws2_32/ws2_32.so",
           "dlls/crypt32/": "dlls/crypt32/crypt32.so", "dlls/dwrite/": "dlls/dwrite/dwrite.so",
-          "dlls/secur32/": "dlls/secur32/secur32.so",
+          "dlls/secur32/": "dlls/secur32/secur32.so", "dlls/nsiproxy.sys/": "dlls/nsiproxy.sys/nsiproxy.so",
           "dlls/winegstreamer/": "dlls/winegstreamer/winegstreamer.so"}
 unresolved = {target: set() for target in owners.values()}
 # lld prints each unresolved symbol, then ">>> referenced by" lines whose
@@ -729,7 +743,7 @@ webkit_exports = exports("libkernel_web.so") | exports("libScePosixForWebKit.so"
 objdump = shutil.which("llvm-objdump-18") or shutil.which("llvm-objdump") or f"{sdk}/bin/llvm-objdump"
 SYSCALL_ALLOWED = {"__wine_syscall_dispatcher", "__wine_unix_call_dispatcher"}
 ntdll_exports = exports("ntdll.shared.elf", prx) if (Path(prx) / "ntdll.shared.elf").is_file() else set()
-for name in ("ntdll", "win32u", "wineserver", "wowprospero", "wineps5", "libfreetype", "xinput1_3", "winebus",
+for name in ("ntdll", "win32u", "wineserver", "wowprospero", "wineps5", "libfreetype", "xinput1_3", "winebus", "nsiproxy",
              "winevulkan", "opengl32", "ws2_32", "crypt32", "dwrite", "libvulkan", "secur32", "libgnutls", "winegstreamer") if not prx_status.startswith("skipped") else ():
     module = Path(prx) / "sce_module" / f"{name}.prx"
     link_log = Path(prx) / f"{name}.link.log"
@@ -752,7 +766,7 @@ for name in ("ntdll", "win32u", "wineserver", "wowprospero", "wineps5", "libfree
         imports = {fields[7].split("@")[0] for fields in (line.split() for line in symbols.splitlines())
                    if len(fields) >= 8 and fields[6] == "UND"}
         provided = title_exports | (ntdll_exports if name in ("win32u", "wowprospero", "wineps5",
-                                                              "xinput1_3", "winebus", "winevulkan", "opengl32", "ws2_32",
+                                                              "xinput1_3", "winebus", "nsiproxy", "winevulkan", "opengl32", "ws2_32",
                                                               "crypt32", "dwrite", "secur32", "winegstreamer") else set())
         entry["title_unbound"] = sorted((imports & exports("libkernel_sys.so")) - provided)
         # Nor does it get the WebKit process's libraries: ws2_32's getaddrinfo,

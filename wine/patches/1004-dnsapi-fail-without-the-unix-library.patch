@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 9 Nov 2026 00:10:00 +0100
+Subject: [PATCH] dnsapi: Fail instead of calling a Unix side that did not
+ load.
+
+dnsapi's Unix side needs libresolv, which the console does not have, so
+its __wine_init_unix_call fails and the handle stays 0 ("No libresolv
+support, expect problems"). Every later call still went through it, and
+the dispatcher read the function table at address 0: a syscall fault on
+the caller's thread. iphlpapi's GetAdaptersAddresses asks DnsQueryConfig
+for the DNS servers once nsiproxy answers it, and a RE Engine game's
+main thread stopped there (measured).
+
+Without the Unix side each call now returns ERROR_NOT_SUPPORTED, so the
+callers see no servers and no search list, as on a machine with none.
+---
+ dlls/dnsapi/dnsapi.h | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/dnsapi/dnsapi.h b/dlls/dnsapi/dnsapi.h
+index d2b57b9..e913a91 100644
+--- a/dlls/dnsapi/dnsapi.h
++++ b/dlls/dnsapi/dnsapi.h
+@@ -130,4 +130,7 @@ enum unix_funcs
+     unix_funcs_count
+ };
+ 
+-#define RESOLV_CALL( func, params ) WINE_UNIX_CALL( unix_ ## func, params )
++/* Without the Unix side (its library failed to load) every call fails instead of
++ * calling through a null handle. */
++#define RESOLV_CALL( func, params ) \
++    (__wine_unixlib_handle ? WINE_UNIX_CALL( unix_ ## func, params ) : ERROR_NOT_SUPPORTED)
