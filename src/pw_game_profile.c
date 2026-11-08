@@ -383,7 +383,9 @@ static int debug_env_field(PwGameProfile *profile, const uint8_t *value, size_t 
 /* [environment] NAME = value (src/pw_game_profile.h): the same rules as
  * Playden's IsProsperoEnvironmentEntry, so a profile it writes is never
  * refused here. Names are upper-case identifiers of the graphics, input and
- * CPU-topology families, plus PW_MEDIA_DISABLE as exactly 0 or 1; anything
+ * CPU-topology families, plus PW_MEDIA_DISABLE and WINE_LARGE_ADDRESS_AWARE
+ * as exactly 0 or 1 and the open-file budgets WINE_PS5_PARK_FILES and
+ * WINE_PS5_CACHED_FILES as up to four digits; anything
  * that steers Wine, the loader or the prefix
  * (WINE*, LD_*, PATH, HOME) stays out, and so do the variables the title
  * derives from [display] and [input]. Values are printable ASCII without
@@ -394,7 +396,9 @@ static int environment_field(PwGameProfile *profile, const uint8_t *key, size_t 
     static const char *const families[] = { "DXVK_", "MESA_", "RADV_", "SDL_" };
     PwGameEnvironmentEntry *entry;
     int media_disable = same(key, key_length, "PW_MEDIA_DISABLE");
-    int allowed = same(key, key_length, "WINE_CPU_TOPOLOGY") || media_disable;
+    int large_address = same(key, key_length, "WINE_LARGE_ADDRESS_AWARE");
+    int file_count = same(key, key_length, "WINE_PS5_PARK_FILES") || same(key, key_length, "WINE_PS5_CACHED_FILES");
+    int allowed = same(key, key_length, "WINE_CPU_TOPOLOGY") || media_disable || large_address || file_count;
 
     if (profile->environment_count >= PW_GAME_ENVIRONMENT_MAX || key_length >= PW_GAME_ENVIRONMENT_NAME ||
         !value_length || value_length >= PW_GAME_ENVIRONMENT_VALUE)
@@ -408,8 +412,10 @@ static int environment_field(PwGameProfile *profile, const uint8_t *key, size_t 
         allowed |= starts(key, key_length, families[i]) && key_length > strlen(families[i]);
     if (!allowed || same(key, key_length, "DXVK_HUD") || same(key, key_length, "SDL_JOYSTICK_RAWINPUT"))
         return PW_ERR_UNSUPPORTED;
-    if (media_disable && (value_length != 1 || (value[0] != '0' && value[0] != '1')))
+    if ((media_disable || large_address) && (value_length != 1 || (value[0] != '0' && value[0] != '1')))
         return PW_ERR_MALFORMED;
+    for (size_t i = 0; file_count && i < value_length; i++)
+        if (value[i] < '0' || value[i] > '9' || value_length > 4) return PW_ERR_MALFORMED;
     for (size_t i = 0; i < value_length; i++)
         if (value[i] < 0x20 || value[i] > 0x7e || value[i] == '"' || value[i] == '\'') return PW_ERR_MALFORMED;
     for (size_t i = 0; i < profile->environment_count; i++)

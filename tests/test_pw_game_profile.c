@@ -738,6 +738,15 @@ static void test_environment(void)
     assert(!strcmp(env[0].name, "PW_MEDIA_DISABLE") && !strcmp(env[0].value, "1"));
     assert(parse(APP "[environment]\nPW_MEDIA_DISABLE = 0\n", &p) == PW_OK);
     assert(pw_game_environment_env(&p, env) == 1 && !strcmp(env[0].value, "0"));
+    /* Playden's address space row writes this one, as exactly 0 or 1 */
+    assert(parse(APP "[environment]\nWINE_LARGE_ADDRESS_AWARE = 1\n", &p) == PW_OK);
+    assert(pw_game_environment_env(&p, env) == 1);
+    assert(!strcmp(env[0].name, "WINE_LARGE_ADDRESS_AWARE") && !strcmp(env[0].value, "1"));
+    /* and the open-file budgets of patch 0993, as up to four digits */
+    assert(parse(APP "[environment]\nWINE_PS5_PARK_FILES = 96\nWINE_PS5_CACHED_FILES = 0\n", &p) == PW_OK);
+    assert(pw_game_environment_env(&p, env) == 2);
+    assert(!strcmp(env[0].name, "WINE_PS5_PARK_FILES") && !strcmp(env[0].value, "96"));
+    assert(!strcmp(env[1].name, "WINE_PS5_CACHED_FILES") && !strcmp(env[1].value, "0"));
     /* Playden's CPU cores row writes this one */
     assert(parse(APP "[environment]\nWINE_CPU_TOPOLOGY = 4:0,1,2,3\nDXVK_FRAME_RATE = 60\n"
                  "SDL_HINT_X = a b=c\nRADV_PERFTEST = gpl\nMESA_SHADER_CACHE_DIR = Z:/cache\n", &p) == PW_OK);
@@ -764,6 +773,9 @@ static void test_environment(void)
             "PW_MEDIA_DISABLE = 01\n", "PW_MEDIA_DISABLE = 1 0\n", "PW_MEDIA_DISABLE =\n",
             "PW_MEDIA_DISABLE_X = 1\n", "PW_NATIVE_PROFILE = 1\n", "PW_WINE64_MODE = game\n",
             "PW_MEDIA_DISABLE = 1\nPW_MEDIA_DISABLE = 0\n",
+            "WINE_LARGE_ADDRESS_AWARE = 2\n", "WINE_LARGE_ADDRESS_AWARE = yes\n", "WINE_LARGE_ADDRESS_AWARE = 11\n",
+            "WINE_PS5_PARK_FILES = -1\n", "WINE_PS5_PARK_FILES = 12345\n", "WINE_PS5_CACHED_FILES = 4x\n",
+            "WINE_PS5_PARK_DIRECTORIES = 0\n", "WINE_LARGE_ADDRESS = 1\n",
             "PW_VK_BATCH = 0\n", "GALLIUM_DRIVER = llvmpipe\n", /* [debug] env's families */
             "DXVK_HUD = full\n", "SDL_JOYSTICK_RAWINPUT = 1\n", /* the title sets them */
             "DXVK_ = 1\n", "SDL_ = 1\n",                     /* a family alone */

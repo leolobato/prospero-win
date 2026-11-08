@@ -77,8 +77,13 @@
  *   WINE_CPU_TOPOLOGY = 4:0,1,2,3   ; more variables for this game's Wine
  *   DXVK_FRAME_RATE = 60            ; environment, at most 8: names start with
  *                                   ; DXVK_, MESA_, RADV_ or SDL_, or are
- *                                   ; WINE_CPU_TOPOLOGY or PW_MEDIA_DISABLE
- *                                   ; (exactly 0 or 1); case matters. Refused:
+ *                                   ; WINE_CPU_TOPOLOGY, PW_MEDIA_DISABLE or
+ *                                   ; WINE_LARGE_ADDRESS_AWARE (exactly 0 or
+ *                                   ; 1: 1 gives a 32-bit program 4 GB), or
+ *                                   ; WINE_PS5_PARK_FILES or
+ *                                   ; WINE_PS5_CACHED_FILES (up to four
+ *                                   ; digits: the open-file budgets of patch
+ *                                   ; 0993); case matters. Refused:
  *                                   ; names the title sets itself (DXVK_HUD,
  *                                   ; SDL_JOYSTICK_RAWINPUT) and names a [debug]
  *                                   ; env line sets. They come after the title's
