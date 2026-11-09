@@ -687,6 +687,88 @@ static int ecx_branch_form(PwX86State *s, const uint8_t *src, size_t n)
     return PW_OK;
 }
 
+/* The decimal-adjust instructions, which 64-bit mode does not have: AAM ib
+ * (D4), AAD ib (D5), AAA (37), AAS (3F), DAA (27) and DAS (2F), on AL/AH and
+ * the committed EFLAGS. AAM and AAD set SF, ZF and PF from AL and clear OF,
+ * AF and CF (undefined); AAA and AAS set AF and CF and clear the rest of the
+ * arithmetic flags; DAA and DAS set CF, AF, SF, ZF and PF. AAM 0 raises #DE
+ * on hardware, so it is refused. Watcom's runtime turns numbers into text
+ * with AAM (Fallout, at its start). */
+enum { F_CF = 0x1u, F_PF = 0x4u, F_AF = 0x10u, F_ZF = 0x40u, F_SF = 0x80u, F_OF = 0x800u,
+       F_ARITH = F_CF | F_PF | F_AF | F_ZF | F_SF | F_OF };
+static uint32_t al_flags(uint8_t al)
+{
+    uint32_t flags = (al & 0x80u) ? F_SF : 0;
+    unsigned bits = al;
+
+    if (!al) flags |= F_ZF;
+    bits ^= bits >> 4; bits ^= bits >> 2; bits ^= bits >> 1;
+    if (!(bits & 1u)) flags |= F_PF;
+    return flags;
+}
+
+static int bcd_form(PwX86State *s, const uint8_t *src, size_t n)
+{
+    uint8_t al = (uint8_t)s->gpr[0], ah = (uint8_t)(s->gpr[0] >> 8);
+    const unsigned af = !!(s->eflags & F_AF), cf = !!(s->eflags & F_CF);
+    uint32_t flags = 0;
+    unsigned len = 1;
+
+    if (!n) return PW_ERR_UNSUPPORTED;
+    switch (src[0]) {
+    case 0xd4:                                    /* AAM ib */
+        if (n < 2 || !src[1]) return PW_ERR_UNSUPPORTED;
+        ah = (uint8_t)(al / src[1]);
+        al = (uint8_t)(al % src[1]);
+        flags = al_flags(al);
+        len = 2;
+        break;
+    case 0xd5:                                    /* AAD ib */
+        if (n < 2) return PW_ERR_UNSUPPORTED;
+        al = (uint8_t)(al + ah * src[1]);
+        ah = 0;
+        flags = al_flags(al);
+        len = 2;
+        break;
+    case 0x37:                                    /* AAA */
+    case 0x3f: {                                  /* AAS */
+        if ((al & 0x0fu) > 9 || af) {
+            const uint16_t ax = (uint16_t)(((unsigned)ah << 8 | al) + (src[0] == 0x37 ? 0x106 : -0x106));
+            al = (uint8_t)ax; ah = (uint8_t)(ax >> 8);
+            flags = F_AF | F_CF;
+        }
+        al &= 0x0fu;
+        break;
+    }
+    case 0x27:                                    /* DAA */
+    case 0x2f: {                                  /* DAS */
+        const uint8_t old = al;
+        if ((al & 0x0fu) > 9 || af) {
+            if (src[0] == 0x27) {
+                if (al > 0xf9u) flags |= F_CF;
+                al = (uint8_t)(al + 6);
+            } else {
+                if (al < 6) flags |= F_CF;
+                al = (uint8_t)(al - 6);
+            }
+            flags |= F_AF;
+        }
+        if (old > 0x99u || cf) {
+            al = (uint8_t)(src[0] == 0x27 ? al + 0x60 : al - 0x60);
+            flags |= F_CF;
+        }
+        flags |= al_flags(al);
+        break;
+    }
+    default:
+        return PW_ERR_UNSUPPORTED;
+    }
+    s->gpr[0] = (s->gpr[0] & 0xffff0000u) | (uint32_t)ah << 8 | al;
+    s->eflags = (s->eflags & ~F_ARITH) | flags;
+    s->eip += len;
+    return PW_OK;
+}
+
 /* PUSH and POP of ES, CS, SS and DS (06 07 0E 16 17 1E 1F), which 64-bit
  * mode does not have, so the host cannot run them. A push stores the
  * selector the guest sees (selector_of), zero-extended to 32 bits, or 16
@@ -893,7 +975,7 @@ int pw_x86_hostexec_step(PwX86HostExec *h, PwX86State *s, const uint8_t *src, si
          segment_stack_form(s, src, n) == PW_OK || segment_load_form(s, src, n) == PW_OK ||
          enter_form(s, src, n) == PW_OK || word_register_stack_form(s, src, n) == PW_OK ||
          all_registers_form(s, src, n) == PW_OK ||
-         ecx_branch_form(s, src, n) == PW_OK)) {
+         ecx_branch_form(s, src, n) == PW_OK || bcd_form(s, src, n) == PW_OK)) {
         h->executed++;
         return PW_OK;
     }
