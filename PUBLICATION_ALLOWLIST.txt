@@ -789,6 +789,7 @@ wine/patches/1005-ntdll-ps5-say-what-fills-a-32-bit-address-space.patch
 wine/patches/1006-win32u-ps5-list-a-mouse-and-a-keyboard-for-raw-input.patch
 wine/patches/1007-ntdll-ps5-report-only-reserved-space-as-free-to-a-32-bit-program.patch
 wine/patches/1008-ntdll-ps5-host-the-controllers-drivers-without-nsiproxy.patch
+wine/patches/1009-server-ps5-park-files-bound-to-a-completion-port.patch
 wine/ps5/pw_nsiproxy_libc.c
 tests/test_pw_nsiproxy_libc.c
 wine/patches/0985-ntdll-ps5-start-hosted-drivers-without-thread-attach.patch

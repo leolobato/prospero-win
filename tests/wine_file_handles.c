@@ -10,7 +10,10 @@
  * still read their file. Last, a file with 300 read-only handles, most of
  * them parked, is deleted: every handle must be opened again first, so the
  * delete may be refused when they don't all fit, but each handle must still
- * read the file afterwards. */
+ * read the file afterwards. Then 600 more files are opened for overlapped
+ * I/O and bound to one completion port, as Euro Truck Simulator 2 opens
+ * its mod archives, and each is read through the port twice (patch 1009:
+ * a file with a completion port was never parked). */
 #include <windows.h>
 #include <winternl.h>
 #include <stdio.h>
@@ -22,9 +25,12 @@ NTSTATUS NTAPI NtSetInformationFile(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, FILE
 #define READERS 300
 #define FILE_DISPOSITION_INFORMATION_EX_CLASS 64  /* FileDispositionInformationEx */
 #define SIZE  4096
+#define PORTED 600
+#define PORTED_BASE (COUNT + 3)
 
 static HANDLE files[COUNT];
 static HANDLE readers[READERS];
+static HANDLE ported[PORTED];
 static WCHAR top[MAX_PATH];
 
 static BYTE expected(int file, int offset)
@@ -94,6 +100,26 @@ static BOOL read_check(HANDLE handle, int file, int offset, int check_offset, in
     return TRUE;
 }
 
+/* read count bytes at offset through an overlapped handle bound to port with
+ * key file, and check them against the file's pattern */
+static BOOL read_port_check(HANDLE handle, HANDLE port, int file, int offset, int count)
+{
+    BYTE data[64];
+    OVERLAPPED ov, *got = NULL;
+    ULONG_PTR key = 0;
+    DWORD done = 0;
+    int i;
+
+    memset(&ov, 0, sizeof(ov));
+    ov.Offset = offset;
+    if (!ReadFile(handle, data, count, NULL, &ov) && GetLastError() != ERROR_IO_PENDING) return FALSE;
+    if (!GetQueuedCompletionStatus(port, &done, &key, &got, 5000)) return FALSE;
+    if (got != &ov || key != (ULONG_PTR)file || done != (DWORD)count) return FALSE;
+    for (i = 0; i < count; i++)
+        if (data[i] != expected(file, offset + i)) return FALSE;
+    return TRUE;
+}
+
 /* use every other file, so that a handle not used since is parked */
 static BOOL touch_all(void)
 {
@@ -113,7 +139,7 @@ static int fail(const char *what, int index)
 int main(void)
 {
     WCHAR name[64], path[MAX_PATH], renamed[MAX_PATH];
-    HANDLE moved, deleted;
+    HANDLE moved, deleted, port;
     ULONG status;
     int i;
 
@@ -186,6 +212,31 @@ int main(void)
     DeleteFileW(path);
     printf("file-handles multi-reader delete status=%#lx\n", status);
 
+    /* overlapped files bound to one completion port, read in one order and
+     * then the other, so that most are parked between their two reads */
+    if (!(port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0))) return fail("port", 0);
+    for (i = 0; i < PORTED; i++)
+    {
+        swprintf(name, 64, L"p%d.bin", i);
+        if (!write_file(name, PORTED_BASE + i)) return fail("create-ported", i);
+        path_of(path, name);
+        ported[i] = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+        if (ported[i] == INVALID_HANDLE_VALUE) return fail("open-ported", i);
+        if (CreateIoCompletionPort(ported[i], port, PORTED_BASE + i, 0) != port) return fail("bind-ported", i);
+        if (!read_port_check(ported[i], port, PORTED_BASE + i, 100, 8)) return fail("read-ported", i);
+    }
+    if (!touch_all()) return fail("touch", 5);
+    for (i = PORTED - 1; i >= 0; i--)
+        if (!read_port_check(ported[i], port, PORTED_BASE + i, 2500, 8)) return fail("read-ported-again", i);
+    for (i = 0; i < PORTED; i++)
+    {
+        CloseHandle(ported[i]);
+        swprintf(name, 64, L"p%d.bin", i);
+        path_of(path, name);
+        DeleteFileW(path);
+    }
+    CloseHandle(port);
+
     CloseHandle(moved);
     CloseHandle(deleted);
     for (i = 0; i < COUNT; i++) CloseHandle(files[i]);
@@ -197,6 +248,6 @@ int main(void)
     }
     DeleteFileW(renamed);
     RemoveDirectoryW(top);
-    printf("file-handles verdict=pass files=%d\n", COUNT);
+    printf("file-handles verdict=pass files=%d ported=%d\n", COUNT, PORTED);
     return 0;
 }

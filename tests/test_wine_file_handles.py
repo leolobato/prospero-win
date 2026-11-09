@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Many files can be kept open and read at once: 1500 read-only handles, each
 read through its file pointer and at explicit offsets, then a renamed and a
-deleted file read through parked handles (wine/patches/0993).
+deleted file read through parked handles (wine/patches/0993), then 600
+overlapped files bound to one completion port (wine/patches/1009).
 
 Needs the host Wine from tools/build_host_wine.sh (PROSPERO_HOST_WINE, default
 .deps/wine-host/install/usr/bin/wine) and x86_64-w64-mingw32-gcc; without either
@@ -46,7 +47,8 @@ def main() -> int:
                               preexec_fn=lower_limit)
         assert done.returncode == 0, f"{done.stdout}{done.stderr}"
         assert "file-handles verdict=pass" in done.stdout, done.stdout
-    print("wine file handles passed: 1500 files kept open and read, a renamed and a deleted one read again"
+    print("wine file handles passed: 1500 files kept open and read, a renamed and a deleted one read again,"
+          " 600 bound to a completion port"
           + (f" (descriptor limit {limit})" if limit else ""))
     return 0
 

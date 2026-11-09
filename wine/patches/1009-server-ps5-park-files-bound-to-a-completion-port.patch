@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 9 Nov 2026 22:00:00 +0100
+Subject: [PATCH] server: Park files bound to a completion port on PS5.
+
+Patch 0993 left every file with a completion port live. A game that reads
+its archives with overlapped I/O through one port binds each of them, so
+none could be parked: Euro Truck Simulator 2 opens every archive in its
+mod folder that way at start, and with a few hundred of them the title
+ran out of files (patch 1002's log: live=183 parked=0) and the game
+crashed, or failed to create or load a profile.
+
+The port, its key and the completion flags belong to the fd, which stays;
+parking closes only the unix descriptor. A read through such a handle on a
+regular file is done by the client with a descriptor it asks the server
+for, which opens a parked file again, and then posts its completion
+through the handle. A file with an async queued in the server still keeps
+its descriptor.
+---
+ server/fd.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/server/fd.c b/server/fd.c
+index df1ef68..46985d9 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -2095,6 +2095,10 @@ static unsigned long long ps5_now_ms(void)
+     return (unsigned long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+ }
+ 
++/* A file bound to a completion port is parked like any other: the port, its
++ * key and flags stay with the fd, and a read through such a handle is done by
++ * the client with a descriptor it asks for, which opens a parked file again.
++ * Only an async queued here needs the descriptor kept, checked below. */
+ static int ps5_park_file( struct fd *fd, int force )
+ {
+     struct stat st;
+@@ -2103,7 +2107,7 @@ static int ps5_park_file( struct fd *fd, int force )
+     if (fd->unix_fd == -1 || !fd->closed || fd->closed->unix_fd != fd->unix_fd ||
+         !list_empty( &fd->inode->locks ) || !list_empty( &fd->locks ) ||
+         async_queued( &fd->read_q ) || async_queued( &fd->write_q ) || async_queued( &fd->wait_q ) ||
+-        fd->completion || ps5_inode_deleting( fd->inode ))
++        ps5_inode_deleting( fd->inode ))
+         return 0;
+     if (!force && fd->ps5_lent_ms && ps5_now_ms() - fd->ps5_lent_ms < PS5_LENT_GRACE_MS) return 0;
+     /* every fd has a poll slot; one that is polled keeps its descriptor */
