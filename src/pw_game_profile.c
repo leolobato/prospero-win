@@ -383,8 +383,8 @@ static int debug_env_field(PwGameProfile *profile, const uint8_t *value, size_t 
 /* [environment] NAME = value (src/pw_game_profile.h): the same rules as
  * Playden's IsProsperoEnvironmentEntry, so a profile it writes is never
  * refused here. Names are upper-case identifiers of the graphics, input and
- * CPU-topology families, plus PW_MEDIA_DISABLE and WINE_LARGE_ADDRESS_AWARE
- * as exactly 0 or 1 and the open-file budgets WINE_PS5_PARK_FILES and
+ * CPU-topology families, plus PW_MEDIA_DISABLE, PW_NSIPROXY_DISABLE and
+ * WINE_LARGE_ADDRESS_AWARE as exactly 0 or 1 and the open-file budgets WINE_PS5_PARK_FILES and
  * WINE_PS5_CACHED_FILES as up to four digits; anything
  * that steers Wine, the loader or the prefix
  * (WINE*, LD_*, PATH, HOME) stays out, and so do the variables the title
@@ -395,7 +395,7 @@ static int environment_field(PwGameProfile *profile, const uint8_t *key, size_t 
 {
     static const char *const families[] = { "DXVK_", "MESA_", "RADV_", "SDL_" };
     PwGameEnvironmentEntry *entry;
-    int media_disable = same(key, key_length, "PW_MEDIA_DISABLE");
+    int media_disable = same(key, key_length, "PW_MEDIA_DISABLE") || same(key, key_length, "PW_NSIPROXY_DISABLE");
     int large_address = same(key, key_length, "WINE_LARGE_ADDRESS_AWARE");
     int file_count = same(key, key_length, "WINE_PS5_PARK_FILES") || same(key, key_length, "WINE_PS5_CACHED_FILES");
     int allowed = same(key, key_length, "WINE_CPU_TOPOLOGY") || media_disable || large_address || file_count;
@@ -622,6 +622,26 @@ size_t pw_game_environment_env(const PwGameProfile *profile, PwGameEnv *env)
     for (size_t i = 0; i < profile->environment_count; i++)
         env[i] = (PwGameEnv){ profile->environment[i].name, profile->environment[i].value };
     return profile->environment_count;
+}
+
+int pw_game_nsiproxy_disabled(const PwGameProfile *profile)
+{
+    if (!profile) return 0;
+    for (size_t i = 0; i < profile->environment_count; i++)
+        if (!strcmp(profile->environment[i].name, "PW_NSIPROXY_DISABLE")) return !strcmp(profile->environment[i].value, "1");
+    return 0;
+}
+
+const char *pw_game_ntoskrnl_hosted(const PwGameProfile *profile, int pad_mode)
+{
+    const int disabled = pw_game_nsiproxy_disabled(profile);
+
+    /* The pad modes host the controller's drivers whatever the switch says;
+     * "winebus" leaves nsiproxy out (Wine patch 1008). */
+    if (pad_mode) return disabled ? "winebus" : "1";
+    /* nsiproxy's Unix side has no WoW64 thunks: a 32-bit game hosts nothing. */
+    if (disabled || !profile || profile->app.architecture == PW_APP_ARCH_PE32) return NULL;
+    return "nsiproxy";
 }
 
 int pw_game_cpu_native(const PwGameProfile *profile)

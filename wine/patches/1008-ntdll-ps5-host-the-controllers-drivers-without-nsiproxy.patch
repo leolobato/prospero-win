@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 9 Nov 2026 00:00:00 +0100
+Subject: [PATCH] ntdll: Host the controller's drivers without nsiproxy on request.
+
+Patch 1003 hosts nsiproxy in every 64-bit PS5 game, after the
+controller's HID drivers when WINE_NTOSKRNL_HOSTED is 1. A game that
+breaks with nsiproxy had no way to keep the HID drivers without it.
+
+The value winebus now means the controller's HID drivers alone: the pad
+waits for its drivers as with 1, and nsiproxy is not loaded. The values
+1 and nsiproxy keep their meaning, so a launcher that never sets winebus
+sees no change.
+---
+ dlls/ntdll/loader.c | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -4447,8 +4447,9 @@
+  * set, ntoskrnl runs drivers on threads of this process, started before the
+  * game's entry point: with the value 1, the controller's HID drivers
+  * (winebus and the ones it loads), so that the game finds the controller
+- * when it first looks, then nsiproxy; with any other value nsiproxy only.
+- * iphlpapi reads the network interfaces from nsiproxy's \\.\Nsi device.
++ * when it first looks, then nsiproxy; with the value winebus, those drivers
++ * alone, for a game that must not get nsiproxy; with any other value nsiproxy
++ * only. iphlpapi reads the network interfaces from nsiproxy's \\.\Nsi device.
+  * nsiproxy's Unix side has no WoW64 thunks, so a 32-bit game gets the
+  * controller's drivers only. */
+ static void start_hosted_drivers(void)
+@@ -4461,7 +4462,7 @@
+     NTSTATUS (CDECL *host_load)( const WCHAR *driver );
+     UNICODE_STRING value;
+     WCHAR buffer[16];
+-    BOOL pad, nsi;
++    BOOL pad, nsi, winebus;
+     HMODULE module;
+     NTSTATUS status;
+ 
+@@ -4475,9 +4476,10 @@
+     /* Only the game: Wine's own programs (explorer, services) inherit the variable too. */
+     if (image->Buffer && (!wcsnicmp( image->Buffer, system_dir, wcslen(system_dir) ) ||
+                           !wcsnicmp( image->Buffer, L"C:\\windows\\syswow64\\", 20 ))) return;
+-    pad = !status && value.Length == sizeof(WCHAR) && buffer[0] == '1';
++    winebus = !status && value.Length == 7 * sizeof(WCHAR) && !wcsncmp( buffer, L"winebus", 7 );
++    pad = winebus || (!status && value.Length == sizeof(WCHAR) && buffer[0] == '1');
+ #ifdef _WIN64
+-    nsi = !NtCurrentTeb()->WowTebOffset;
++    nsi = !winebus && !NtCurrentTeb()->WowTebOffset;
+ #else
+     nsi = FALSE;
+ #endif

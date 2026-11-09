@@ -725,6 +725,34 @@ static void test_debug_env(void)
 
 /* [environment]: more variables for the game, by Playden's rules
  * (IsProsperoEnvironmentEntry), in file order. */
+/* WINE_NTOSKRNL_HOSTED per mode, architecture and PW_NSIPROXY_DISABLE. */
+static void test_ntoskrnl_hosted(void)
+{
+    static const char app64[] = "[application]\nid = sts\nname = Slay\nexecutable = C:\\Games\\Sts.exe\n"
+                                "working_directory = C:\\Games\nprefix = default\nruntime = wine-wow64\n"
+                                "architecture = pe64\ngraphics = gdi\n";
+    char text[512];
+    PwGameProfile p;
+
+    /* 32-bit: the HID drivers in the pad modes, nothing in the others */
+    assert(parse(APP, &p) == PW_OK && !pw_game_nsiproxy_disabled(&p));
+    assert(!strcmp(pw_game_ntoskrnl_hosted(&p, 1), "1") && !pw_game_ntoskrnl_hosted(&p, 0));
+    assert(parse(APP "[environment]\nPW_NSIPROXY_DISABLE = 1\n", &p) == PW_OK && pw_game_nsiproxy_disabled(&p));
+    assert(!strcmp(pw_game_ntoskrnl_hosted(&p, 1), "winebus") && !pw_game_ntoskrnl_hosted(&p, 0));
+    /* 64-bit: nsiproxy after the HID drivers, or alone; the switch keeps the HID drivers */
+    assert(parse(app64, &p) == PW_OK);
+    assert(!strcmp(pw_game_ntoskrnl_hosted(&p, 1), "1") && !strcmp(pw_game_ntoskrnl_hosted(&p, 0), "nsiproxy"));
+    snprintf(text, sizeof(text), "%s[environment]\nPW_NSIPROXY_DISABLE = 1\n", app64);
+    assert(parse(text, &p) == PW_OK);
+    assert(!strcmp(pw_game_ntoskrnl_hosted(&p, 1), "winebus") && !pw_game_ntoskrnl_hosted(&p, 0));
+    snprintf(text, sizeof(text), "%s[environment]\nPW_NSIPROXY_DISABLE = 0\n", app64);
+    assert(parse(text, &p) == PW_OK);
+    assert(!strcmp(pw_game_ntoskrnl_hosted(&p, 1), "1") && !strcmp(pw_game_ntoskrnl_hosted(&p, 0), "nsiproxy"));
+    /* no profile: the pad modes still get their drivers */
+    assert(!pw_game_nsiproxy_disabled(NULL) && !strcmp(pw_game_ntoskrnl_hosted(NULL, 1), "1") &&
+           !pw_game_ntoskrnl_hosted(NULL, 0));
+}
+
 static void test_environment(void)
 {
     PwGameProfile p;
@@ -738,6 +766,11 @@ static void test_environment(void)
     assert(!strcmp(env[0].name, "PW_MEDIA_DISABLE") && !strcmp(env[0].value, "1"));
     assert(parse(APP "[environment]\nPW_MEDIA_DISABLE = 0\n", &p) == PW_OK);
     assert(pw_game_environment_env(&p, env) == 1 && !strcmp(env[0].value, "0"));
+    /* and the nsiproxy switch, also exactly 0 or 1 */
+    assert(parse(APP "[environment]\nPW_NSIPROXY_DISABLE = 1\n", &p) == PW_OK);
+    assert(pw_game_environment_env(&p, env) == 1);
+    assert(!strcmp(env[0].name, "PW_NSIPROXY_DISABLE") && !strcmp(env[0].value, "1"));
+    assert(parse(APP "[environment]\nPW_NSIPROXY_DISABLE = 0\n", &p) == PW_OK && !pw_game_nsiproxy_disabled(&p));
     /* Playden's address space row writes this one, as exactly 0 or 1 */
     assert(parse(APP "[environment]\nWINE_LARGE_ADDRESS_AWARE = 1\n", &p) == PW_OK);
     assert(pw_game_environment_env(&p, env) == 1);
@@ -773,6 +806,8 @@ static void test_environment(void)
             "PW_MEDIA_DISABLE = 01\n", "PW_MEDIA_DISABLE = 1 0\n", "PW_MEDIA_DISABLE =\n",
             "PW_MEDIA_DISABLE_X = 1\n", "PW_NATIVE_PROFILE = 1\n", "PW_WINE64_MODE = game\n",
             "PW_MEDIA_DISABLE = 1\nPW_MEDIA_DISABLE = 0\n",
+            "PW_NSIPROXY_DISABLE = 2\n", "PW_NSIPROXY_DISABLE = true\n", "PW_NSIPROXY_DISABLE = 01\n",
+            "PW_NSIPROXY_DISABLE =\n", "PW_NSIPROXY = 1\n", "PW_NSIPROXY_DISABLE = 1\nPW_NSIPROXY_DISABLE = 1\n",
             "WINE_LARGE_ADDRESS_AWARE = 2\n", "WINE_LARGE_ADDRESS_AWARE = yes\n", "WINE_LARGE_ADDRESS_AWARE = 11\n",
             "WINE_PS5_PARK_FILES = -1\n", "WINE_PS5_PARK_FILES = 12345\n", "WINE_PS5_CACHED_FILES = 4x\n",
             "WINE_PS5_PARK_DIRECTORIES = 0\n", "WINE_LARGE_ADDRESS = 1\n",
@@ -823,6 +858,7 @@ int main(void)
     test_cpu();
     test_debug_env();
     test_environment();
+    test_ntoskrnl_hosted();
     test_refusals();
     test_presets();
     test_default_mode();

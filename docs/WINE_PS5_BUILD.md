@@ -168,6 +168,7 @@ before evaluating a candidate built from that cache.
 | 1005 | `ntdll`: when an allocation of a 32-bit program finds no room, the first two failures log the limit, the views below 4 GB per 2 GB half (count, size, committed, largest gap) and the largest views: `wine-ps5: 32-bit out of address space for ...` |
 | 1006 | `win32u`: `GetRawInputDeviceList` lists a mouse and a keyboard when no device of that type exists, with the handles the server gives the user driver's raw input (1 and 2). A PS5 title has no mouse or keyboard device (patch 0951 creates no virtual ones), and Unreal Engine reports no cursor position without a mouse, so clicks on objects in the scene did nothing |
 | 1007 | `ntdll`: below 4 GiB a WoW64 process gets the i386 rule for `VirtualQuery`: space outside the reserved areas is reported as reserved, not free. The PS5 kernel keeps mappings of its own above 2 GiB that the reservation of patch 1000 can't take, and a program that reserves the largest free block it finds (Wanted: Weapons of Fate's heap, 0x80000000 bytes) must only find room it can have |
+| 1008 | `ntdll`: `WINE_NTOSKRNL_HOSTED=winebus` hosts the controller's HID drivers alone, without patch 1003's nsiproxy, for a game that breaks with it (`PW_NSIPROXY_DISABLE = 1` in `[environment]`). `1` and `nsiproxy` keep their meaning |
 
 ## Allocator
 
@@ -1232,6 +1233,12 @@ The title runs one game per process (`src/pw_wine_launch.h`):
     `WINE_CPU_TOPOLOGY` or `PW_MEDIA_DISABLE` (exactly `0` or `1`); case matters.
     The media exception requires a title rebuilt with this parser update; the
     older `3b6d7c6` wrapper does not accept it in `[environment]`.
+    `PW_NSIPROXY_DISABLE = 1` (exactly `0` or `1`, titles from this change on)
+    turns off nsiproxy hosting for that game (Wine patches 1003 and 1008): in
+    the xinput and playstation modes the title sets `WINE_NTOSKRNL_HOSTED=winebus`,
+    the controller's HID drivers alone; in the other modes it sets nothing, as
+    for a 32-bit game. The log says `PW_WINE64 nsiproxy hosted=0
+    (PW_NSIPROXY_DISABLE)`.
     Refused: anything that steers Wine,
     the loader or the prefix, `DXVK_HUD` and `SDL_JOYSTICK_RAWINPUT` (the
     title sets them), a name a `[debug] env` line also sets, and quotes in

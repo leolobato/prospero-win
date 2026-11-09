@@ -77,7 +77,9 @@
  *   WINE_CPU_TOPOLOGY = 4:0,1,2,3   ; more variables for this game's Wine
  *   DXVK_FRAME_RATE = 60            ; environment, at most 8: names start with
  *                                   ; DXVK_, MESA_, RADV_ or SDL_, or are
- *                                   ; WINE_CPU_TOPOLOGY, PW_MEDIA_DISABLE or
+ *                                   ; WINE_CPU_TOPOLOGY, PW_MEDIA_DISABLE,
+ *                                   ; PW_NSIPROXY_DISABLE (1: the game hosts
+ *                                   ; no nsiproxy) or
  *                                   ; WINE_LARGE_ADDRESS_AWARE (exactly 0 or
  *                                   ; 1: 1 gives a 32-bit program 4 GB), or
  *                                   ; WINE_PS5_PARK_FILES or
@@ -264,6 +266,14 @@ size_t pw_game_debug_env(const PwGameProfile *profile, PwGameEnv *env);
  * PW_GAME_ENVIRONMENT_MAX; how many, in file order. The strings live in
  * profile. The title sets them after its own variables. */
 size_t pw_game_environment_env(const PwGameProfile *profile, PwGameEnv *env);
+/* Whether [environment] has PW_NSIPROXY_DISABLE = 1. */
+int pw_game_nsiproxy_disabled(const PwGameProfile *profile);
+/* The WINE_NTOSKRNL_HOSTED value for this game, or NULL for none: in the
+ * pad modes (xinput, playstation) "1", the controller's HID drivers then
+ * nsiproxy, or "winebus", the HID drivers alone, with PW_NSIPROXY_DISABLE;
+ * in the other modes "nsiproxy" for a 64-bit game, none for a 32-bit one or
+ * with PW_NSIPROXY_DISABLE. */
+const char *pw_game_ntoskrnl_hosted(const PwGameProfile *profile, int pad_mode);
 /* An input with nothing bound, keyboard mode, no pointer, full rumble. */
 void pw_game_input_init(PwGameInput *input);
 /* Parse an input preset file (one [input] section, no preset= line) into

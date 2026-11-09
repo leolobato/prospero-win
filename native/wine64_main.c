@@ -1996,6 +1996,13 @@ int main(int argc, char **argv)
          * with a DualShock 4 and no Xbox controller. */
         if (needs_playstation)
             extra[config.extra_env_count++] = (PwWineStartEnv){ "WINE_PS5_PAD", "dualshock4" };
+        const char *hosted = pw_game_ntoskrnl_hosted(game, needs_xinput);
+
+        /* PW_NSIPROXY_DISABLE = 1 ([environment]): no nsiproxy, for a game
+         * that breaks with it; the pad modes still host the HID drivers. The
+         * variable also reaches Wine with the others, where nothing reads it. */
+        if (pw_game_nsiproxy_disabled(game))
+            PS5LOG_LOG("PW_WINE64 nsiproxy hosted=0 (PW_NSIPROXY_DISABLE)");
         /* xinput and playstation modes: the game also hosts the
          * controller's HID drivers (patches 0951-0953), so DirectInput,
          * winmm and Windows.Gaming.Input find the DualSense, as an Xbox 360
@@ -2005,7 +2012,7 @@ int main(int argc, char **argv)
                                                    "winexinput.sys" };
             int installed = 0;
 
-            extra[config.extra_env_count++] = (PwWineStartEnv){ "WINE_NTOSKRNL_HOSTED", "1" };
+            extra[config.extra_env_count++] = (PwWineStartEnv){ "WINE_NTOSKRNL_HOSTED", hosted };
             /* A 32-bit game loads them from syswow64\drivers, which older
              * bottles lack. */
             for (size_t d = 0; game->app.architecture == PW_APP_ARCH_PE32 && d < sizeof(drivers) / sizeof(drivers[0]);
@@ -2020,14 +2027,15 @@ int main(int argc, char **argv)
                 installed = installed < 0 || result < 0 ? -1 : installed + result;
             }
             PS5LOG_LOG("PW_WINE64 hid hosted=1 drivers_copied=%d", installed);
-        } else if (game->app.architecture != PW_APP_ARCH_PE32) {
+        } else if (hosted) {
             /* The other modes: a 64-bit game hosts nsiproxy only (patch
              * 1003), whose \\.\Nsi device iphlpapi reads the network
              * interfaces from; with the value 1 above it follows the HID
              * drivers. nsiproxy's Unix side has no WoW64 thunks, so a 32-bit
              * game hosts nothing and gets no variable: the hosted flag and
-             * setupapi's own service keys (patch 0954) stay off for it. */
-            extra[config.extra_env_count++] = (PwWineStartEnv){ "WINE_NTOSKRNL_HOSTED", "nsiproxy" };
+             * setupapi's own service keys (patch 0954) stay off for it. So
+             * does a game with PW_NSIPROXY_DISABLE, as before patch 1003. */
+            extra[config.extra_env_count++] = (PwWineStartEnv){ "WINE_NTOSKRNL_HOSTED", hosted };
         }
         /* [runtime]: opt-in runtime settings for this game. */
         {
