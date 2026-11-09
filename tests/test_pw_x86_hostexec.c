@@ -570,6 +570,51 @@ static void test_cpuid(void)
     assert(!(regs[2] & ((1u << 11) | (1u << 16) | (1u << 21))) && (regs[2] & 1u));
 }
 
+/* AAM, AAD, AAA, AAS, DAA and DAS: AL/AH and the flags as the processor
+ * leaves them; AAM 0 (#DE) stays refused. Watcom's runtime prints numbers
+ * with AAM. */
+static void test_decimal_adjust(void)
+{
+    PwX86State s;
+
+    reset_state(&s);
+    s.gpr[0] = 0xabcd0000u | 47;                                               /* AL 47 */
+    assert(run(&s, (const uint8_t[]){0xd4, 0x0a}, 2) == PW_OK);               /* aam 10 */
+    assert(s.gpr[0] == (0xabcd0000u | 0x0407) && s.eip == 0x1002);
+    assert(!(s.eflags & (0x40u | 0x80u | 0x4u)));                              /* AL 7: odd parity */
+    s.gpr[0] = 0x0000ff00u;                                                    /* AH 255, AL 0 */
+    s.eflags |= 0x801u;
+    assert(run(&s, (const uint8_t[]){0xd4, 0x0a}, 2) == PW_OK);               /* AL 0 -> ZF, PF */
+    assert((s.gpr[0] & 0xffffu) == 0 && (s.eflags & 0x44u) == 0x44u && !(s.eflags & 0x801u));
+    assert(run(&s, (const uint8_t[]){0xd4, 0x00}, 2) == PW_ERR_UNSUPPORTED);  /* aam 0: #DE */
+    reset_state(&s);
+    s.gpr[0] = 0x0407;
+    assert(run(&s, (const uint8_t[]){0xd5, 0x0a}, 2) == PW_OK);               /* aad 10 */
+    assert((s.gpr[0] & 0xffffu) == 47);
+    reset_state(&s);
+    s.gpr[0] = 0x000b;                                                         /* AL 0x0b */
+    assert(run(&s, (const uint8_t[]){0x37}, 1) == PW_OK);                      /* aaa */
+    assert((s.gpr[0] & 0xffffu) == 0x0101 && (s.eflags & 0x11u) == 0x11u && s.eip == 0x1001);
+    s.gpr[0] = 0x0105;
+    s.eflags &= ~0x11u;
+    assert(run(&s, (const uint8_t[]){0x37}, 1) == PW_OK);                      /* nothing to adjust */
+    assert((s.gpr[0] & 0xffffu) == 0x0105 && !(s.eflags & 0x11u));
+    s.gpr[0] = 0x020f;
+    assert(run(&s, (const uint8_t[]){0x3f}, 1) == PW_OK);                      /* aas */
+    assert((s.gpr[0] & 0xffffu) == 0x0109 && (s.eflags & 0x11u) == 0x11u);
+    reset_state(&s);
+    s.gpr[0] = 0x9b;                                                           /* 0x79 + 0x22 in binary */
+    assert(run(&s, (const uint8_t[]){0x27}, 1) == PW_OK);                      /* daa: 101 decimal */
+    assert((s.gpr[0] & 0xffu) == 0x01 && (s.eflags & 0x11u) == 0x11u);
+    reset_state(&s);
+    s.gpr[0] = 0x26;                                                           /* 0x47 - 0x21 */
+    assert(run(&s, (const uint8_t[]){0x2f}, 1) == PW_OK);                      /* das: 26, no adjust */
+    assert((s.gpr[0] & 0xffu) == 0x26 && !(s.eflags & 0x11u));
+    s.gpr[0] = 0x1e;                                                           /* 0x25 - 0x07 */
+    assert(run(&s, (const uint8_t[]){0x2f}, 1) == PW_OK);                      /* das: 18 */
+    assert((s.gpr[0] & 0xffu) == 0x18 && (s.eflags & 0x10u) && !(s.eflags & 0x1u));
+}
+
 static void test_refusals_and_cache(void)
 {
     PwX86State s;
@@ -626,10 +671,11 @@ int main(void)
     test_watcom_forms();
     test_all_registers();
     test_ecx_branches();
+    test_decimal_adjust();
     test_cpuid();
     test_refusals_and_cache();
     assert(pw_x86_hostexec_destroy(&hx) == PW_OK);
-    printf("host-exec fallback passed: integer, x87, SSE, FS and SIB forms, the guest's MXCSR, segment stores, segment push and pop, segment loads, ENTER, 16-bit register push and pop, PUSHAD and POPAD, JECXZ and LOOP, CPUID; %llu stubs\n",
+    printf("host-exec fallback passed: integer, x87, SSE, FS and SIB forms, the guest's MXCSR, segment stores, segment push and pop, segment loads, ENTER, 16-bit register push and pop, PUSHAD and POPAD, JECXZ and LOOP, decimal adjust, CPUID; %llu stubs\n",
            (unsigned long long)hx.compiled);
     return 0;
 }
