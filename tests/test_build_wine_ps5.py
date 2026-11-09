@@ -294,11 +294,12 @@ def check_vk_runtime_staging() -> None:
         headers = []
         for family, module, name in [('time', 'ntdll', 'pw_qpc_clock.h'),
                                      ('menu', 'ntdll', 'pw_title_menu.h'),
+                                     ('menu', 'ntdll', 'pw_title_notify.h'),
                                      ('input', 'win32u', 'pw_key_shared.h')]:
             if f'wine/ps5/{family}/' not in block:
                 continue
             original = base / f'wine/ps5/{family}/{name}'
-            original.parent.mkdir(parents=True)
+            original.parent.mkdir(parents=True, exist_ok=True)
             original.write_text(f'{family} shared ABI fixture\n')
             target = source / f'dlls/{module}/{name}'
             target.parent.mkdir(parents=True, exist_ok=True)

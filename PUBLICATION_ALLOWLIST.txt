@@ -78,6 +78,8 @@ src/pw_game_menu.c
 src/pw_game_menu.h
 src/pw_input_switch.c
 src/pw_input_switch.h
+src/pw_invite_prompt.c
+src/pw_invite_prompt.h
 src/pw_osk.c
 src/pw_osk.h
 src/pw_guest_call.c
@@ -89,6 +91,7 @@ tests/test_pw_app_profile.c
 tests/test_pw_pad.c
 tests/test_pw_game_menu.c
 tests/test_pw_input_switch.c
+tests/test_pw_invite_prompt.c
 tests/test_pw_pad_players.c
 tests/test_pw_pad_ps5.c
 tests/test_status_vocabulary.py
@@ -525,6 +528,7 @@ wine/patches/0902-win32u-ps5-send-extended-keys-as-extended.patch
 wine/patches/0903-ntdll-ps5-keep-the-fs-base-of-a-resumed-64-bit-thread.patch
 wine/ps5/input/pw_key_shared.h
 wine/ps5/menu/pw_title_menu.h
+wine/ps5/menu/pw_title_notify.h
 tests/lab/pw_qpc_bridge.c
 tests/lab/pw_key_bridge.c
 tools/test_wine_qpc_bridge.py
@@ -790,6 +794,7 @@ wine/patches/1006-win32u-ps5-list-a-mouse-and-a-keyboard-for-raw-input.patch
 wine/patches/1007-ntdll-ps5-report-only-reserved-space-as-free-to-a-32-bit-program.patch
 wine/patches/1008-ntdll-ps5-host-the-controllers-drivers-without-nsiproxy.patch
 wine/patches/1009-server-ps5-park-files-bound-to-a-completion-port.patch
+wine/patches/1010-ntdll-ps5-title-notifications-and-invites.patch
 wine/ps5/pw_nsiproxy_libc.c
 tests/test_pw_nsiproxy_libc.c
 wine/patches/0985-ntdll-ps5-start-hosted-drivers-without-thread-attach.patch

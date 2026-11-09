@@ -294,6 +294,8 @@ cp "$root/wine/ps5/time/pw_qpc_clock.h" "$tree/dlls/ntdll/pw_qpc_clock.h" ||
     fail "cannot stage shared-clock ABI"
 cp "$root/wine/ps5/menu/pw_title_menu.h" "$tree/dlls/ntdll/pw_title_menu.h" ||
     fail "cannot stage title-menu ABI"
+cp "$root/wine/ps5/menu/pw_title_notify.h" "$tree/dlls/ntdll/pw_title_notify.h" ||
+    fail "cannot stage title-notify ABI"
 cp "$root/wine/ps5/input/pw_key_shared.h" "$tree/dlls/win32u/pw_key_shared.h" ||
     fail "cannot stage shared-input ABI"
 
@@ -313,7 +315,7 @@ stamp=$(
       for patch in $ordered; do cat "$patches/$patch"; done
       cat "$root/tools/stage_vk_batch.py" "$root/tools/generate_vk_codecs.py" "$root"/wine/ps5/pw_vk_*.[ch] \
           "$root"/wine/ps5/vulkan/*.[ch] "$root/wine/ps5/time/pw_qpc_clock.h" "$root/wine/ps5/input/pw_key_shared.h" \
-          "$root/wine/ps5/menu/pw_title_menu.h"; } | sha256sum | cut -c1-64)
+          "$root/wine/ps5/menu/pw_title_menu.h" "$root/wine/ps5/menu/pw_title_notify.h"; } | sha256sum | cut -c1-64)
 build=$work/build
 if [ ! -f "$build/Makefile" ] || [ "$(cat "$build/.prospero-stamp" 2>/dev/null)" != "$stamp" ]; then
     rm -rf "$build"
@@ -473,6 +475,8 @@ if [ "$prx_status" = 0 ]; then
         pw_wine_set_audio_sink pw_wine_audio_available pw_wine_audio_output \
         __wine_virtual_stats __wine_virtual_fault_top __wine_ps5_set_output_sink __wine_ps5_memory_stats pw_cwd_set \
         __wine_ps5_set_segv_hook __wine_ps5_set_segv_unresolved_hook pw_wine_set_display_release pw_wine_release_display \
+        pw_wine_set_notify pw_wine_notify pw_wine_set_invite pw_wine_invite_ask pw_wine_invite_answer \
+        pw_wine_invite_pending pw_wine_invite_accept \
         --optional-from "$build/dlls/ntdll/ntdll.so" --nm "$sdk/bin/prospero-nm" \
         --optional-export __wine_prospero_native_wow64_caps
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/win32u_desc.c" __wine_unix_lib_init

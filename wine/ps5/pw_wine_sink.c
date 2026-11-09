@@ -25,6 +25,14 @@ static uint32_t rumble_left[PW_WINE_PADS],rumble_right[PW_WINE_PADS],rumble_chan
 static uint32_t rumble_peak_left[PW_WINE_PADS],rumble_peak_right[PW_WINE_PADS];
 static uint32_t pads_wanted;
 static struct pw_title_menu menu_state={.version=PW_TITLE_MENU_VERSION};
+static PwWineNotify notify_sink;
+static void *notify_context;
+/* The invite question: open while invite_deadline is set, its answer kept
+ * in invite_answer until it is read. Each question asked or forgotten gets
+ * a new invite_generation, so an accept meant for one never answers the
+ * next. */
+static uint32_t invite_enabled,invite_answer;
+static uint64_t invite_deadline,invite_generation;
 /* Audio has its own lock: its sink blocks for a grain, which must not hold
  * up frames or input. */
 static pthread_mutex_t audio_lock=PTHREAD_MUTEX_INITIALIZER;
@@ -341,4 +349,85 @@ void pw_wine_menu(struct pw_title_menu *menu)
     pthread_mutex_lock(&lock);
     *menu=menu_state;
     pthread_mutex_unlock(&lock);
+}
+
+void pw_wine_set_notify(PwWineNotify notify,void *context)
+{
+    pthread_mutex_lock(&lock);
+    notify_sink=notify;notify_context=context;
+    pthread_mutex_unlock(&lock);
+}
+int pw_wine_notify(const char *text)
+{
+    PwWineNotify notify;
+    void *context;
+    /* Called without the lock, as the display release is: the title's
+     * sink talks to the system, and its main thread takes the lock every
+     * frame. */
+    pthread_mutex_lock(&lock);
+    notify=notify_sink;context=notify_context;
+    pthread_mutex_unlock(&lock);
+    if(!notify || !text)return -1;
+    return notify(context,text);
+}
+
+/* Closes a question whose deadline passed. Called with the lock held. */
+static void invite_expire(uint64_t now_ms)
+{
+    if(invite_deadline && now_ms>=invite_deadline) {
+        invite_deadline=0;invite_answer=PW_TITLE_INVITE_EXPIRED;
+    }
+}
+void pw_wine_set_invite(uint32_t enabled)
+{
+    pthread_mutex_lock(&lock);
+    invite_enabled=enabled!=0;
+    if(!invite_enabled){invite_deadline=0;invite_answer=PW_TITLE_INVITE_NONE;invite_generation++;}
+    pthread_mutex_unlock(&lock);
+}
+int pw_wine_invite_ask(uint32_t timeout_ms,uint64_t now_ms)
+{
+    int status=-1;
+    pthread_mutex_lock(&lock);
+    if(invite_enabled) {
+        invite_deadline=timeout_ms?now_ms+timeout_ms:0;
+        invite_answer=PW_TITLE_INVITE_NONE;
+        invite_generation++;
+        status=0;
+    }
+    pthread_mutex_unlock(&lock);
+    return status;
+}
+int pw_wine_invite_answer(uint64_t now_ms)
+{
+    int answer=-1;
+    pthread_mutex_lock(&lock);
+    if(invite_enabled) {
+        invite_expire(now_ms);
+        answer=(int)invite_answer;
+        invite_answer=PW_TITLE_INVITE_NONE;
+    }
+    pthread_mutex_unlock(&lock);
+    return answer;
+}
+int pw_wine_invite_pending(uint64_t now_ms,uint64_t *generation)
+{
+    int pending;
+    pthread_mutex_lock(&lock);
+    invite_expire(now_ms);
+    pending=invite_deadline!=0;
+    if(generation)*generation=invite_generation;
+    pthread_mutex_unlock(&lock);
+    return pending;
+}
+int pw_wine_invite_accept(uint64_t now_ms,uint64_t generation)
+{
+    int accepted=0;
+    pthread_mutex_lock(&lock);
+    invite_expire(now_ms);
+    if(invite_deadline && generation==invite_generation) {
+        invite_deadline=0;invite_answer=PW_TITLE_INVITE_ACCEPTED;accepted=1;
+    }
+    pthread_mutex_unlock(&lock);
+    return accepted;
 }

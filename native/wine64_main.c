@@ -42,6 +42,7 @@
 #include "../src/pw_wine_launch.h"
 #include "../src/pw_game_menu.h"
 #include "../src/pw_input_switch.h"
+#include "../src/pw_invite_prompt.h"
 #include "pw_data_mount.h"
 #include "pw_file_limits.h"
 #include "pw_audio_ps5.h"
@@ -927,21 +928,67 @@ static void leave_to_home(const char *reason)
 }
 
 /* A notification from the console, over whatever the game draws. Other request
- * types are refused, so it carries the console's "Debug:" header. */
-static void input_switch_notify(const char *label)
+ * types are refused, so it carries the console's "Debug:" header. The title
+ * loop and the game's threads (wine_notify) both send: the request is built
+ * under a lock. Control characters show as spaces. The request's result, or
+ * -1 without the call. */
+static pthread_mutex_t notify_lock = PTHREAD_MUTEX_INITIALIZER;
+static int title_notify(const char *prefix, const char *text)
 {
     static struct { char header[45]; char message[3075]; } request;
-    int (*send)(int, void *, size_t, int);
-    void *symbol = NULL;
+    static int (*send)(int, void *, size_t, int);
     int rc = -1;
 
-    if (sceKernelDlsym(0x2001, "sceKernelSendNotificationRequest", &symbol) == 0 && symbol) {
+    pthread_mutex_lock(&notify_lock);
+    if (!send) {
+        void *symbol = NULL;
+
+        if (sceKernelDlsym(0x2001, "sceKernelSendNotificationRequest", &symbol) == 0 && symbol)
+            send = (int (*)(int, void *, size_t, int))symbol;
+    }
+    if (send) {
         memset(&request, 0, sizeof(request));
-        snprintf(request.message, sizeof(request.message), "Controller preset: %s", label[0] ? label : "switched");
-        send = (int (*)(int, void *, size_t, int))symbol;
+        snprintf(request.message, sizeof(request.message), "%s%s", prefix, text);
+        for (char *at = request.message; *at; at++)
+            if ((unsigned char)*at < 0x20u || *at == 0x7f) *at = ' ';
         rc = send(0, &request, sizeof(request), 0);
     }
+    pthread_mutex_unlock(&notify_lock);
+    return rc;
+}
+
+static void input_switch_notify(const char *label)
+{
+    int rc = title_notify("Controller preset: ", label[0] ? label : "switched");
+
     PS5LOG_LOG("PW_WINE64 input switch to=%s notify=%d", label[0] ? label : "-", rc);
+}
+
+/* Code in the game asks for a notification (patch 1010, menu/pw_title_notify.h),
+ * on one of its threads. At most PW_WINE64_NOTIFY_BURST in any
+ * PW_WINE64_NOTIFY_WINDOW_NS are shown; the rest are refused, and the
+ * caller logs them. */
+enum { PW_WINE64_NOTIFY_BURST = 4 };
+#define PW_WINE64_NOTIFY_WINDOW_NS (10u * 1000000000ull)
+static int wine_notify(void *context, const char *text)
+{
+    static pthread_mutex_t rate_lock = PTHREAD_MUTEX_INITIALIZER;
+    static uint64_t sent[PW_WINE64_NOTIFY_BURST];
+    static unsigned next;
+    uint64_t now = now_ns();
+    int rc = -1, allowed;
+
+    (void)context;
+    pthread_mutex_lock(&rate_lock);
+    allowed = !sent[next] || now - sent[next] >= PW_WINE64_NOTIFY_WINDOW_NS;
+    if (allowed) {
+        sent[next] = now ? now : 1;
+        next = (next + 1u) % PW_WINE64_NOTIFY_BURST;
+    }
+    pthread_mutex_unlock(&rate_lock);
+    if (allowed) rc = title_notify("", text);
+    PS5LOG_LOG("PW_WINE64 notify bytes=%zu rc=%d%s", strlen(text), rc, allowed ? "" : " (too many)");
+    return rc == 0 ? 0 : 1;
 }
 
 /* Replace this per-game title with itself and chain=N, to run the program
@@ -1704,6 +1751,12 @@ int main(int argc, char **argv)
     /* [display] menu: L3+R3 opens the menu, DXVK's HUD draws it (patch 0973). */
     void (*set_menu)(const struct pw_title_menu *) = NULL;
     static PwGameMenu game_menu;
+    /* An invite question from code in the game (patch 1010): L3+R3 accepts
+     * it, before the menu sees the pad (src/pw_invite_prompt.h). */
+    int (*invite_pending)(uint64_t, uint64_t *) = NULL;
+    int (*invite_accept)(uint64_t, uint64_t) = NULL;
+    static PwInvitePrompt invite_prompt;
+    int invite_open = 0;
     static PwPadPs5 game_pad;   /* the pad as the game sees it while the menu has it */
     /* A two-finger touchpad click opens the console's own keyboard over
      * the game, and the menu's "Keyboard input" does too; the accepted
@@ -2312,6 +2365,26 @@ int main(int argc, char **argv)
                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_display_release");
             if (set_release) set_release(wine_release_display, NULL);
         }
+        {
+            void (*set_notify)(PwWineNotify, void *) = (void (*)(PwWineNotify, void *))
+                (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_notify");
+            void (*set_invite)(uint32_t) = (void (*)(uint32_t))
+                (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_invite");
+
+            if (set_notify) set_notify(wine_notify, NULL);
+            /* A question is taken only with a notification to ask it and a
+             * pad to answer it; without, the game's code answers it itself. */
+            if (set_notify && set_invite && pad_status == PW_OK && post_input) {
+                invite_pending = (int (*)(uint64_t, uint64_t *))
+                    (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_invite_pending");
+                invite_accept = (int (*)(uint64_t, uint64_t))
+                    (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_invite_accept");
+                if (invite_pending && invite_accept) set_invite(1);
+                else invite_pending = NULL;
+            }
+            PS5LOG_LOG("PW_WINE64 notify=%d invite=%s", set_notify != NULL,
+                       invite_pending ? "l3+r3" : "unavailable");
+        }
         PS5LOG_LOG("PW_WINE64 display present_sink=%d frames=%d post_input=%d xinput=%d video=%s "
                    "pad=%s hid=%s osk=%s", set_present != NULL, frame_shown != NULL, post_input != NULL,
                    set_pad != NULL,
@@ -2478,11 +2551,35 @@ int main(int argc, char **argv)
         const PwPadPs5 *seen = &pad;
         int switch_inputs = 0;
         int others_idle = 0;
-        if (pad_read && (set_menu || osk_status == PW_OK || has_other_input)) {
+        if (pad_read && (invite_pending || set_menu || osk_status == PW_OK || has_other_input)) {
             uint32_t held = pad.core.previous_buttons, pressed = pad.core.pressed_edges,
                      released = pad.core.released_edges;
             int neutral = 0;
 
+            if (invite_pending) {
+                PwInvitePromptView view;
+                /* While the menu is open L3+R3 is the menu's, and closes it;
+                 * while the console's keyboard is up the pad is its. The
+                 * accept names the question seen open here: one the game
+                 * replaced in between is not accepted. */
+                uint64_t generation = 0;
+                int open = invite_pending(now / 1000000u, &generation);
+
+                if (open != invite_open) {
+                    PS5LOG_LOG("PW_WINE64 invite %s", open ? "asked" : "closed");
+                    invite_open = open;
+                }
+                if (pw_invite_prompt_tick(&invite_prompt, held, pressed, released, open && !game_menu.open && !osk_ps5.showing,
+                                          &view)) {
+                    int accepted = invite_accept(now / 1000000u, generation);
+
+                    PS5LOG_LOG("PW_WINE64 invite accepted=%d", accepted);
+                    invite_open = 0;
+                }
+                held = view.held;
+                pressed = view.pressed;
+                released = view.released;
+            }
             if (set_menu) {
                 struct pw_title_menu shown;
                 PwGameMenuView view;

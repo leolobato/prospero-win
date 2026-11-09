@@ -3,6 +3,7 @@
 #define PW_WINE_SINK_H
 #include <stdint.h>
 #include "menu/pw_title_menu.h"
+#include "menu/pw_title_notify.h"
 
 /* The meeting point between the title and Wine's PS5 user driver. ntdll
  * links it: the title reaches the set/post calls through ntdll.prx's
@@ -16,6 +17,8 @@
  * the driver tells the game's windows when it comes or goes (patch 0984).
  * The title's in-game menu is another slot: the title stores what to draw
  * and ntdll hands it to the game's renderer (menu/pw_title_menu.h).
+ * Code in the game also asks the title for a system notification and for
+ * an invite question the player answers with L3+R3 (menu/pw_title_notify.h).
  * A game that presents with Vulkan scans out itself (patch 0460): the
  * driver asks the title once to release the video output. Frames still
  * reach the title after that, which shows them through the Vulkan driver
@@ -47,6 +50,11 @@ typedef int (*PwWineAudioSink)(void *context,const int16_t *frames);
 /* Hands the video output over to a Vulkan display-plane surface; 0 once
  * the title no longer uses it. */
 typedef int (*PwWineDisplayRelease)(void *context);
+
+/* Shows text (UTF-8, NUL-terminated) as a system notification; 0 when it
+ * did, a positive value when it did not. It runs on the game's thread and
+ * must not wait. */
+typedef int (*PwWineNotify)(void *context,const char *text);
 
 typedef struct PwWineSinkStats {
     uint64_t frames,frames_dropped;       /* dropped: no sink set or it failed */
@@ -112,6 +120,19 @@ uint32_t pw_wine_pads_wanted(void);
 /* The menu to draw, or NULL to close it. The sink sets version and
  * sequence, clamps lines and selected, and terminates every string. */
 void pw_wine_set_menu(const struct pw_title_menu *menu);
+void pw_wine_set_notify(PwWineNotify notify,void *context);
+/* 1: the title answers invite questions (below); 0 forgets an open one and
+ * refuses new ones. Times are CLOCK_MONOTONIC milliseconds, read by the
+ * caller, so the title and ntdll measure the same deadline. */
+void pw_wine_set_invite(uint32_t enabled);
+/* 1 while a question is open and its deadline has not passed. Once it has,
+ * the question is answered PW_TITLE_INVITE_EXPIRED. *generation (optional)
+ * names the question: a new question, or forgetting one, changes it. */
+int pw_wine_invite_pending(uint64_t now_ms,uint64_t *generation);
+/* Answers the open question PW_TITLE_INVITE_ACCEPTED: 1 when it is still
+ * the one pending named (generation) and still in time, else 0, so a press
+ * meant for a question replaced meanwhile accepts nothing. */
+int pw_wine_invite_accept(uint64_t now_ms,uint64_t generation);
 
 /* Driver side. -1 when no sink is set or the arguments are invalid. */
 int pw_wine_present(const void *bgra,uint32_t width,uint32_t height,uint32_t stride);
@@ -133,6 +154,16 @@ void pw_wine_pad_extra_at(uint32_t index,PwWinePadExtra *extra);
 /* The newest menu snapshot; a closed menu reads as zeros apart from
  * version and sequence. */
 void pw_wine_menu(struct pw_title_menu *menu);
+/* The title's notify sink's result (0 shown, positive not), or -1 without
+ * a sink or without text. */
+int pw_wine_notify(const char *text);
+/* Opens a question the player has timeout_ms to accept, replacing an open
+ * one or an answer not yet read; 0 forgets both. 0, or -1 when the title
+ * takes no questions. */
+int pw_wine_invite_ask(uint32_t timeout_ms,uint64_t now_ms);
+/* PW_TITLE_INVITE_NONE while a question is open or none was asked, else its
+ * answer, once; -1 when the title takes no questions. */
+int pw_wine_invite_answer(uint64_t now_ms);
 
 /* How many times the gamepad connected or disconnected. Each time also
  * wakes the input fd, so the driver can tell the game's windows that a

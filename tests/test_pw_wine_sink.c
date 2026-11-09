@@ -219,6 +219,102 @@ static void test_menu(void)
     assert(got.sequence==6 && !got.open && !got.title[0]);
 }
 
+static int notify_calls,notify_status;
+static void *notify_seen;
+static char notify_text[64];
+static int notify(void *context,const char *text)
+{
+    notify_calls++;notify_seen=context;
+    strncpy(notify_text,text,sizeof(notify_text)-1);
+    return notify_status;
+}
+
+static void test_notify(void)
+{
+    int marker;
+    assert(pw_wine_notify("before") == -1 && !notify_calls);     /* no sink: refused */
+    pw_wine_set_notify(notify,&marker);
+    assert(pw_wine_notify(NULL) == -1 && !notify_calls);
+    assert(pw_wine_notify("Mara invited you") == 0);
+    assert(notify_calls == 1 && notify_seen == &marker && !strcmp(notify_text,"Mara invited you"));
+    notify_status=1;
+    assert(pw_wine_notify("again") == 1 && notify_calls == 2);   /* the sink's result */
+    pw_wine_set_notify(NULL,NULL);
+    assert(pw_wine_notify("after") == -1 && notify_calls == 2);
+}
+
+/* The title's two steps at once: the question pending now, accepted. */
+static int invite_accept_now(uint64_t now_ms)
+{
+    uint64_t generation=0;
+    pw_wine_invite_pending(now_ms,&generation);
+    return pw_wine_invite_accept(now_ms,generation);
+}
+
+static void test_invite(void)
+{
+    /* Until the title takes questions, every call is refused. */
+    assert(pw_wine_invite_ask(15000,1000) == -1 && pw_wine_invite_answer(1000) == -1);
+    assert(!pw_wine_invite_pending(1000,NULL) && !invite_accept_now(1000));
+    pw_wine_set_invite(1);
+    assert(pw_wine_invite_answer(1000) == PW_TITLE_INVITE_NONE);  /* none asked */
+
+    /* Accepted in time: answered once, then nothing. */
+    assert(pw_wine_invite_ask(15000,1000) == 0);
+    assert(pw_wine_invite_pending(1000,NULL) && pw_wine_invite_pending(15999,NULL));
+    assert(pw_wine_invite_answer(2000) == PW_TITLE_INVITE_NONE);  /* still open */
+    assert(invite_accept_now(5000) == 1);
+    assert(!pw_wine_invite_pending(5000,NULL) && !invite_accept_now(5000));
+    assert(pw_wine_invite_answer(5001) == PW_TITLE_INVITE_ACCEPTED);
+    assert(pw_wine_invite_answer(5002) == PW_TITLE_INVITE_NONE);
+
+    /* Past the deadline it expires, whoever looks first. */
+    assert(pw_wine_invite_ask(100,10000) == 0);
+    assert(pw_wine_invite_pending(10099,NULL) && !pw_wine_invite_pending(10100,NULL));
+    assert(!invite_accept_now(10100));                       /* too late */
+    assert(pw_wine_invite_answer(10200) == PW_TITLE_INVITE_EXPIRED);
+    assert(pw_wine_invite_ask(100,20000) == 0);
+    assert(pw_wine_invite_answer(20100) == PW_TITLE_INVITE_EXPIRED);
+    assert(!pw_wine_invite_pending(20100,NULL));
+
+    /* A new question replaces the open one and an answer not yet read. */
+    assert(pw_wine_invite_ask(1000,30000) == 0 && invite_accept_now(30001));
+    assert(pw_wine_invite_ask(1000,30002) == 0);
+    assert(pw_wine_invite_answer(30003) == PW_TITLE_INVITE_NONE && pw_wine_invite_pending(30003,NULL));
+
+    /* 0 forgets it: nothing pending, nothing to answer. */
+    assert(pw_wine_invite_ask(0,30004) == 0);
+    assert(!pw_wine_invite_pending(30004,NULL) && !invite_accept_now(30004));
+    assert(pw_wine_invite_answer(40000) == PW_TITLE_INVITE_NONE);
+
+    /* A title that stops taking questions forgets the open one. */
+    assert(pw_wine_invite_ask(1000,50000) == 0);
+    pw_wine_set_invite(0);
+    assert(!pw_wine_invite_pending(50001,NULL) && pw_wine_invite_answer(50001) == -1);
+    pw_wine_set_invite(1);
+    assert(!pw_wine_invite_pending(50002,NULL) && pw_wine_invite_answer(50002) == PW_TITLE_INVITE_NONE);
+
+    /* The title reads the question and accepts it in two steps: a question
+     * the game replaced or forgot in between is not accepted. */
+    {
+        uint64_t first=0,second=0;
+        assert(pw_wine_invite_ask(15000,60000) == 0);
+        assert(pw_wine_invite_pending(60001,&first));
+        assert(pw_wine_invite_ask(15000,60002) == 0);          /* replaced */
+        assert(!pw_wine_invite_accept(60003,first));
+        assert(pw_wine_invite_pending(60004,&second) && second != first);
+        assert(pw_wine_invite_answer(60005) == PW_TITLE_INVITE_NONE);
+        assert(pw_wine_invite_accept(60006,second) == 1);
+        assert(pw_wine_invite_answer(60007) == PW_TITLE_INVITE_ACCEPTED);
+        assert(pw_wine_invite_ask(15000,61000) == 0 && pw_wine_invite_pending(61001,&first));
+        assert(pw_wine_invite_ask(0,61002) == 0);              /* forgotten */
+        assert(pw_wine_invite_ask(15000,61003) == 0);          /* and asked again */
+        assert(!pw_wine_invite_accept(61004,first));
+        assert(pw_wine_invite_pending(61005,NULL) && pw_wine_invite_answer(61006) == PW_TITLE_INVITE_NONE);
+    }
+    pw_wine_set_invite(0);
+}
+
 int main(void)
 {
     uint32_t frame[4*3];
@@ -440,5 +536,7 @@ int main(void)
     assert(!pw_wine_rumble_at(PW_WINE_PADS,&left,&right));
     test_display_release();
     test_menu();
+    test_notify();
+    test_invite();
     return 0;
 }
