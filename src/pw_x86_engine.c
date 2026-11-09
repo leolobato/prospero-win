@@ -131,6 +131,18 @@ static void retire_stale(PwX86Engine *engine, uint32_t pc)
     entry->retired = 1;
     engine->retired_blocks++;
     engine->retired_total++;
+    if(!engine->flush_wanted) {
+        uint32_t cursor = 0, count = 0;
+        PwX86CacheEntry *sibling;
+
+        while(count < PW_X86_ENGINE_RETIRED_PER_PC &&
+              pw_x86_cache_next_retired(&engine->cache, pc, &cursor, &sibling) == PW_OK)
+            count++;
+        if(count >= PW_X86_ENGINE_RETIRED_PER_PC) {
+            engine->flush_wanted = 1;
+            engine->retired_flushes++;
+        }
+    }
 }
 
 /* A retired block of pc whose source holds its bytes again, brought back. */
@@ -754,6 +766,8 @@ static uint64_t compile_clock(void)
 
 static int compile(PwX86Engine *engine,uint32_t pc,const PwX86CacheEntry **entry)
 {
+    /* Too many retired blocks of one PC: start over before translating more. */
+    if(engine->flush_wanted)return PW_ERR_LIMIT;
     uint64_t start=compile_clock();
     int status=compile_block(engine,pc,entry);
     engine->compile_cycles+=compile_clock()-start;
@@ -1038,6 +1052,7 @@ int pw_x86_engine_reset(PwX86Engine *engine,uint32_t generation)
                ((discarded_bytes+PW_X86_ENGINE_FAULT_GRANULE-1)/PW_X86_ENGINE_FAULT_GRANULE)*sizeof(uint32_t));
     engine->last_published=0;
     engine->retired_blocks=0;
+    engine->flush_wanted=0;
     /* The published extent is now writable. Stub emission or the next
      * compile seals its own pages; no live entry survives a successful reset. */
     engine->sealed=0;
