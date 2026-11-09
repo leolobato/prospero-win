@@ -167,6 +167,7 @@ before evaluating a candidate built from that cache.
 | 1004 | `dnsapi`: without its Unix side (no libresolv on the console) each call returns `ERROR_NOT_SUPPORTED` instead of calling through a null handle |
 | 1005 | `ntdll`: when an allocation of a 32-bit program finds no room, the first two failures log the limit, the views below 4 GB per 2 GB half (count, size, committed, largest gap) and the largest views: `wine-ps5: 32-bit out of address space for ...` |
 | 1006 | `win32u`: `GetRawInputDeviceList` lists a mouse and a keyboard when no device of that type exists, with the handles the server gives the user driver's raw input (1 and 2). A PS5 title has no mouse or keyboard device (patch 0951 creates no virtual ones), and Unreal Engine reports no cursor position without a mouse, so clicks on objects in the scene did nothing |
+| 1007 | `ntdll`: below 4 GiB a WoW64 process gets the i386 rule for `VirtualQuery`: space outside the reserved areas is reported as reserved, not free. The PS5 kernel keeps mappings of its own above 2 GiB that the reservation of patch 1000 can't take, and a program that reserves the largest free block it finds (Wanted: Weapons of Fate's heap, 0x80000000 bytes) must only find room it can have |
 
 ## Allocator
 

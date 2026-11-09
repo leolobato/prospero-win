@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 9 Nov 2026 10:40:00 +0100
+Subject: [PATCH] ntdll: Report only reserved space as free to a 32-bit program
+ on PS5.
+
+A 32-bit program learns how much address space is free from
+VirtualQuery. On i386, ntdll reports the space outside its reserved
+areas as allocated, since the system keeps mappings there. Under WoW64
+the 64-bit ntdll skipped that, so the range above 2 GiB looked free up
+to 4 GiB even where the PS5 kernel already had mappings of its own and
+the reservation could not take it (2042 of 2048 MiB).
+
+Wanted: Weapons of Fate reserves the largest free block it finds for
+its heap: it asked for 0x80000000 bytes, the allocation failed ("out of
+memory for allocation"), and the game read through a null pointer.
+
+On PS5 a WoW64 process now gets the i386 rule below 4 GiB: space
+outside the reserved areas is reported as reserved, so the largest free
+block is one the program can have.
+---
+ dlls/ntdll/unix/virtual.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index ca34415..d62fa53 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -6660,7 +6660,14 @@ static struct file_view *get_memory_region_size( char *base, char **region_start
+             return view;
+         }
+     }
+-#ifdef __i386__
++#if defined(__i386__) || defined(__PROSPERO__)
++#ifdef __PROSPERO__
++    /* So too for a 32-bit program on PS5 below 4 GiB: the kernel keeps
++     * mappings of its own there, outside the reservations, and a program
++     * that reserves the largest free block it finds (Wanted: Weapons of
++     * Fate's heap) must only find room it can have. */
++    if (is_wow64() && (UINT_PTR)base < 0x100000000ull)
++#endif
+     {
+         struct reserved_area *area;
+ 
