@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Wed, 11 Nov 2026 09:00:00 +0100
+Subject: [PATCH] ntdll: Convert the received TOS and TTL control messages the
+ BSDs send.
+
+A socket that asked for IP_RECVTOS or IP_RECVTTL gets the value in a
+control message labelled IP_TOS or IP_TTL on Linux, but on FreeBSD and
+macOS it is labelled IP_RECVTOS or IP_RECVTTL and carries a single byte.
+convert_control_headers() knew only the Linux labels, so WSARecvMsg()
+dropped the message with a FIXME ("Unhandled IPPROTO_IP message header
+type 68" on a PS5) and returned no TOS. Steam's networking library asks
+for the TOS of every packet it reads and asserted "No control data
+returned even though we asked for TOS?".
+
+Both labels now become WS_IP_TOS and WS_IP_TTL with the byte as an INT,
+as the Linux ones do.
+---
+ dlls/ntdll/unix/socket.c | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/dlls/ntdll/unix/socket.c b/dlls/ntdll/unix/socket.c
+index ab301f1..1c2866f 100644
+--- a/dlls/ntdll/unix/socket.c
++++ b/dlls/ntdll/unix/socket.c
+@@ -437,6 +437,19 @@ static int convert_control_headers(struct msghdr *hdr, WSABUF *control)
+                     }
+ #endif /* IP_TOS */
+ 
++#if defined(IP_RECVTOS) && (!defined(IP_TOS) || IP_RECVTOS != IP_TOS)
++                    /* The BSDs label the received TOS with the option that
++                     * asked for it, and send it as one byte. */
++                    case IP_RECVTOS:
++                    {
++                        INT tos = *(unsigned char *)CMSG_DATA(cmsg_unix);
++                        ptr = fill_control_message( WS_IPPROTO_IP, WS_IP_TOS, ptr, &ctlsize,
++                                                    &tos, sizeof(INT) );
++                        if (!ptr) goto error;
++                        break;
++                    }
++#endif /* IP_RECVTOS */
++
+ #if defined(IP_TTL)
+                     case IP_TTL:
+                     {
+@@ -447,6 +460,18 @@ static int convert_control_headers(struct msghdr *hdr, WSABUF *control)
+                     }
+ #endif /* IP_TTL */
+ 
++#if defined(IP_RECVTTL) && (!defined(IP_TTL) || IP_RECVTTL != IP_TTL)
++                    /* The same for the TTL. */
++                    case IP_RECVTTL:
++                    {
++                        INT ttl = *(unsigned char *)CMSG_DATA(cmsg_unix);
++                        ptr = fill_control_message( WS_IPPROTO_IP, WS_IP_TTL, ptr, &ctlsize,
++                                                    &ttl, sizeof(INT) );
++                        if (!ptr) goto error;
++                        break;
++                    }
++#endif /* IP_RECVTTL */
++
+                     default:
+                         FIXME("Unhandled IPPROTO_IP message header type %d\n", cmsg_unix->cmsg_type);
+                         break;

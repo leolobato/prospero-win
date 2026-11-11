@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Wed, 11 Nov 2026 09:05:00 +0100
+Subject: [PATCH] server: Accept a send buffer size of 0 on FreeBSD too.
+
+Windows takes SO_SNDBUF = 0 (no send buffering). FreeBSD's setsockopt()
+refuses a value below 1 with EINVAL, as macOS's does, so on FreeBSD (and
+a PS5) WSAEINVAL came back. The server already keeps the value without
+calling setsockopt() on macOS; do the same on FreeBSD. Steam's common
+socket setup sets 0 on each socket and asserted "Unable to set default
+socket options, error 10022".
+---
+ server/sock.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/server/sock.c b/server/sock.c
+index 0716b3f..2d8b66b 100644
+--- a/server/sock.c
++++ b/server/sock.c
+@@ -3399,29 +3399,29 @@ static void sock_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
+         return;
+     }
+ 
+     case IOCTL_AFD_WINE_SET_SO_SNDBUF:
+     {
+         DWORD sndbuf;
+ 
+         if (get_req_data_size() < sizeof(sndbuf))
+         {
+             set_error( STATUS_BUFFER_TOO_SMALL );
+             return;
+         }
+         sndbuf = *(DWORD *)get_req_data();
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__FreeBSD__)
+         if (!sndbuf)
+         {
+             /* setsockopt fails if a zero value is passed */
+             sock->sndbuf = sndbuf;
+             return;
+         }
+ #endif
+ 
+         if (!setsockopt( unix_fd, SOL_SOCKET, SO_SNDBUF, (char *)&sndbuf, sizeof(sndbuf) ))
+             sock->sndbuf = sndbuf;
+         else
+             set_error( sock_get_ntstatus( errno ) );
+         return;
+     }

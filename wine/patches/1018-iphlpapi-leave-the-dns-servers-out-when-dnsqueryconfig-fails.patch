@@ -1,0 +1,134 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Wed, 11 Nov 2026 09:10:00 +0100
+Subject: [PATCH] iphlpapi: Leave the DNS servers out when DnsQueryConfig
+ fails.
+
+GetAdaptersAddresses() asks DnsQueryConfig() for each adapter's DNS
+servers and returned any error it got, so the whole call failed when
+there was no DNS configuration to read. On a PS5 dnsapi has no Unix side
+(no libresolv), and every DnsQueryConfig() call fails with
+ERROR_NOT_SUPPORTED, so GetAdaptersAddresses() failed for every caller
+even though nsiproxy listed the adapters: Steam's networking library
+logged "GetAdaptersAddresses failed" and could not gather ICE
+candidates.
+
+Such a failure now leaves the adapter without DNS servers; running out of
+memory still fails the call.
+---
+ dlls/iphlpapi/iphlpapi_main.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/iphlpapi/iphlpapi_main.c b/dlls/iphlpapi/iphlpapi_main.c
+index b315490..de359f5 100644
+--- a/dlls/iphlpapi/iphlpapi_main.c
++++ b/dlls/iphlpapi/iphlpapi_main.c
+@@ -1173,105 +1173,107 @@ static DWORD dns_servers_query_code( ULONG family )
+ 
+ static DWORD dns_info_alloc( IP_ADAPTER_ADDRESSES *aa, ULONG family, ULONG flags )
+ {
+     char buf[FIELD_OFFSET(DNS_ADDR_ARRAY, AddrArray[3])];
+     IP_ADAPTER_DNS_SERVER_ADDRESS *dns, **next;
+     DWORD query = dns_servers_query_code( family );
+     DWORD err, i, size, attempt, sockaddr_len;
+     WCHAR name[MAX_ADAPTER_NAME_LENGTH + 1];
+     DNS_ADDR_ARRAY *servers;
+     WCHAR *search;
+ 
+     while (aa)
+     {
+         MultiByteToWideChar( CP_ACP, 0, aa->AdapterName, -1, name, ARRAY_SIZE(name) );
+         if (!(flags & GAA_FLAG_SKIP_DNS_SERVER))
+         {
+             servers = (DNS_ADDR_ARRAY *)buf;
+             for (attempt = 0; attempt < 5; attempt++)
+             {
+                 err = DnsQueryConfig( query, 0, name, NULL, servers, &size );
+                 if (err != ERROR_MORE_DATA) break;
+                 if (servers != (DNS_ADDR_ARRAY *)buf) free( servers );
+                 servers = malloc( size );
+                 if (!servers)
+                 {
+                     err = ERROR_NOT_ENOUGH_MEMORY;
+                     break;
+                 }
+             }
+             if (!err)
+             {
+                 next = &aa->FirstDnsServerAddress;
+                 for (i = 0; i < servers->AddrCount; i++)
+                 {
+                     sockaddr_len = servers->AddrArray[i].Data.DnsAddrUserDword[0];
+                     if (sockaddr_len > sizeof(servers->AddrArray[i].MaxSa))
+                         sockaddr_len = sizeof(servers->AddrArray[i].MaxSa);
+                     dns = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*dns) + sockaddr_len );
+                     if (!dns)
+                     {
+                         err = ERROR_NOT_ENOUGH_MEMORY;
+                         break;
+                     }
+                     dns->Length = sizeof(*dns);
+                     dns->Address.lpSockaddr = (SOCKADDR *)(dns + 1);
+                     dns->Address.iSockaddrLength = sockaddr_len;
+                     memcpy( dns->Address.lpSockaddr, servers->AddrArray[i].MaxSa, sockaddr_len );
+                     *next = dns;
+                     next = &dns->Next;
+                 }
+             }
+             if (servers != (DNS_ADDR_ARRAY *)buf) free( servers );
+-            if (err) return err;
++            /* Without a DNS configuration (DnsQueryConfig failed) the
++             * adapter has no DNS servers, as on a machine with none. */
++            if (err == ERROR_NOT_ENOUGH_MEMORY) return err;
+         }
+ 
+         aa->DnsSuffix = HeapAlloc( GetProcessHeap(), 0, MAX_DNS_SUFFIX_STRING_LENGTH * sizeof(WCHAR) );
+         if (!aa->DnsSuffix) return ERROR_NOT_ENOUGH_MEMORY;
+         aa->DnsSuffix[0] = '\0';
+ 
+         if (!DnsQueryConfig( DnsConfigSearchList, 0, name, NULL, NULL, &size ) &&
+             (search = malloc( size )))
+         {
+             if (!DnsQueryConfig( DnsConfigSearchList, 0, name, NULL, search, &size ) &&
+                 search[0] && wcslen( search ) < MAX_DNS_SUFFIX_STRING_LENGTH)
+             {
+                 wcscpy( aa->DnsSuffix, search );
+             }
+             free( search );
+         }
+ 
+         aa = aa->Next;
+     }
+ 
+     return ERROR_SUCCESS;
+ }
+ 
+ static DWORD adapters_addresses_alloc( ULONG family, ULONG flags, IP_ADAPTER_ADDRESSES **info, ULONG *count )
+ {
+     IP_ADAPTER_ADDRESSES *aa = NULL;
+     NET_LUID *luids;
+     struct nsi_ndis_ifinfo_rw *rw;
+     struct nsi_ndis_ifinfo_dynamic *dyn;
+     struct nsi_ndis_ifinfo_static *stat;
+     DWORD err, i, needed;
+     GUID guid;
+     char *str_ptr;
+ 
+     err = NsiAllocateAndGetTable( 1, &NPI_MS_NDIS_MODULEID, NSI_NDIS_IFINFO_TABLE, (void **)&luids, sizeof(*luids),
+                                   (void **)&rw, sizeof(*rw), (void **)&dyn, sizeof(*dyn),
+                                   (void **)&stat, sizeof(*stat), count, 0 );
+     if (err) return err;
+ 
+     if (!*count)
+     {
+         err = ERROR_NO_DATA;
+         goto err;
+     }
+ 
+     needed = *count * (sizeof(*aa) + ((CHARS_IN_GUID + 1) & ~1) + sizeof(stat->descr.String));
+     needed += *count * sizeof(rw->alias.String); /* GAA_FLAG_SKIP_FRIENDLY_NAME is ignored */
+ 
+     aa = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, needed );
+     if (!aa)
+     {
+         err = ERROR_NOT_ENOUGH_MEMORY;

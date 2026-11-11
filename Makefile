@@ -271,6 +271,9 @@ test: $(addprefix $(BUILD)/,$(TESTS)) $(BUILD)/classify_x86 $(BUILD)/dbt_differe
 	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_shared_sync_client.py
 	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_shared_mutex_client.py
 	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_ws2_fqdn_cache.py
+	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_bsd_control_messages.py
+	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_sndbuf_zero.py
+	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_adapters_without_dns.py
 	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_lookup_misses.py
 	CC="$(CC)" CFLAGS="$(CFLAGS)" python3 tests/test_wine_root_directory.py
 	python3 tests/test_pw_install.py
