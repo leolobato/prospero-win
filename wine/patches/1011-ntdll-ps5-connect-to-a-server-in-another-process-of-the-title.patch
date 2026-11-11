@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 9 Nov 2026 22:00:00 +0100
+Subject: [PATCH] ntdll: Connect to a server that another process of the
+ title runs on PS5.
+
+A title can start local processes beside itself, and the in-process server
+(patch 0110) accepts a client on any socket it made, whichever process holds
+the other end. A second process therefore needs no server of its own: the
+title asks its server for one more connection and passes the socket down.
+
+WINE_PS5_SERVER_FD names that socket. With it set, ntdll loads no server
+module and uses the descriptor as its connection. Every request then goes
+through the socket: there are no direct calls, no shared mutex or event
+state, and no sections in direct memory, all of which need the server in
+the same process. The directory listings of patch 0890 are off, because the
+server cannot count its name changes in this process.
+
+The server signals threads through a table in its own process, so it cannot
+interrupt a thread of the second one. System APCs still run at that
+thread's next wait on the server.
+---
+ dlls/ntdll/unix/server.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index a30f021..d156160 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1923,6 +1923,22 @@ static int connect_inprocess_server(void)
+     int (*connect_server)( const char * );
+     int fd;
+ 
++#ifdef __PROSPERO__
++    /* A title may run a second process on its server: the server made this
++     * connection in the title's main process, which passed the socket down
++     * and names it here. There is no server module to load, so every request
++     * goes through the socket and nothing is shared with the server. */
++    if ((p = getenv( "WINE_PS5_SERVER_FD" )) && *p)
++    {
++        fd = atoi( p );
++        if (fd < 0 || fcntl( fd, F_GETFD ) == -1)
++            fatal_error( "WINE_PS5_SERVER_FD does not name an open descriptor: %s\n", p );
++        pw_cwd_listings_enable( 0 );  /* the server's name changes are not counted in this process */
++        fprintf( stderr, "wine-ps5: server in the title's main process, socket %d\n", fd );
++        return fd;
++    }
++#endif
++
+     if (dladdr( connect_inprocess_server, &info ) && info.dli_fname) dir = strdup( info.dli_fname );
+     if (dir && (p = strrchr( dir, '/' ))) *p = 0;
+     else
+-- 
+2.43.0
+

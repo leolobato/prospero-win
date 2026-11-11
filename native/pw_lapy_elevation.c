@@ -111,7 +111,8 @@ static void observe_status(struct pw_lapy_elevation_diagnostics *diagnostics,
 }
 
 static int exchange(int socket, struct lapy_elevation_message *request,
-                    struct pw_lapy_elevation_diagnostics *diagnostics)
+                    struct pw_lapy_elevation_diagnostics *diagnostics,
+                    int (*clone)(void *context), void *context)
 {
     struct lapy_elevation_message message;
     set_stage(diagnostics, "send-request");
@@ -145,12 +146,15 @@ static int exchange(int socket, struct lapy_elevation_message *request,
         return -1;
     }
 
-    /* This is the cooperative point: the title clones its credentials only
-     * after the helper has validated the requested PID and title. */
+    /* This is the cooperative point: the target clones its credentials only
+     * after the helper has validated the requested PID and title. The target
+     * is this process, or another process of the title that the caller asks
+     * to do the same through clone(). */
     struct lapy_elevation_message prepared = *request;
     prepared.kind = LAPY_ELEVATION_PREPARED;
     set_stage(diagnostics, "credential-clone");
-    if (seteuid(geteuid()) != 0) prepared.status = LAPY_ELEVATION_PREPARE_FAILED;
+    if ((clone ? clone(context) : seteuid(geteuid())) != 0)
+        prepared.status = LAPY_ELEVATION_PREPARE_FAILED;
     set_stage(diagnostics, "send-prepared");
     if (send_all(socket, &prepared, sizeof(prepared))) return -1;
     set_stage(diagnostics, "receive-result");
@@ -176,6 +180,13 @@ static int exchange(int socket, struct lapy_elevation_message *request,
 
 int pw_lapy_elevation_request_at_detailed(int32_t pid, const char *helper_path,
                                         struct pw_lapy_elevation_diagnostics *diagnostics)
+{
+    return pw_lapy_elevation_request_for(pid, helper_path, NULL, NULL, diagnostics);
+}
+
+int pw_lapy_elevation_request_for(int32_t pid, const char *helper_path,
+                                  int (*clone)(void *context), void *context,
+                                  struct pw_lapy_elevation_diagnostics *diagnostics)
 {
     struct stat st;
     struct pw_lapy_sockaddr_in address;
@@ -244,7 +255,7 @@ int pw_lapy_elevation_request_at_detailed(int32_t pid, const char *helper_path,
             goto done;
         }
     }
-    if (exchange(socket, &request, diagnostics) == 0) result = 0;
+    if (exchange(socket, &request, diagnostics, clone, context) == 0) result = 0;
     else saved_errno = errno ? errno : EIO;
 
 done:

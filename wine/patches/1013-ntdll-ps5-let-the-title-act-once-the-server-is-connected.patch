@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 9 Nov 2026 22:30:00 +0100
+Subject: [PATCH] ntdll: Let the title act once the server is connected on PS5.
+
+A program may need a second process beside it from its first instruction: a
+client that looks for its service as it starts. The title can start that
+process (patch 1011) only when the server runs, and the program must not run
+before the process is ready.
+
+__wine_ps5_set_server_connected_hook registers a function that the main
+thread calls right after its connection to the server, before it loads the
+program. The server is already serving other connections then, and the
+program starts when the function returns.
+---
+ dlls/ntdll/unix/loader.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 5928893..454279b 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -1881,6 +1881,19 @@ static void startup_mark( const char *step )
+     }
+ }
+ 
++#ifdef __PROSPERO__
++/* The title that hosts Wine may have work to do once the server runs and
++ * before the program does: starting a second process on the server, for a
++ * program that needs one beside it from its first instruction. It runs on
++ * this thread, so the program waits for it. */
++static void (*ps5_server_connected_hook)(void);
++
++DECLSPEC_EXPORT void __wine_ps5_set_server_connected_hook( void (*hook)(void) )
++{
++    ps5_server_connected_hook = hook;
++}
++#endif
++
+ static void start_main_thread(void)
+ {
+     TEB *teb;
+@@ -1892,6 +1905,13 @@ static void start_main_thread(void)
+     startup_mark( "server_init_process" );
+     startup_info_size = server_init_process();
+     startup_mark( "server connected" );
++#ifdef __PROSPERO__
++    if (ps5_server_connected_hook)
++    {
++        ps5_server_connected_hook();
++        startup_mark( "server connected hook done" );
++    }
++#endif
+     virtual_map_user_shared_data();
+     init_cpu_info();
+     init_files();
+-- 
+2.43.0
+

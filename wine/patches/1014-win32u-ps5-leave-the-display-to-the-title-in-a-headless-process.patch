@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Tue, 10 Nov 2026 08:00:00 +0100
+Subject: [PATCH] win32u: Leave the display to the title in a headless process
+ on PS5.
+
+A second process of a title (patch 1011) starts without the system's module
+preload, so it has none of the graphics modules: the imports of the Vulkan
+driver stay empty there. win32u lists the GPUs through Vulkan when it builds
+the display configuration, and the first call into the driver jumps to an
+empty import. The syscall fails, and the window or socket set-up that asked
+for it fails with it.
+
+That process shares the title's server, window station and registry, so the
+display configuration it would publish, without the GPU and with its own
+desktop size, would also become the title's.
+
+WINE_PS5_HEADLESS=1 names such a process:
+- vulkan_init_once() loads no Vulkan driver, so every caller (the display
+  configuration, D3DKMT, winevulkan) finds none;
+- the display cache reads the configuration the title's process publishes,
+  and has a virtual monitor until there is one; it lists no GPU and
+  publishes nothing, even when forced, and sets no monitors on the window
+  station;
+- the PS5 driver leaves the desktop window's size alone.
+---
+ dlls/win32u/ps5drv.c         | 25 +++++++++++++++++++++++++
+ dlls/win32u/sysparams.c      | 21 +++++++++++++++++++++
+ dlls/win32u/vulkan.c         |  3 +++
+ dlls/win32u/win32u_private.h |  4 ++++
+ 4 files changed, 53 insertions(+)
+
+diff --git a/dlls/win32u/ps5drv.c b/dlls/win32u/ps5drv.c
+index c96da6f..c4acb6a 100644
+--- a/dlls/win32u/ps5drv.c
++++ b/dlls/win32u/ps5drv.c
+@@ -573,6 +573,9 @@ static void ps5_SetDesktopWindow( HWND hwnd )
+ {
+     RECT rect = {0, 0, screen_width, screen_height};
+ 
++    /* the process that shows the title sizes the desktop it shares */
++    if (ps5_headless()) return;
++
+     SERVER_START_REQ( set_window_pos )
+     {
+         req->handle    = wine_server_user_handle( hwnd );
+@@ -1102,6 +1105,28 @@ static const struct user_driver_funcs ps5_user_driver =
+ #endif
+ };
+ 
++/***********************************************************************
++ *           ps5_headless
++ *
++ * WINE_PS5_HEADLESS=1 starts a process beside the one that shows the title,
++ * on the same server. It has no GPU: the system leaves out the graphics
++ * modules for a second process of a title, so the imports of the Vulkan
++ * driver stay empty there. It loads no Vulkan, and it leaves the desktop
++ * window and the display configuration to the process that shows the title.
++ */
++BOOL ps5_headless(void)
++{
++    static int headless = -1;
++
++    if (headless == -1)
++    {
++        const char *value = getenv( "WINE_PS5_HEADLESS" );
++        headless = value && !strcmp( value, "1" );
++        if (headless) TRACE( "headless: no Vulkan, no display of its own\n" );
++    }
++    return headless;
++}
++
+ /***********************************************************************
+  *           ps5_install_user_driver
+  *
+diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
+index 0e2ecf0..abf91b1 100644
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -2659,6 +2659,9 @@ static BOOL update_display_cache_from_registry( UINT64 serial )
+     if ((ret = !list_empty( &sources ) && !list_empty( &monitors )))
+         last_query_display_time = key.LastWriteTime.QuadPart;
+ 
++#ifdef WINE_PS5_USER_DRIVER
++    if (!ps5_headless())
++#endif
+     set_winstation_monitors( FALSE );
+     release_display_device_init_mutex( mutex );
+     return ret;
+@@ -2902,6 +2905,24 @@ static BOOL lock_display_devices( BOOL force )
+         return TRUE;
+     }
+ 
++#ifdef WINE_PS5_USER_DRIVER
++    /* A headless process reads the display configuration the process that
++     * shows the title publishes, and has a virtual monitor until there is
++     * one. It lists no GPU and publishes nothing, even when forced: the
++     * window station and the registry keys are shared with that process. */
++    if (ps5_headless())
++    {
++        if (!update_display_cache_from_registry( serial ))
++        {
++            TRACE( "headless: a virtual monitor until the display is published\n" );
++            clear_display_devices();
++            list_add_tail( &monitors, &virtual_monitor.entry );
++        }
++        monitor_update_serial = serial;
++        return TRUE;
++    }
++#endif
++
+     if (!force && !update_display_cache_from_registry( serial )) force = TRUE;
+     if (force)
+     {
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index f1bf64d..f158e05 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -3078,6 +3078,9 @@ static void vulkan_init_once(void)
+     uint32_t count = 0;
+     VkResult res;
+ 
++#ifdef WINE_PS5_USER_DRIVER
++    if (ps5_headless()) return;
++#endif
+ #ifdef SONAME_LIBVULKAN
+     vulkan_handle = dlopen( SONAME_LIBVULKAN, RTLD_NOW );
+     if (!vulkan_handle) ERR( "Failed to load %s\n", SONAME_LIBVULKAN );
+diff --git a/dlls/win32u/win32u_private.h b/dlls/win32u/win32u_private.h
+index 97b90e3..c6ac214 100644
+--- a/dlls/win32u/win32u_private.h
++++ b/dlls/win32u/win32u_private.h
+@@ -36,6 +36,10 @@
+  * its own user driver (ps5drv.c) and the server creates the desktop. */
+ #define WINE_PS5_USER_DRIVER 1
+ #endif
++#ifdef WINE_PS5_USER_DRIVER
++/* ps5drv.c */
++extern BOOL ps5_headless(void);
++#endif
+ #include "wine/server.h"
+ 
+ 
+-- 
+2.43.0

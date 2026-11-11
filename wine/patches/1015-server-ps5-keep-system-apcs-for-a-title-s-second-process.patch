@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Tue, 10 Nov 2026 09:30:00 +0100
+Subject: [PATCH] server: Keep system APCs for a title's second process on
+ PS5.
+
+The threads of a second process of a title (patch 1011) can't be sent
+signals, so send_thread_signal() fails for every one of them. queue_apc()
+then failed for a system APC to such a thread whenever the thread was not
+waiting on the server. Wine expects that only for a terminated process:
+the APC is destroyed at once, which completes its async from inside
+async_terminate(). A socket async that went this way had no reference
+left when its socket was closed, and free_async_queue() released it again:
+release_object() asserted (object.c:566) and the title aborted. A Steam
+client in the second process hit this within a minute or two.
+
+Such a thread keeps its unix tid while it lives and takes its system APCs
+at its next wait on the server, so the APC now stays queued as long as the
+thread has one. A process-wide APC that finds no thread to signal goes to
+the first live thread for the same reason.
+
+Tested on a console, Team Fortress 2 in the title's process and a Steam
+client in its second process: without this patch the title aborted with
+the assert above within 90 seconds; with it, three starts ran 3 to 6
+minutes until they were closed. A build that logged the new paths showed
+the kept system APC once, for a thread of the second process; the
+process-wide fallback did not run.
+---
+ server/thread.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/server/thread.c b/server/thread.c
+index d1c1b52..60c172d 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -1611,6 +1611,19 @@ static int queue_apc( struct process *process, struct thread *thread, struct thr
+                 }
+             }
+         }
++#ifdef __PROSPERO__
++        /* the threads of a second process of the title can't be signalled
++         * (patch 1011): a live one takes the call at its next wait on the server */
++        if (!thread)
++        {
++            LIST_FOR_EACH_ENTRY( candidate, &process->thread_list, struct thread, proc_entry )
++            {
++                if (candidate->state == TERMINATED || candidate->unix_tid == -1) continue;
++                thread = candidate;
++                break;
++            }
++        }
++#endif
+         if (!thread) return 0;  /* nothing found */
+         if (!(queue = get_apc_queue( thread, apc->call.type ))) return 1;
+     }
+@@ -1621,7 +1634,15 @@ static int queue_apc( struct process *process, struct thread *thread, struct thr
+         /* send signal for system APCs if needed */
+         if (queue == &thread->system_apc && list_empty( queue ) && !is_in_apc_wait( thread ))
+         {
++#ifdef __PROSPERO__
++            /* a thread of a second process of the title can't be signalled
++             * (patch 1011) but keeps its unix tid while it lives: it takes the
++             * call at its next wait on the server. Failing here would complete an
++             * async at once, which free_async_queue() then releases again. */
++            if (!send_thread_signal( thread, SIGUSR1 ) && thread->unix_tid == -1) return 0;
++#else
+             if (!send_thread_signal( thread, SIGUSR1 )) return 0;
++#endif
+         }
+         /* cancel a possible previous APC with the same owner */
+         if (apc->owner) thread_cancel_apc( thread, apc->owner, apc->call.type );

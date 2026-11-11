@@ -45,6 +45,7 @@
 #include "../src/pw_invite_prompt.h"
 #include "pw_data_mount.h"
 #include "pw_file_limits.h"
+#include "pw_helper_ps5.h"
 #include "pw_audio_ps5.h"
 #include "pw_pad_ps5.h"
 #include "pw_hid_ps5.h"
@@ -633,6 +634,45 @@ enum { PW_WINE64_QUIESCE_MS = 500 };
 /* Wine's dlsym, for the exports of the modules it loaded (libvulkan.prx). */
 static void *(*wine_dlsym_fn)(void *, const char *);
 
+/* [helper]: a second program beside the game, in a local process on this
+ * title's Wine server (native/pw_helper_ps5.h). Wine's main thread runs
+ * helper_start once it is connected to the server and before it loads the
+ * game (Wine patch 1013), so the game finds its helper from the first
+ * instruction. Nothing here stops the game: without a helper it starts alone. */
+static struct {
+    PwHelperConfig config;
+    PwHelper helper;
+    void *(*wine_dlopen)(const char *, int);
+    char server_module[320], grant_helper[PW_TITLE_SANDBOX_PATH_SIZE + 16], log_path[320];
+    char ready_path[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY + PW_GAME_HELPER_PATH_CAPACITY + 16];
+} helper_state;
+
+static void helper_log(const char *line)
+{
+    PS5LOG_LOG("PW_WINE64 %s", line);
+}
+
+/* One more client socket from the in-process server, which ntdll has started. */
+static int helper_server_connect(void *context)
+{
+    void *module;
+    int (*connect_server)(const char *);
+
+    (void)context;
+    if (!helper_state.wine_dlopen || !wine_dlsym_fn) return -1;
+    if (!(module = helper_state.wine_dlopen(helper_state.server_module, 2 /* RTLD_NOW */))) return -1;
+    connect_server = (int (*)(const char *))wine_dlsym_fn(module, "pw_wineserver_connect");
+    return connect_server ? connect_server(NULL) : -1;
+}
+
+static void helper_start(void)
+{
+    const int status = pw_helper_start(&helper_state.config, &helper_state.helper);
+
+    PS5LOG_LOG("PW_WINE64 helper status=%d pid=%d ready=%d program=%s", status, (int)helper_state.helper.pid,
+               helper_state.helper.ready, helper_state.config.program);
+}
+
 /* The console's on-screen keyboard (native/pw_osk_ps5.h): a dialog still up
  * when the title leaves the game is ended with it. */
 static PwOskPs5 osk_ps5;
@@ -954,6 +994,15 @@ static int title_notify(const char *prefix, const char *text)
         rc = send(0, &request, sizeof(request), 0);
     }
     pthread_mutex_unlock(&notify_lock);
+    return rc;
+}
+
+/* The [helper]'s notifications (native/pw_helper_ps5.h): why it didn't get ready, and its start's steps when traced. */
+static int helper_notify(const char *text)
+{
+    const int rc = title_notify("", text);
+
+    PS5LOG_LOG("PW_WINE64 helper notify=%d %s", rc, text);
     return rc;
 }
 
@@ -1668,7 +1717,7 @@ int main(int argc, char **argv)
     static char prefix[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY], desktop[24], view[8] = "window";
     static char radv_cache[PW_WINE_LIBRARY_PATH + 16];
     enum { WINE64_FIXED_ENV_COUNT = 7,
-           WINE64_PROFILE_ENV_CAPACITY = 5 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_DISPLAY_ENV_MAX +
+           WINE64_PROFILE_ENV_CAPACITY = 6 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_DISPLAY_ENV_MAX +
                                          PW_GAME_RUNTIME_ENV_MAX + PW_GAME_VERSION_ENV_MAX + PW_GAME_CPU_ENV_MAX +
                                          PW_GAME_CLOCK_ENV_MAX +
                                          PW_GAME_DEBUG_ENV_MAX + PW_GAME_ENVIRONMENT_MAX };
@@ -1688,7 +1737,7 @@ int main(int argc, char **argv)
          * driver keeps the first value, so this must be set before it
          * starts; a profile's [debug] env line still overrides it. */
         { "MESA_SHADER_CACHE_DIR", radv_cache },
-        { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL },
+        { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL },
         /* profile-specific environment */
     };
     _Static_assert(sizeof(extra) / sizeof(extra[0]) ==
@@ -2423,6 +2472,44 @@ int main(int argc, char **argv)
             int cwd_status = set_cwd && mapped == 0 ? set_cwd(host_dir) : -1;
             PS5LOG_LOG("PW_WINE64 cwd=%s host=%s status=%d", working_directory,
                        mapped == 0 ? host_dir : "-", cwd_status);
+        }
+        /* [helper]: the second process maps the sections the two programs
+         * share, and patch 0976 keeps small sections in memory that only this
+         * process has, so this game's sections are shared memory objects. */
+        if (game->has_helper) {
+            void (*set_hook)(void (*)(void)) = (void (*)(void (*)(void)))(uintptr_t)
+                pw_prx_lookup(start.descriptor, "__wine_ps5_set_server_connected_hook");
+            const int granted = !strncmp(ntdll_dir, sandbox_app0, strlen(sandbox_app0));
+
+            helper_state.wine_dlopen = (void *(*)(const char *, int))(uintptr_t)pw_prx_lookup(start.descriptor, "dlopen");
+            snprintf(helper_state.server_module, sizeof(helper_state.server_module), "%s/wineserver.so", ntdll_dir);
+            snprintf(helper_state.grant_helper, sizeof(helper_state.grant_helper), "%s/lapy.elf", sandbox_app0);
+            snprintf(helper_state.log_path, sizeof(helper_state.log_path), "%s/helper-wine.log", library_root);
+            if (game->helper_ready[0])
+                snprintf(helper_state.ready_path, sizeof(helper_state.ready_path), "%s/drive_c/%s", prefix,
+                         game->helper_ready);
+            helper_state.config = (PwHelperConfig){
+                .title_id = title_id,
+                .child_path = "/app0/bdj.elf",
+                .grant_helper = granted ? helper_state.grant_helper : NULL,
+                .runtime_dir = ntdll_dir,
+                .prefix = prefix,
+                .program = game->helper_program,
+                .winedebug = game->winedebug[0] ? game->winedebug : NULL,
+                .log_path = helper_state.log_path,
+                .ready_path = game->helper_ready[0] ? helper_state.ready_path : NULL,
+                .wait_seconds = game->helper_wait ? game->helper_wait : PW_GAME_HELPER_WAIT_DEFAULT,
+                .server_connect = helper_server_connect,
+                .log = helper_log,
+                .notify = helper_notify,
+            };
+            if (set_hook && helper_state.wine_dlopen && wine_dlsym_fn) {
+                extra[config.extra_env_count++] = (PwWineStartEnv){ "PW_SECTIONS_FLEXIBLE", "1" };
+                set_hook(helper_start);
+            }
+            PS5LOG_LOG("PW_WINE64 helper program=%s ready=%s wait=%u granted=%d hook=%d",
+                       game->helper_program, game->helper_ready[0] ? helper_state.ready_path : "-",
+                       helper_state.config.wait_seconds, granted, set_hook != NULL);
         }
         status = pw_wine_start_environment(&start, &config, &ops);
         PS5LOG_LOG("PW_WINE64 environment status=%d", status);

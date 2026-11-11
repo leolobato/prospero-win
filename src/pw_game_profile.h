@@ -59,6 +59,16 @@
  *   mouse = left_stick     ; Holding the touchpad swaps the two; label and
  *                          ; game_label name them in the notification
  *
+ *   [helper]               ; a second program beside the game, in a local
+ *                          ; process on the same Wine server (off without
+ *   program = C:\Tools\service.exe  ; this section). program is required: a
+ *   ready = tools/service.ready     ; Windows path. The game starts once the
+ *   wait = 30              ; program has written ready, a file below drive_c,
+ *                          ; or after wait seconds (1-120, default 30); with
+ *                          ; no ready line it starts as soon as the program
+ *                          ; does. The game runs without its helper when the
+ *                          ; process cannot start
+ *
  *   [debug]
  *   winedebug = +seh,+virtual   ; Wine's debug channels for this game (default:
  *                               ; the title's, err+all,+loaddll,+process)
@@ -129,6 +139,8 @@ enum {
     PW_GAME_DEBUG_ENV_MAX = 5, PW_GAME_DEBUG_ENV_NAME = 48, PW_GAME_DEBUG_ENV_VALUE = 96,
     PW_GAME_ENVIRONMENT_MAX = 8, PW_GAME_ENVIRONMENT_NAME = 64, PW_GAME_ENVIRONMENT_VALUE = 128,
     PW_GAME_LABEL_CAPACITY = 32,
+    PW_GAME_HELPER_PATH_CAPACITY = 260,
+    PW_GAME_HELPER_WAIT_DEFAULT = 30, PW_GAME_HELPER_WAIT_MAX = 120,
 };
 
 typedef enum PwGameScaling { PW_GAME_SCALING_FIT = 0, PW_GAME_SCALING_INTEGER,
@@ -210,6 +222,10 @@ typedef struct PwGameProfile {
     int has_launcher;           /* [launcher]: starts through a launcher */
     PwGameInput launcher_input; /* [launcher]: the first program's input */
     char launcher_label[PW_GAME_LABEL_CAPACITY], game_label[PW_GAME_LABEL_CAPACITY];
+    int has_helper;             /* [helper]: a second program beside the game */
+    char helper_program[PW_GAME_HELPER_PATH_CAPACITY];  /* a Windows path */
+    char helper_ready[PW_GAME_HELPER_PATH_CAPACITY];    /* below drive_c, '/' separated; empty for none */
+    uint32_t helper_wait;       /* seconds to wait for helper_ready */
     /* [debug] winedebug: WINEDEBUG for this game, empty for the title's. */
     char winedebug[PW_GAME_WINEDEBUG_CAPACITY];
     PwGameDebugEnv debug_env[PW_GAME_DEBUG_ENV_MAX];    /* [debug] env lines */
@@ -221,7 +237,7 @@ typedef struct PwGameProfile {
 } PwGameProfile;
 
 /* Parse a whole profile. [application] must come first; [display],
- * [input], [launcher], [debug], [runtime] and [environment] are optional, once each.
+ * [input], [launcher], [helper], [debug], [runtime] and [environment] are optional, once each.
  * PW_OK or a PW_ERR_* status. */
 int pw_game_profile_parse(const uint8_t *bytes, size_t length, PwGameProfile *profile);
 /* The variables runtime sets in Wine's environment, into env, which has

@@ -31,6 +31,10 @@ native/pw_audio_ps5.h
 native/lapy_elevation_protocol.h
 native/pw_lapy_elevation.c
 native/pw_lapy_elevation.h
+native/pw_helper_child.c
+native/pw_helper_mailbox.h
+native/pw_helper_ps5.c
+native/pw_helper_ps5.h
 native/pw_pad_ps5.c
 native/pw_pad_ps5.h
 native/pw_videoout_layout.h
@@ -795,6 +799,9 @@ wine/patches/1007-ntdll-ps5-report-only-reserved-space-as-free-to-a-32-bit-progr
 wine/patches/1008-ntdll-ps5-host-the-controllers-drivers-without-nsiproxy.patch
 wine/patches/1009-server-ps5-park-files-bound-to-a-completion-port.patch
 wine/patches/1010-ntdll-ps5-title-notifications-and-invites.patch
+wine/patches/1011-ntdll-ps5-connect-to-a-server-in-another-process-of-the-title.patch
+wine/patches/1012-ntdll-one-syscall-dispatcher-slot-value-for-every-process.patch
+wine/patches/1013-ntdll-ps5-let-the-title-act-once-the-server-is-connected.patch
 wine/ps5/pw_nsiproxy_libc.c
 tests/test_pw_nsiproxy_libc.c
 wine/patches/0985-ntdll-ps5-start-hosted-drivers-without-thread-attach.patch

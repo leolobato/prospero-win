@@ -274,7 +274,7 @@ common=(-DPW_BUILD_ID=\""$build_id"\" -O2 -Wall -Wextra -Werror -ffunction-secti
 sources=(
     native/wine64_main.c native/pw_diagnostics.c native/pw_audio_ps5.c native/pw_pad_ps5.c native/pw_rumble.c native/pw_agc_ps5.c
     native/pw_agc_submit_lifecycle.c native/pw_videoout_ps5.c native/pw_data_mount.c
-    native/pw_lapy_elevation.c native/pw_file_limits.c
+    native/pw_lapy_elevation.c native/pw_file_limits.c native/pw_helper_ps5.c
     native/pw_wine_display.c native/pw_wine_library.c native/pw_hid_ps5.c native/pw_osk_ps5.c
     native/pw_wine_prefix.c
     src/pw_result.c src/pw_wine_start.c src/pw_wine_launch.c src/pw_game_profile.c src/pw_prefix_temp.c
@@ -283,7 +283,7 @@ sources=(
     src/pw_title_publication.c src/pw_publication_sha256.c
     third_party/mbedtls-publication/library/sha256.c
     src/pw_app_profile.c src/pw_profile_catalog.c src/pw_launcher_render.c src/pw_present.c
-    src/pw_pad.c src/pw_game_menu.c src/pw_invite_prompt.c src/pw_input_switch.c src/pw_osk.c src/pw_hid.c src/pw_spinner.c src/pw_script_input.c
+    src/pw_pad.c src/pw_game_menu.c src/pw_invite_prompt.c src/pw_helper_notify.c src/pw_input_switch.c src/pw_osk.c src/pw_hid.c src/pw_spinner.c src/pw_script_input.c
     src/pw_tsc_calibrate.c
     wine/ps5/pw_wine_prx.c
 )
@@ -335,6 +335,26 @@ done
     --stub "$build/import-stubs/libSceAgcDriver.so" \
     --companion-sdk 0x08050001 --file-name eboot.elf
 "$tool" self --sign --in "$build/eboot.elf" --out "$dist/eboot.bin" \
+    --magic 0x1D3D154F
+# The local process of a profile's [helper] (native/pw_helper_child.c). The
+# title starts it under the name bdj.elf, for which the system skips its
+# module preload (libSceAgcDriver fails in a second process), so it has its
+# own _start and links libkernel, the system C library and the system module
+# loader only (it loads libSceNet itself).
+child_objects=()
+for source in native/pw_helper_child.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c; do
+    object="$build/obj/child_${source//\//_}.o"
+    "${cc[@]}" -std=c11 "${common[@]}" -fno-stack-protector -c "$root/$source" -o "$object"
+    child_objects+=("$object")
+done
+"$sdk/bin/prospero-lld" -T "$layout" --eh-frame-hdr -e _start \
+    -o "$build/bdj-pie.elf" "${child_objects[@]}" \
+    --as-needed "$sdk/target/lib/libkernel.so" "$sdk/target/lib/libSceLibcInternal.so" \
+    "$sdk/target/lib/libSceSysmodule.so"
+"$tool" link --in "$build/bdj-pie.elf" --out "$build/bdj.elf" \
+    --stub-dir "$sdk/target/lib" --module-sdk 0x02000009 \
+    --companion-sdk 0x08050001 --file-name bdj.elf
+"$tool" self --sign --in "$build/bdj.elf" --out "$dist/bdj.elf" \
     --magic 0x1D3D154F
 python3 - "$dist/eboot.bin" "$dist/native-title-build.json" "$title_id" \
     "$source_revision" "$source_dirty" "$managed_descriptor_required" \
@@ -390,7 +410,7 @@ cp "$root/third_party/mbedtls-publication/provenance.json" "$dist/licenses/mbedt
 # (exec fails with EACCES) and its loader refuses a PRX without it ("mount
 # flag / attribute error"), so mark both here. An FTP upload may still reset
 # the modes; docs/GETTING_STARTED.md says what to do then.
-chmod 755 "$dist/eboot.bin" "$dist/sce_module/libc.prx"
+chmod 755 "$dist/eboot.bin" "$dist/bdj.elf" "$dist/sce_module/libc.prx"
 if [[ -f $dev_conf ]]; then
     cp "$dev_conf" "$dist/dev.conf"
 fi

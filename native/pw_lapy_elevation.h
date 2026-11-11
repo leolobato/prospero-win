@@ -23,4 +23,12 @@ struct pw_lapy_elevation_diagnostics {
 int pw_lapy_elevation_request_at_detailed(int32_t pid, const char *helper_path,
                                         struct pw_lapy_elevation_diagnostics *diagnostics);
 
+/* The same for another process of this title (a local process it started).
+ * The helper checks that pid belongs to the title. clone() runs at the
+ * cooperative point and must make that process call seteuid(geteuid());
+ * 0 when it did. With clone NULL the target is this process. */
+int pw_lapy_elevation_request_for(int32_t pid, const char *helper_path,
+                                  int (*clone)(void *context), void *context,
+                                  struct pw_lapy_elevation_diagnostics *diagnostics);
+
 #endif

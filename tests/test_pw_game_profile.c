@@ -36,9 +36,9 @@ static void test_graphics_env(void)
             p.runtime.cpu = PW_GAME_CPU_NATIVE; /* worst-case explicit override */
             size_t count = pw_game_graphics_env(&p, env);
             assert(count <= PW_GAME_GRAPHICS_ENV_MAX);
-            /* Fixed 7; desktop, overrides, raw input, HID drivers and pad identity 5; graphics, display, runtime,
-             * clock and CPU. */
-            assert(7 + 5 + count + PW_GAME_DISPLAY_ENV_MAX + pw_game_cpu_env(&p, cpu) +
+            /* Fixed 7; desktop, overrides, raw input, HID drivers, pad identity and the helper's sections 6;
+             * graphics, display, runtime, clock and CPU. */
+            assert(7 + 6 + count + PW_GAME_DISPLAY_ENV_MAX + pw_game_cpu_env(&p, cpu) +
                    pw_game_runtime_env(&p.runtime, runtime) + PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX +
                    PW_GAME_ENVIRONMENT_MAX <= PW_WINE_START_MAX_ENV);
             /* refresh and opengl_thread are not graphics variables */
@@ -338,6 +338,23 @@ static void test_version(void)
     assert(p.input.mouse == PW_GAME_STICK_NONE && !strcmp(p.input.preset, "gamepad"));
     assert(parse(APP "[launcher]\n", &p) == PW_OK && p.has_launcher && !p.launcher_label[0]);
     assert(parse(APP "[launcher]\npreset = mouse\n", &p) == PW_ERR_MALFORMED);
+    /* [helper]: a second program beside the game; off without the section. */
+    assert(parse(APP, &p) == PW_OK && !p.has_helper && !p.helper_program[0]);
+    assert(parse(APP "[helper]\nprogram = C:\\Tools\\service.exe\nready = tools/service.ready\nwait = 45\n", &p) == PW_OK);
+    assert(p.has_helper && !strcmp(p.helper_program, "C:\\Tools\\service.exe") &&
+           !strcmp(p.helper_ready, "tools/service.ready") && p.helper_wait == 45);
+    assert(parse(APP "[helper]\nprogram = Z:\\data\\x y\\a.exe\n", &p) == PW_OK && !p.helper_ready[0] && !p.helper_wait);
+    assert(parse(APP "[helper]\n", &p) == PW_ERR_MALFORMED);                          /* no program */
+    assert(parse(APP "[helper]\nprogram = service.exe\n", &p) == PW_ERR_MALFORMED);  /* no drive */
+    assert(parse(APP "[helper]\nprogram = C:\\a\"b.exe\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[helper]\nprogram = C:\\a.exe\nprogram = C:\\b.exe\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[helper]\nprogram = C:\\a.exe\nready = ../x\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[helper]\nprogram = C:\\a.exe\nready = /x\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[helper]\nprogram = C:\\a.exe\nready = a//b\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[helper]\nprogram = C:\\a.exe\nready = a\\b\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[helper]\nprogram = C:\\a.exe\nwait = 0\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[helper]\nprogram = C:\\a.exe\nwait = 121\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[helper]\nprogram = C:\\a.exe\nother = 1\n", &p) == PW_ERR_MALFORMED);
     assert(parse(APP "[launcher]\nplayer2 = mouse\n", &p) == PW_ERR_MALFORMED);
     assert(parse(APP "[launcher]\nlabel = a\nlabel = b\n", &p) == PW_ERR_MALFORMED);
     assert(parse(APP "[launcher]\nlabel = a\"b\n", &p) == PW_ERR_MALFORMED);
@@ -718,7 +735,7 @@ static void test_debug_env(void)
     }
     /* The title's environment has room for every profile variable at once. */
     assert(PW_GAME_DEBUG_ENV_MAX == 5);
-    assert(7 + 5 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_DISPLAY_ENV_MAX + PW_GAME_RUNTIME_ENV_MAX +
+    assert(7 + 6 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_DISPLAY_ENV_MAX + PW_GAME_RUNTIME_ENV_MAX +
            PW_GAME_VERSION_ENV_MAX + PW_GAME_CPU_ENV_MAX + PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX + PW_GAME_ENVIRONMENT_MAX <=
            PW_WINE_START_MAX_ENV);
 }

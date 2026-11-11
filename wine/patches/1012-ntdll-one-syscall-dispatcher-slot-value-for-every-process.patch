@@ -1,0 +1,123 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Mon, 9 Nov 2026 22:00:00 +0100
+Subject: [PATCH] ntdll: Keep one syscall dispatcher slot value for every
+ process on large host pages.
+
+With host pages larger than 4 KiB the dispatcher slot at 0x7ffe1000 is part
+of the host page that holds KUSER_SHARED_DATA (patch 0530), a view of the
+server's USD section. Every process of a prefix maps that section, so they
+all write the same slot, each with the address of its own dispatcher. A
+second process that loads ntdll at another address then leaves the first
+one calling into unmapped memory at its next system call.
+
+The slot now holds the address of a jump that every process maps for itself
+at the same place, in the two host pages after the USD's: "jmp *target",
+and the target in a writable page behind it. The slot gets the same value
+from every process, and each process keeps its dispatcher address, and the
+switch to the instrumentation dispatcher, in its own target. Nothing else
+is mapped in the 64 KiB block that starts with the USD. A single step that
+stops on the jump is handled like one that stops on the dispatcher's first
+instruction, since the state is the same.
+
+Only ntdll's unix side changes: the thunks in the PE modules still call
+through 0x7ffe1000. Hosts with 4 KiB pages keep their private slot page.
+---
+ dlls/ntdll/unix/signal_x86_64.c | 49 +++++++++++++++++++++++++++++----
+ 1 file changed, 43 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 39868df..a338b0d 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -27,6 +27,7 @@
+ #include "config.h"
+ 
+ #include <assert.h>
++#include <errno.h>
+ #include <pthread.h>
+ #include <signal.h>
+ #include <dlfcn.h>
+@@ -669,11 +670,15 @@ static inline struct thread_data *get_current_thread_data(void)
+ 
+ extern void __wine_syscall_dispatcher_instrumentation(void);
+ static void *instrumentation_callback;
++/* where this process's dispatcher address is kept, and the jump that reads it
++ * when the fixed slot is shared with other processes (see signal_init_process) */
++static void **syscall_dispatcher_target;
++static void *syscall_dispatcher_jump;
+ static pthread_mutex_t instrumentation_callback_mutex = PTHREAD_MUTEX_INITIALIZER;
+ 
+ void set_process_instrumentation_callback( void *callback )
+ {
+-    void *ptr = (char *)user_shared_data + page_size;
++    void **ptr = syscall_dispatcher_target;
+     sigset_t sigset;
+     void *old;
+ 
+@@ -2445,7 +2450,8 @@ static BOOL handle_syscall_trap( struct thread_data *data, ucontext_t *sigcontex
+     /* disallow single-stepping through a syscall */
+ 
+     if ((void *)RIP_sig( sigcontext ) == __wine_syscall_dispatcher
+-        || (void *)RIP_sig( sigcontext ) == __wine_syscall_dispatcher_instrumentation)
++        || (void *)RIP_sig( sigcontext ) == __wine_syscall_dispatcher_instrumentation
++        || (syscall_dispatcher_jump && (void *)RIP_sig( sigcontext ) == syscall_dispatcher_jump))
+     {
+         extern const void *__wine_syscall_dispatcher_prolog_end_ptr;
+ 
+@@ -3181,17 +3187,48 @@ void signal_init_process( TEB *teb )
+         /* With host pages larger than 4 KiB (16 KiB on PS5) this slot shares
+          * a host page with KUSER_SHARED_DATA, which is already mapped as a
+          * read-only view of the USD section (the server sizes that section
+-         * to a host page). Store the pointer through that view. */
++         * to a host page). Store the pointer through that view.
++         *
++         * Every process of the prefix maps that section, so the slot is one
++         * value for all of them, and each has its dispatcher at an address
++         * of its own. The slot therefore holds the address of a jump that
++         * every process maps for itself at the same place, in the two host
++         * pages after the USD's: "jmp *target", and the target in a
++         * writable page behind it. Nothing else is mapped in the 64 KiB
++         * block that starts with the USD. */
+         const size_t host_page = virtual_host_page_size();
++        unsigned char *jump = (unsigned char *)user_shared_data + host_page;
++        void **target = (void **)(jump + host_page);
++        const int displacement = (int)((char *)target - (char *)(jump + 6));
+ 
+-        mprotect( user_shared_data, host_page, PROT_READ | PROT_WRITE );
+-        *(void **)ptr = __wine_syscall_dispatcher;
+-        mprotect( user_shared_data, host_page, PROT_READ );
++        if (anon_mmap_fixed( jump, 2 * host_page, PROT_READ | PROT_WRITE, 0 ) == MAP_FAILED)
++        {
++            ERR( "cannot map the syscall dispatcher jump at %p: %s\n", jump, strerror(errno) );
++            exit(1);
++        }
++        jump[0] = 0xff;  /* jmp *displacement(%rip) */
++        jump[1] = 0x25;
++        memcpy( jump + 2, &displacement, sizeof(displacement) );
++        *target = __wine_syscall_dispatcher;
++        if (mprotect( jump, host_page, PROT_READ | PROT_EXEC ))
++        {
++            ERR( "cannot make the syscall dispatcher jump executable: %s\n", strerror(errno) );
++            exit(1);
++        }
++        syscall_dispatcher_jump = jump;
++        syscall_dispatcher_target = target;
++        if (*(void **)ptr != (void *)jump)
++        {
++            mprotect( user_shared_data, host_page, PROT_READ | PROT_WRITE );
++            *(void **)ptr = jump;
++            mprotect( user_shared_data, host_page, PROT_READ );
++        }
+     }
+     else
+     {
+         anon_mmap_fixed( ptr, page_size, PROT_READ | PROT_WRITE, 0 );
+         *(void **)ptr = __wine_syscall_dispatcher;
++        syscall_dispatcher_target = ptr;
+     }
+ 
+     __asm__( "movw %%cs,%0" : "=m" (cs64_sel) );
+-- 
+2.43.0
+

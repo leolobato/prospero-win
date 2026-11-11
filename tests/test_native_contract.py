@@ -126,7 +126,7 @@ def test_builder_builds_the_wine64_title() -> None:
     # The banned import is rejected by the build, not merely documented.
     assert "strcasestr" in builder
     # The console refuses to exec an eboot or load a PRX without execute permission.
-    assert 'chmod 755 "$dist/eboot.bin" "$dist/sce_module/libc.prx"' in builder
+    assert 'chmod 755 "$dist/eboot.bin" "$dist/bdj.elf" "$dist/sce_module/libc.prx"' in builder
 
 def test_agc_submit_establishes_a_suspend_point() -> None:
     adapter = read("native/pw_agc_ps5.c")

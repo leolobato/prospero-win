@@ -50,9 +50,10 @@ int main(void)
         assert(pw_wine_thread_set_priority(7,policy,param.sched_priority)==ESRCH);
     }
 
-    /* Unknown ids and other processes are ESRCH. */
+    /* An unknown id is ESRCH; another process is EPERM, since its threads
+     * are alive but not in this table. */
     errno=0;assert(pw_wine_thread_kill(getpid(),7,SIGUSR1)==-1 && errno==ESRCH);
-    errno=0;assert(pw_wine_thread_kill(getpid()+1,4242,SIGUSR1)==-1 && errno==ESRCH);
+    errno=0;assert(pw_wine_thread_kill(getpid()+1,4242,SIGUSR1)==-1 && errno==EPERM);
 
     /* Registering an id again replaces it; unregistering removes it. */
     assert(!pw_wine_thread_register(4242,pthread_self()));

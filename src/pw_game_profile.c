@@ -271,7 +271,7 @@ static int display_field(PwGameDisplay *display, uint32_t *seen, const uint8_t *
 }
 
 enum { SECTION_NONE, SECTION_APPLICATION, SECTION_DISPLAY, SECTION_INPUT, SECTION_DEBUG, SECTION_RUNTIME,
-       SECTION_ENVIRONMENT, SECTION_LAUNCHER };
+       SECTION_ENVIRONMENT, SECTION_LAUNCHER, SECTION_HELPER };
 
 /* One line: its trimmed extent and where the next begins. */
 static size_t next_line(const uint8_t *bytes, size_t length, size_t cursor,
@@ -295,6 +295,7 @@ static int section_of(const uint8_t *begin, const uint8_t *end)
            is(begin, (size_t)(end - begin), "display") ? SECTION_DISPLAY :
            is(begin, (size_t)(end - begin), "input") ? SECTION_INPUT :
            is(begin, (size_t)(end - begin), "launcher") ? SECTION_LAUNCHER :
+           is(begin, (size_t)(end - begin), "helper") ? SECTION_HELPER :
            is(begin, (size_t)(end - begin), "debug") ? SECTION_DEBUG :
            is(begin, (size_t)(end - begin), "runtime") ? SECTION_RUNTIME :
            is(begin, (size_t)(end - begin), "environment") ? SECTION_ENVIRONMENT : -1;
@@ -316,6 +317,53 @@ static int launcher_field(PwGameProfile *profile, const uint8_t *key, size_t key
     memcpy(label, v, n);
     label[n] = 0;
     return PW_OK;
+}
+
+/* [helper]: program (a Windows path with a drive), ready (a relative path
+ * below drive_c, '/' separated, without . or .. parts) and wait (seconds). */
+static int helper_field(PwGameProfile *profile, const uint8_t *key, size_t key_length,
+                        const uint8_t *v, size_t n)
+{
+    if (is(key, key_length, "wait")) {
+        uint32_t seconds = 0;
+        if (profile->helper_wait || !n || n > 3) return PW_ERR_MALFORMED;
+        for (size_t i = 0; i < n; i++) {
+            if (v[i] < '0' || v[i] > '9') return PW_ERR_MALFORMED;
+            seconds = seconds * 10 + (uint32_t)(v[i] - '0');
+        }
+        if (!seconds || seconds > PW_GAME_HELPER_WAIT_MAX) return PW_ERR_MALFORMED;
+        profile->helper_wait = seconds;
+        return PW_OK;
+    }
+    if (is(key, key_length, "program")) {
+        if (profile->helper_program[0] || n < 4 || n >= PW_GAME_HELPER_PATH_CAPACITY) return PW_ERR_MALFORMED;
+        if (!((v[0] >= 'A' && v[0] <= 'Z') || (v[0] >= 'a' && v[0] <= 'z')) || v[1] != ':' || v[2] != '\\')
+            return PW_ERR_MALFORMED;
+        for (size_t i = 0; i < n; i++)
+            if (v[i] < 0x20 || v[i] == 0x7f || v[i] == '"' || v[i] == '/') return PW_ERR_MALFORMED;
+        memcpy(profile->helper_program, v, n);
+        profile->helper_program[n] = 0;
+        return PW_OK;
+    }
+    if (is(key, key_length, "ready")) {
+        size_t part = 0;
+        if (profile->helper_ready[0] || !n || n >= PW_GAME_HELPER_PATH_CAPACITY) return PW_ERR_MALFORMED;
+        for (size_t i = 0; i <= n; i++) {
+            if (i < n && v[i] != '/') {
+                if (!((v[i] >= 'a' && v[i] <= 'z') || (v[i] >= 'A' && v[i] <= 'Z') || (v[i] >= '0' && v[i] <= '9') ||
+                      v[i] == '.' || v[i] == '-' || v[i] == '_'))
+                    return PW_ERR_MALFORMED;
+                continue;
+            }
+            /* a part ends: not empty, and not "." or ".." */
+            if (i == part || (i - part <= 2 && v[part] == '.' && v[i - 1] == '.')) return PW_ERR_MALFORMED;
+            part = i + 1;
+        }
+        memcpy(profile->helper_ready, v, n);
+        profile->helper_ready[n] = 0;
+        return PW_OK;
+    }
+    return PW_ERR_MALFORMED;
 }
 
 /* [debug] winedebug = Wine's channel list (e.g. +seh,warn+module,-all):
@@ -509,6 +557,7 @@ static int parse_sections(const uint8_t *bytes, size_t length, PwGameProfile *pr
             if (section == SECTION_APPLICATION && application_end) *application_end = line;
             seen_sections |= 1u << next;
             if (next == SECTION_LAUNCHER && profile) profile->has_launcher = 1;
+            if (next == SECTION_HELPER && profile) profile->has_helper = 1;
             section = next;
             continue;
         }
@@ -523,6 +572,8 @@ static int parse_sections(const uint8_t *bytes, size_t length, PwGameProfile *pr
         if (begin == key_end) return PW_ERR_MALFORMED;
         int status = section == SECTION_LAUNCHER ?
             launcher_field(profile, begin, (size_t)(key_end - begin), value, (size_t)(end - value)) :
+            section == SECTION_HELPER ?
+            helper_field(profile, begin, (size_t)(key_end - begin), value, (size_t)(end - value)) :
             section == SECTION_ENVIRONMENT ?
             environment_field(profile, begin, (size_t)(key_end - begin), value, (size_t)(end - value)) :
             section == SECTION_DEBUG ?
@@ -540,6 +591,8 @@ static int parse_sections(const uint8_t *bytes, size_t length, PwGameProfile *pr
     if (input_only ? !(seen_sections & (1u << SECTION_INPUT)) :
         !(seen_sections & (1u << SECTION_APPLICATION)))
         return PW_ERR_MALFORMED;
+    /* [helper] names its program. */
+    if (profile && profile->has_helper && !profile->helper_program[0]) return PW_ERR_MALFORMED;
     return PW_OK;
 }
 

@@ -476,7 +476,7 @@ if [ "$prx_status" = 0 ]; then
         __wine_virtual_stats __wine_virtual_fault_top __wine_ps5_set_output_sink __wine_ps5_memory_stats pw_cwd_set \
         __wine_ps5_set_segv_hook __wine_ps5_set_segv_unresolved_hook pw_wine_set_display_release pw_wine_release_display \
         pw_wine_set_notify pw_wine_notify pw_wine_set_invite pw_wine_invite_ask pw_wine_invite_answer \
-        pw_wine_invite_pending pw_wine_invite_accept \
+        pw_wine_invite_pending pw_wine_invite_accept __wine_ps5_set_server_connected_hook \
         --optional-from "$build/dlls/ntdll/ntdll.so" --nm "$sdk/bin/prospero-nm" \
         --optional-export __wine_prospero_native_wow64_caps
     python3 "$root/tools/gen_prx_descriptor.py" "$prx/obj/win32u_desc.c" __wine_unix_lib_init

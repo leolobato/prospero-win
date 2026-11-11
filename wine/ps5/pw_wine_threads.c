@@ -41,7 +41,9 @@ void pw_wine_thread_unregister(long tid)
 int pw_wine_thread_kill(pid_t pid,long tid,int signal)
 {
     int status;
-    if(pid!=getpid()){errno=ESRCH;return -1;}
+    /* A second process on the server (Wine patch 1011) registers nothing
+     * here. EPERM, not ESRCH: the server takes ESRCH to mean the thread died. */
+    if(pid!=getpid()){errno=EPERM;return -1;}
     pthread_mutex_lock(&lock);
     Entry *entry=find_locked(tid);
     status=entry?pthread_kill(entry->thread,signal):ESRCH;
