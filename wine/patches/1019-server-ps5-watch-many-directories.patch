@@ -1,0 +1,536 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Wed, 11 Nov 2026 18:00:00 +0100
+Subject: [PATCH] server: Watch many directories on PS5.
+
+A PS5 title can hold about 256 open files, and every watched directory
+kept one. Java's watch service opens each folder it watches for
+overlapped I/O, reads its file information, binds it to a completion port
+and keeps a ReadDirectoryChangesW pending on it. Project Zomboid watches
+the 1704 folders of its media tree that way, and its title ran out of
+files at about the 240th. Patch 0871 parks a directory past the first 64,
+but opens it again for good the first time it is used, and patch 0993
+keeps every fd with an async queued, which a pending change watch is.
+
+- A directory parked past that threshold now shares patch 0993's budget
+  for read-only files: once it is opened again it is live, the client
+  gets its descriptor uncached, and the least recently used is parked
+  again. A directory has no position to restore; the name must still lead
+  to a directory with the same device and inode. With
+  WINE_PS5_PARK_FILES=0 it stays open once used, as before.
+- Patch 0884 lists a watched directory by its name, so the change watches
+  queued on a directory it polls do not keep the descriptor.
+- One timer lists every watch in turn, instead of one timer each: every
+  25 ms it lists the watches that are due, least recently listed first,
+  for at most 1 ms (WINE_PS5_POLL_BUDGET_US), and the others wait for the
+  next tick. A watch is still listed at most every 25 ms, and less often
+  when its listing takes long. On a PC, 1500 watches with a timer each
+  took 31% of a core while nothing changed; under the budget they take
+  about 4%, and a change is reported in about 200 ms.
+- A listing that fails for want of a descriptor or of memory is dropped
+  rather than compared, which reported every entry missing from it as
+  removed.
+- -DPS5_POLL_CHANGES builds the polling on a PC, in place of inotify, so
+  the console's code can be tested there.
+
+tests/test_wine_directory_watch.py watches 1500 folders as Java does and
+checks that a created and a renamed file are reported, and nothing else.
+Under a host Wine and a 512-descriptor limit, the server without this
+patch, built with PS5_PARK_DIRECTORIES and PS5_PARK_FILES, fails it with
+STATUS_TOO_MANY_OPENED_FILES at the 244th folder; with this patch and
+PS5_POLL_CHANGES as well it passes.
+---
+ server/change.c | 195 +++++++++++++++++++++++++++++++++++++-----------
+ server/fd.c     |  50 ++++++++++---
+ server/file.h   |   1 +
+ 3 files changed, 191 insertions(+), 55 deletions(-)
+
+diff --git a/server/change.c b/server/change.c
+index fdc2188..aef717f 100644
+--- a/server/change.c
++++ b/server/change.c
+@@ -21,6 +21,16 @@
+ 
+ #include "config.h"
+ 
++/* Changes found by listing watched directories (see poll_tick): always on the
++ * console, which has no inotify; -DPS5_POLL_CHANGES uses them elsewhere too,
++ * in place of inotify, so the console's code can be tested on a PC. */
++#if defined(__PROSPERO__) && !defined(PS5_POLL_CHANGES)
++#define PS5_POLL_CHANGES
++#endif
++#ifdef PS5_POLL_CHANGES
++#undef HAVE_SYS_INOTIFY_H
++#endif
++
+ #include <assert.h>
+ #include <fcntl.h>
+ #include <stdio.h>
+@@ -71,7 +81,7 @@ static void free_inode( struct inode *inode );
+ 
+ static struct fd *inotify_fd;
+ 
+-#ifdef __PROSPERO__
++#ifdef PS5_POLL_CHANGES
+ struct poll_watch;
+ #endif
+ 
+@@ -98,12 +108,12 @@ struct dir
+     struct process *client_process;  /* client process that has a cache for this directory */
+     int             client_entry;    /* entry in client process cache */
+     struct list    kernel_object;    /* list of kernel object pointers */
+-#ifdef __PROSPERO__
++#ifdef PS5_POLL_CHANGES
+     struct poll_watch *poll; /* notifications by polling, where there is no inotify */
+ #endif
+ };
+ 
+-#ifdef __PROSPERO__
++#ifdef PS5_POLL_CHANGES
+ static void poll_watch_free( struct dir *dir );
+ #endif
+ 
+@@ -429,7 +439,7 @@ static void dir_destroy( struct object *obj )
+     if (dir->filter)
+         remove_change( dir );
+ 
+-#ifdef __PROSPERO__
++#ifdef PS5_POLL_CHANGES
+     poll_watch_free( dir );
+ #endif
+ 
+@@ -1118,7 +1128,7 @@ static int init_inotify( void )
+     return 0;
+ }
+ 
+-#ifdef __PROSPERO__
++#ifdef PS5_POLL_CHANGES
+ /* The console has no inotify, no dnotify and no kqueue. A directory that is watched is polled: its entries
+  * (and those below it, when the whole subtree is watched) are listed with their identity, size and times,
+  * the list is compared with the last one, and what differs is reported the way inotify would: a name that
+@@ -1132,6 +1142,16 @@ static int init_inotify( void )
+ #define POLL_MAX_ITEMS      200000
+ #define POLL_MAX_DEPTH      32
+ 
++/* Every watch is listed by one timer, in turn, instead of each by its own: a
++ * tick every POLL_MIN_INTERVAL lists the watches that are due, in the order
++ * they were last listed, until it has spent its budget (WINE_PS5_POLL_BUDGET_US,
++ * 1 ms by default), and those left wait for the next tick. Java's watch service
++ * keeps a watch on each folder it is given, and Project Zomboid gives it the
++ * 1704 folders of its media tree: listed every 25 ms each, they would take
++ * the server's thread. With the budget, many watches are each listed less
++ * often instead, and a change takes longer to be reported. */
++#define POLL_TICK_BUDGET_US 1000
++
+ struct poll_item
+ {
+     char   *path;        /* relative to the watched directory, '/' separated */
+@@ -1145,13 +1165,19 @@ struct poll_item
+ 
+ struct poll_watch
+ {
+-    struct timeout_user *timeout;
+-    struct poll_item    *items;
++    struct list          entry;     /* entry in poll_watches, least recently listed first */
++    struct dir          *dir;       /* the directory watched */
++    struct poll_item    *items;     /* its last listing, sorted by path */
+     unsigned int         count;
+-    timeout_t            interval;
++    unsigned int         listed;    /* has a listing to compare the next one with */
++    timeout_t            interval;  /* time between two listings */
++    timeout_t            due;       /* when it is next to be listed */
+     unsigned int         cookie;
+ };
+ 
++static struct list poll_watches = LIST_INIT( poll_watches );
++static struct timeout_user *poll_timer;
++
+ static void poll_free_items( struct poll_item *items, unsigned int count )
+ {
+     unsigned int i;
+@@ -1189,22 +1215,27 @@ static int poll_add_item( struct poll_item **items, unsigned int *count, unsigne
+     return 1;
+ }
+ 
+-static void poll_scan( const char *base, const char *rel, int subtree, int depth,
+-                       struct poll_item **items, unsigned int *count, unsigned int *size )
++/* -1 when a directory could not be listed for want of a descriptor or of
++ * memory: the listing is then incomplete, and comparing it would report
++ * every entry missing from it as removed */
++static int poll_scan( const char *base, const char *rel, int subtree, int depth,
++                      struct poll_item **items, unsigned int *count, unsigned int *size )
+ {
+     DIR *dp;
+     struct dirent *entry;
+     char *path;
+     size_t len = strlen( base ) + strlen( rel ) + 2;
++    int ret = 0;
+ 
+-    if (!(path = malloc( len + 1 ))) return;
++    if (!(path = malloc( len + 1 ))) return -1;
+     snprintf( path, len + 1, "%s%s%s", base, rel[0] ? "/" : "", rel );
+     if (!(dp = opendir( path )))
+     {
++        ret = errno == EMFILE || errno == ENFILE || errno == ENOMEM ? -1 : 0;
+         free( path );
+-        return;
++        return ret;
+     }
+-    while ((entry = readdir( dp )))
++    while (!ret && (entry = readdir( dp )))
+     {
+         char *child, *full;
+         struct stat st;
+@@ -1212,18 +1243,19 @@ static void poll_scan( const char *base, const char *rel, int subtree, int depth
+ 
+         if (!strcmp( entry->d_name, "." ) || !strcmp( entry->d_name, ".." )) continue;
+         child_len = strlen( rel ) + strlen( entry->d_name ) + 2;
+-        if (!(child = malloc( child_len + 1 ))) break;
++        if (!(child = malloc( child_len + 1 ))) { ret = -1; break; }
+         snprintf( child, child_len + 1, "%s%s%s", rel, rel[0] ? "/" : "", entry->d_name );
+-        if (!(full = malloc( strlen( base ) + child_len + 2 ))) { free( child ); break; }
++        if (!(full = malloc( strlen( base ) + child_len + 2 ))) { free( child ); ret = -1; break; }
+         sprintf( full, "%s/%s", base, child );
+         if (!lstat( full, &st ) && poll_add_item( items, count, size, child, &st ) &&
+             subtree && S_ISDIR(st.st_mode) && depth < POLL_MAX_DEPTH)
+-            poll_scan( base, child, subtree, depth + 1, items, count, size );
++            ret = poll_scan( base, child, subtree, depth + 1, items, count, size );
+         free( full );
+         free( child );
+     }
+     closedir( dp );
+     free( path );
++    return ret;
+ }
+ 
+ static int poll_compare( const void *a, const void *b )
+@@ -1318,38 +1350,104 @@ done:
+     free( new_added );
+ }
+ 
+-static void poll_timeout( void *private );
++/* the directory's entries, sorted by path; -1 when they could not all be listed */
++static int poll_list( struct dir *dir, struct poll_item **items, unsigned int *count )
++{
++    const char *base = get_fd_unix_name( dir->fd );
++    unsigned int size = 0;
++
++    *items = NULL;
++    *count = 0;
++    if (!base || poll_scan( base, "", dir->subtree, 0, items, count, &size ) == -1)
++    {
++        poll_free_items( *items, *count );
++        *items = NULL;
++        *count = 0;
++        return -1;
++    }
++    if (*items) qsort( *items, *count, sizeof(**items), poll_compare );
++    return 0;
++}
+ 
+-static void poll_arm( struct dir *dir )
++static long long poll_elapsed_us( const struct timespec *since )
+ {
+-    dir->poll->timeout = add_timeout_user( current_time + dir->poll->interval, poll_timeout, dir );
++    struct timespec now;
++
++    clock_gettime( CLOCK_MONOTONIC, &now );
++    return ((long long)(now.tv_sec - since->tv_sec) * 1000000000 + (now.tv_nsec - since->tv_nsec)) / 1000;
+ }
+ 
+-static void poll_timeout( void *private )
++/* list a watch again, report what changed and set when it is next due */
++static void poll_watch_list( struct poll_watch *watch )
+ {
+-    struct dir *dir = private;
+-    struct poll_watch *watch = dir->poll;
+-    struct poll_item *items = NULL;
+-    unsigned int count = 0, size = 0;
+-    struct timespec before, after;
+-    const char *base;
++    struct dir *dir = watch->dir;
++    struct poll_item *items;
++    unsigned int count;
++    struct timespec before;
+     long long took;
+ 
+-    watch->timeout = NULL;
+-    if (!(base = get_fd_unix_name( dir->fd ))) return;
+     clock_gettime( CLOCK_MONOTONIC, &before );
+-    poll_scan( base, "", dir->subtree, 0, &items, &count, &size );
+-    clock_gettime( CLOCK_MONOTONIC, &after );
+-    if (items) qsort( items, count, sizeof(*items), poll_compare );
+-    poll_compare_lists( dir, watch->items, watch->count, items, count );
+-    poll_free_items( watch->items, watch->count );
+-    watch->items = items;
+-    watch->count = count;
++    if (!poll_list( dir, &items, &count ))
++    {
++        if (watch->listed) poll_compare_lists( dir, watch->items, watch->count, items, count );
++        poll_free_items( watch->items, watch->count );
++        watch->items = items;
++        watch->count = count;
++        watch->listed = 1;
++    }
+     /* a listing that takes long is made less often: eight times as long between two */
+-    took = ((long long)(after.tv_sec - before.tv_sec) * 1000000000 + (after.tv_nsec - before.tv_nsec)) / 100;
++    took = poll_elapsed_us( &before ) * 10;
+     watch->interval = took * 8 < POLL_MIN_INTERVAL ? POLL_MIN_INTERVAL
+                       : took * 8 > POLL_MAX_INTERVAL ? POLL_MAX_INTERVAL : took * 8;
+-    poll_arm( dir );
++    watch->due = current_time + watch->interval;
++}
++
++static long long poll_budget_us(void)
++{
++    static long long budget = -1;
++
++    if (budget == -1)
++    {
++        const char *value = getenv( "WINE_PS5_POLL_BUDGET_US" );
++        budget = value && *value ? atoll( value ) : POLL_TICK_BUDGET_US;
++        if (budget < 0) budget = POLL_TICK_BUDGET_US;
++    }
++    return budget;
++}
++
++static void poll_tick( void *private )
++{
++    unsigned int turns = list_count( &poll_watches ), listed = 0;
++    struct timespec start;
++
++    poll_timer = NULL;
++    clock_gettime( CLOCK_MONOTONIC, &start );
++    /* a directory released below may take its watch off the list */
++    while (turns-- && !list_empty( &poll_watches ))
++    {
++        struct poll_watch *watch = LIST_ENTRY( list_head( &poll_watches ), struct poll_watch, entry );
++        struct dir *dir = watch->dir;
++
++        if (watch->due <= current_time)
++        {
++            /* the watches left are listed first at the next tick */
++            if (listed && poll_elapsed_us( &start ) >= poll_budget_us()) break;
++            /* a report may complete the watch's last request and release its directory */
++            grab_object( dir );
++            poll_watch_list( watch );
++            listed++;
++            list_remove( &watch->entry );
++            list_add_tail( &poll_watches, &watch->entry );
++            release_object( dir );
++        }
++        else
++        {
++            list_remove( &watch->entry );
++            list_add_tail( &poll_watches, &watch->entry );
++        }
++    }
++    if (!list_empty( &poll_watches ))
++        poll_timer = add_timeout_user( current_time + POLL_MIN_INTERVAL, poll_tick, NULL );
+ }
+ 
+ static void poll_watch_free( struct dir *dir )
+@@ -1357,26 +1455,33 @@ static void poll_watch_free( struct dir *dir )
+     struct poll_watch *watch = dir->poll;
+ 
+     if (!watch) return;
+-    if (watch->timeout) remove_timeout_user( watch->timeout );
++    list_remove( &watch->entry );
+     poll_free_items( watch->items, watch->count );
+     free( watch );
+     dir->poll = NULL;
++    if (list_empty( &poll_watches ) && poll_timer)
++    {
++        remove_timeout_user( poll_timer );
++        poll_timer = NULL;
++    }
+ }
+ 
+ static int inotify_adjust_changes( struct dir *dir )
+ {
+     struct poll_watch *watch;
+-    const char *base;
+-    unsigned int size = 0;
+ 
+     if (dir->poll) return 1;
+-    if (!(base = get_fd_unix_name( dir->fd )) || !(watch = calloc( 1, sizeof(*watch) ))) return 0;
++    if (!get_fd_unix_name( dir->fd ) || !(watch = calloc( 1, sizeof(*watch) ))) return 0;
+     dir->poll = watch;
++    watch->dir = dir;
+     watch->interval = POLL_MIN_INTERVAL;
+     /* the list the next ones are compared with is made now, before the caller can change anything */
+-    poll_scan( base, "", dir->subtree, 0, &watch->items, &watch->count, &size );
+-    if (watch->items) qsort( watch->items, watch->count, sizeof(*watch->items), poll_compare );
+-    poll_arm( dir );
++    watch->listed = !poll_list( dir, &watch->items, &watch->count );
++    watch->due = current_time + watch->interval;
++    list_add_tail( &poll_watches, &watch->entry );
++    if (!poll_timer) poll_timer = add_timeout_user( watch->due, poll_tick, NULL );
++    /* the watch lists the directory by name: its descriptor may be parked */
++    set_fd_watched_by_name( dir->fd );
+     return 1;
+ }
+ #else
+@@ -1416,7 +1521,7 @@ struct object *create_dir_obj( struct fd *fd, unsigned int access, mode_t mode )
+     dir->mode = mode;
+     dir->uid  = ~(uid_t)0;
+     dir->client_process = NULL;
+-#ifdef __PROSPERO__
++#ifdef PS5_POLL_CHANGES
+     dir->poll = NULL;
+ #endif
+     set_fd_user( fd, &dir_fd_ops, &dir->obj );
+diff --git a/server/fd.c b/server/fd.c
+index 46985d9..d6c6da4 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -178,7 +178,9 @@ struct fd
+     int                  ps5_park_flags; /* open() flags to open it again with */
+ #endif
+ #ifdef PS5_PARK_FILES
+-    unsigned int         ps5_file :1;    /* a read-only regular file that may be parked */
++    unsigned int         ps5_file :1;    /* a read-only regular file, or a directory, that may be parked */
++    unsigned int         ps5_dir :1;     /* that is a directory past the threshold (ps5_track_directory) */
++    unsigned int         ps5_watched :1; /* its change watch lists it by name (set_fd_watched_by_name) */
+     unsigned int         ps5_pinned :1;  /* handed to the client to cache: never parked */
+     unsigned int         ps5_live :1;    /* in ps5_live_files */
+     struct list          ps5_lru_entry;  /* entry in ps5_live_files */
+@@ -191,6 +193,7 @@ struct fd
+ static unsigned int ps5_directory_fds;  /* directory fds alive, parked or not (see ps5_park_directory) */
+ static int ps5_reopen_directory( struct fd *fd );
+ #ifdef PS5_PARK_FILES
++static void ps5_track_directory( struct fd *fd );
+ static struct list ps5_live_files = LIST_INIT( ps5_live_files ); /* parkable files with a unix_fd, most recent first */
+ static unsigned int ps5_live_count;    /* entries in ps5_live_files */
+ static unsigned int ps5_pinned_count;  /* files handed to the client to cache */
+@@ -1876,7 +1879,7 @@ static struct fd *alloc_fd_object(void)
+     fd->ps5_park_flags = 0;
+ #endif
+ #ifdef PS5_PARK_FILES
+-    fd->ps5_file = fd->ps5_pinned = fd->ps5_live = 0;
++    fd->ps5_file = fd->ps5_dir = fd->ps5_watched = fd->ps5_pinned = fd->ps5_live = 0;
+     fd->ps5_offset = 0;
+     fd->ps5_lent_ms = 0;
+ #endif
+@@ -1931,7 +1934,7 @@ struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *use
+     fd->ps5_park_flags = 0;
+ #endif
+ #ifdef PS5_PARK_FILES
+-    fd->ps5_file = fd->ps5_pinned = fd->ps5_live = 0;
++    fd->ps5_file = fd->ps5_dir = fd->ps5_watched = fd->ps5_pinned = fd->ps5_live = 0;
+     fd->ps5_offset = 0;
+     fd->ps5_lent_ms = 0;
+ #endif
+@@ -1999,6 +2002,9 @@ static void ps5_park_directory( struct fd *fd, int flags )
+     fd->ps5_park_flags |= O_DIRECTORY;  /* never block on, or open, whatever took the name */
+ #endif
+     fd->ps5_parked = 1;
++#ifdef PS5_PARK_FILES
++    ps5_track_directory( fd );
++#endif
+ }
+ 
+ #ifdef PS5_PARK_FILES
+@@ -2102,11 +2108,13 @@ static unsigned long long ps5_now_ms(void)
+ static int ps5_park_file( struct fd *fd, int force )
+ {
+     struct stat st;
+-    off_t offset;
++    off_t offset = 0;
+ 
++    /* a directory's change watch waits in wait_q, but it is listed by name */
+     if (fd->unix_fd == -1 || !fd->closed || fd->closed->unix_fd != fd->unix_fd ||
+         !list_empty( &fd->inode->locks ) || !list_empty( &fd->locks ) ||
+-        async_queued( &fd->read_q ) || async_queued( &fd->write_q ) || async_queued( &fd->wait_q ) ||
++        async_queued( &fd->read_q ) || async_queued( &fd->write_q ) ||
++        (async_queued( &fd->wait_q ) && !fd->ps5_watched) ||
+         ps5_inode_deleting( fd->inode ))
+         return 0;
+     if (!force && fd->ps5_lent_ms && ps5_now_ms() - fd->ps5_lent_ms < PS5_LENT_GRACE_MS) return 0;
+@@ -2114,7 +2122,7 @@ static int ps5_park_file( struct fd *fd, int force )
+     if (fd->poll_index != -1 && (pollfd[fd->poll_index].fd != -1 || pollfd[fd->poll_index].events)) return 0;
+     /* a file deleted under its name cannot be opened again */
+     if (fstat( fd->unix_fd, &st ) == -1 || !st.st_nlink) return 0;
+-    if ((offset = lseek( fd->unix_fd, 0, SEEK_CUR )) == -1) return 0;
++    if (!fd->ps5_dir && (offset = lseek( fd->unix_fd, 0, SEEK_CUR )) == -1) return 0;
+     close( fd->unix_fd );
+     fd->unix_fd = fd->closed->unix_fd = -1;
+     fd->ps5_offset = offset;
+@@ -2233,7 +2241,7 @@ static void ps5_track_file( struct fd *fd, int flags )
+ static void ps5_set_file_cacheable( struct fd *fd )
+ {
+     if (!fd->ps5_file || fd->ps5_pinned || !fd->cacheable) return;
+-    if (ps5_pinned_count < ps5_cached_files_limit())
++    if (!fd->ps5_dir && ps5_pinned_count < ps5_cached_files_limit())
+     {
+         fd->ps5_pinned = 1;
+         ps5_pinned_count++;
+@@ -2258,7 +2266,7 @@ static int ps5_untrack_inode_files( struct inode *inode )
+         if (!fd_ptr->ps5_file) continue;
+         if (fd_ptr->ps5_parked && ps5_reopen_file( fd_ptr ) == -1) return -1;
+         if (fd_ptr->ps5_live) ps5_remove_live_file( fd_ptr );
+-        fd_ptr->ps5_file = 0;
++        fd_ptr->ps5_file = fd_ptr->ps5_dir = 0;
+     }
+     return 0;
+ }
+@@ -2277,9 +2285,9 @@ static int ps5_reopen_file( struct fd *fd )
+         file_set_error();
+         return -1;
+     }
+-    if (fstat( unix_fd, &st ) == -1 || !S_ISREG( st.st_mode ) ||
++    if (fstat( unix_fd, &st ) == -1 || (fd->ps5_dir ? !S_ISDIR( st.st_mode ) : !S_ISREG( st.st_mode )) ||
+         st.st_dev != fd->inode->device->dev || st.st_ino != fd->inode->ino ||
+-        lseek( unix_fd, fd->ps5_offset, SEEK_SET ) == -1)
++        (!fd->ps5_dir && lseek( unix_fd, fd->ps5_offset, SEEK_SET ) == -1))
+     {
+         close( unix_fd );
+         set_error( STATUS_FILE_DELETED );
+@@ -2290,6 +2298,19 @@ static int ps5_reopen_file( struct fd *fd )
+     if (!fd->ps5_pinned) ps5_add_live_file( fd );
+     return 0;
+ }
++
++/* A directory past the threshold, just parked, shares the files' budget
++ * from now on: once it is opened again it is live, the client gets its
++ * descriptor uncached, and as the least recently used it is parked again.
++ * Before, it stayed open for good once used, and Java's watch service, which
++ * reads each watched folder's file information, kept one per folder. With
++ * no files budget it stays open once used, as before. */
++static void ps5_track_directory( struct fd *fd )
++{
++    if (!ps5_live_files_limit()) return;
++    fd->ps5_file = 1;
++    fd->ps5_dir = 1;
++}
+ #endif
+ 
+ /* a parked fd's unix_fd, opened again by its name (see ps5_unpark_directory) */
+@@ -3757,6 +3778,15 @@ const char *get_fd_unix_name( struct fd *fd )
+     return fd->unix_name;
+ }
+ 
++/* a directory whose changes are found by listing it by name: its pending
++ * change watches need no descriptor, so they do not keep it from being parked */
++void set_fd_watched_by_name( struct fd *fd )
++{
++#ifdef PS5_PARK_FILES
++    fd->ps5_watched = 1;
++#endif
++}
++
+ /* get a Unix fd to access a file */
+ DECL_HANDLER(get_handle_fd)
+ {
+diff --git a/server/file.h b/server/file.h
+index c46f95e..910121d 100644
+--- a/server/file.h
++++ b/server/file.h
+@@ -151,6 +151,7 @@ static inline timeout_t abstime_to_timeout( abstime_t abstime )
+ extern void set_current_time( void );
+ extern struct timeout_user *add_timeout_user( timeout_t when, timeout_callback func, void *private );
+ extern const char *get_fd_unix_name( struct fd *fd );
++extern void set_fd_watched_by_name( struct fd *fd );
+ extern void remove_timeout_user( struct timeout_user *user );
+ extern const char *get_timeout_str( timeout_t timeout );
+ 
