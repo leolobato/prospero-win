@@ -645,6 +645,7 @@ static struct {
     void *(*wine_dlopen)(const char *, int);
     char server_module[320], grant_helper[PW_TITLE_SANDBOX_PATH_SIZE + 16], log_path[320];
     char ready_path[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY + PW_GAME_HELPER_PATH_CAPACITY + 16];
+    int session;    /* pw_helper_start returned with the helper running: the loop may poll it (atomic) */
 } helper_state;
 
 static void helper_log(const char *line)
@@ -671,6 +672,7 @@ static void helper_start(void)
 
     PS5LOG_LOG("PW_WINE64 helper status=%d pid=%d ready=%d program=%s", status, (int)helper_state.helper.pid,
                helper_state.helper.ready, helper_state.config.program);
+    if (status == 0) __atomic_store_n(&helper_state.session, 1, __ATOMIC_RELEASE);
 }
 
 /* The console's on-screen keyboard (native/pw_osk_ps5.h): a dialog still up
@@ -1003,6 +1005,27 @@ static int helper_notify(const char *text)
     const int rc = title_notify("", text);
 
     PS5LOG_LOG("PW_WINE64 helper notify=%d %s", rc, text);
+    return rc;
+}
+
+/* How many descriptors this process holds: the title's open-file limit
+ * counts them, the game's and its Wine server's for a [helper] too. */
+static unsigned count_open_fds(void)
+{
+    unsigned n = 0;
+
+    for (int fd = 0; fd < 4096; fd++)
+        if (fcntl(fd, F_GETFD) != -1) n++;
+    return n;
+}
+
+/* The [helper]'s program's messages while the game runs: its own text (a
+ * friend's name, say), so only its size goes to the log. */
+static int helper_message(const char *text)
+{
+    const int rc = title_notify("", text);
+
+    PS5LOG_LOG("PW_WINE64 helper message bytes=%zu notify=%d", strlen(text), rc);
     return rc;
 }
 
@@ -2502,6 +2525,7 @@ int main(int argc, char **argv)
                 .server_connect = helper_server_connect,
                 .log = helper_log,
                 .notify = helper_notify,
+                .message = helper_message,
             };
             if (set_hook && helper_state.wine_dlopen && wine_dlsym_fn) {
                 extra[config.extra_env_count++] = (PwWineStartEnv){ "PW_SECTIONS_FLEXIBLE", "1" };
@@ -2621,6 +2645,12 @@ int main(int argc, char **argv)
         }
 #endif
         int pad_read = pad_status == PW_OK && post_input && pw_pad_ps5_read(&pad) == PW_OK;
+        /* The [helper]'s program while the game runs: its messages, and a
+         * question L3+R3 answers when the title has the pad. */
+        const int helper_session = __atomic_load_n(&helper_state.session, __ATOMIC_ACQUIRE);
+        const int helper_asks = helper_session && pad_status == PW_OK && post_input;
+        if (helper_session)
+            pw_helper_session_poll(&helper_state.helper, &helper_state.config, now / 1000000u, helper_asks);
         /* Each time the pad comes and goes (the system overlay, a drop out),
          * what the reads said, so a lost controller shows in the report. */
         if (pad_read && (int)(pad.core.connected | pad.intercepted << 1) != pad_seen) {
@@ -2638,19 +2668,21 @@ int main(int argc, char **argv)
         const PwPadPs5 *seen = &pad;
         int switch_inputs = 0;
         int others_idle = 0;
-        if (pad_read && (invite_pending || set_menu || osk_status == PW_OK || has_other_input)) {
+        if (pad_read && (invite_pending || helper_asks || set_menu || osk_status == PW_OK || has_other_input)) {
             uint32_t held = pad.core.previous_buttons, pressed = pad.core.pressed_edges,
                      released = pad.core.released_edges;
             int neutral = 0;
 
-            if (invite_pending) {
+            if (invite_pending || helper_asks) {
                 PwInvitePromptView view;
                 /* While the menu is open L3+R3 is the menu's, and closes it;
                  * while the console's keyboard is up the pad is its. The
                  * accept names the question seen open here: one the game
-                 * replaced in between is not accepted. */
+                 * replaced in between is not accepted. The helper's
+                 * question comes first; the game's waits behind it. */
                 uint64_t generation = 0;
-                int open = invite_pending(now / 1000000u, &generation);
+                const uint64_t helper_question = helper_asks ? pw_helper_session_question(&helper_state.helper) : 0;
+                int open = helper_question || (invite_pending && invite_pending(now / 1000000u, &generation));
 
                 if (open != invite_open) {
                     PS5LOG_LOG("PW_WINE64 invite %s", open ? "asked" : "closed");
@@ -2658,9 +2690,13 @@ int main(int argc, char **argv)
                 }
                 if (pw_invite_prompt_tick(&invite_prompt, held, pressed, released, open && !game_menu.open && !osk_ps5.showing,
                                           &view)) {
-                    int accepted = invite_accept(now / 1000000u, generation);
+                    if (helper_question) {
+                        pw_helper_session_accept(&helper_state.helper, &helper_state.config);
+                    } else {
+                        int accepted = invite_accept(now / 1000000u, generation);
 
-                    PS5LOG_LOG("PW_WINE64 invite accepted=%d", accepted);
+                        PS5LOG_LOG("PW_WINE64 invite accepted=%d", accepted);
+                    }
                     invite_open = 0;
                 }
                 held = view.held;
@@ -3052,13 +3088,13 @@ int main(int argc, char **argv)
                  * memory lives (2 GiB, or 4 GiB when large-address-aware). */
                 PS5LOG_LOG("PW_WINE64 memory flexible_free=%zuK dmem=%lluK dmem_peak=%lluK runs=%llu "
                            "dmem_failures=%llu heap=%lluK heap_peak=%lluK dmem_low=%lluK dmem_low_peak=%lluK "
-                           "heap_dmem=%lluK heap_spill=%lluK",
+                           "heap_dmem=%lluK heap_spill=%lluK fds=%u",
                            flexible >> 10, (unsigned long long)(m[0] >> 10),
                            (unsigned long long)(m[1] >> 10), (unsigned long long)m[2],
                            (unsigned long long)m[3], (unsigned long long)(m[4] >> 10),
                            (unsigned long long)(m[5] >> 10), (unsigned long long)(m[6] >> 10),
                            (unsigned long long)(m[7] >> 10), (unsigned long long)(m[8] >> 10),
-                           (unsigned long long)(m[9] >> 10));
+                           (unsigned long long)(m[9] >> 10), count_open_fds());
             }
         }
     }

@@ -190,6 +190,155 @@ static int copy_text(char *to, size_t size, const char *from)
     return 0;
 }
 
+/* path = ready_path + suffix; 0 when it does not fit. */
+static int beside_ready(char *path, size_t size, const char *ready_path, const char *suffix)
+{
+    return snprintf(path, size, "%s%s", ready_path, suffix) < (int)size;
+}
+
+/* Writes text to path whole: another name first, then a rename. */
+static void write_whole(const PwHelperConfig *config, const char *path, const char *text)
+{
+    char temporary[600];
+    const size_t length = strlen(text);
+    int fd, ok;
+
+    if (!beside_ready(temporary, sizeof(temporary), path, ".tmp")) return;
+    fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        say(config, "helper: cannot write an answer errno=%d", errno);
+        return;
+    }
+    ok = write(fd, text, length) == (ssize_t)length;
+    close(fd);
+    if (!ok || rename(temporary, path) != 0) {
+        say(config, "helper: cannot write an answer errno=%d", errno);
+        unlink(temporary);
+    }
+}
+
+/* Makes the files the program reaches the player with while the game runs
+ * (src/pw_helper_channel.h): a question and an answer never outlive a run,
+ * and the messages file is there, empty, only when the title shows them. */
+static void session_begin(const PwHelperConfig *config, PwHelperSession *session)
+{
+    char say_path[sizeof(session->say)];
+    int fd;
+
+    memset(session, 0, sizeof(*session));
+    if (!config->ready_path || !beside_ready(say_path, sizeof(say_path), config->ready_path, ".say") ||
+        !beside_ready(session->ask, sizeof(session->ask), config->ready_path, ".ask") ||
+        !beside_ready(session->answer, sizeof(session->answer), config->ready_path, ".answer")) {
+        memset(session, 0, sizeof(*session));
+        return;
+    }
+    unlink(session->ask);
+    unlink(session->answer);
+    if (!config->message) {
+        unlink(say_path);
+        return;
+    }
+    fd = open(say_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        say(config, "helper: no messages file errno=%d", errno);
+        return;
+    }
+    close(fd);
+    memcpy(session->say, say_path, sizeof(say_path));
+}
+
+/* One message of the program, within the limit; 1 when it showed. */
+static int show_message(PwHelperSession *session, const PwHelperConfig *config, const char *text, uint64_t now_ms)
+{
+    if (!pw_helper_say_allowed(&session->limit, now_ms)) {
+        session->dropped++;
+        return 0;
+    }
+    config->message(text);
+    return 1;
+}
+
+static void answer_question(PwHelperSession *session, const PwHelperConfig *config, int accepted)
+{
+    char text[48];
+
+    pw_helper_answer_text(session->open_id, accepted, text, sizeof(text));
+    write_whole(config, session->answer, text);
+    say(config, "helper: question %llu %s", (unsigned long long)session->open_id, accepted ? "accepted" : "expired");
+    session->open_id = 0;
+}
+
+void pw_helper_session_poll(PwHelper *helper, const PwHelperConfig *config, uint64_t now_ms, int can_ask)
+{
+    static char buffer[4096];
+    PwHelperSession *session = &helper->session;
+    char line[PW_HELPER_NOTIFY_TEXT];
+    struct stat st;
+    int fd;
+
+    if (!session->say[0] || !config->message || now_ms < session->next_look_ms) return;
+    session->next_look_ms = now_ms + 250u;
+    if (can_ask && !session->can_ask) {
+        fd = open(session->answer, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+        if (fd >= 0) {
+            close(fd);
+            session->can_ask = 1;
+            say(config, "helper: the program may ask the player");
+        }
+    }
+
+    /* Messages: the whole lines added since the last look. A file emptied
+     * since is read from its start; a line longer than the buffer is skipped. */
+    if ((fd = open(session->say, O_RDONLY | O_NOFOLLOW)) >= 0) {
+        ssize_t got;
+        size_t at = 0;
+
+        if (fstat(fd, &st) == 0 && (size_t)st.st_size < session->said) session->said = 0;
+        got = pread(fd, buffer, sizeof(buffer), (off_t)session->said);
+        close(fd);
+        if (got > 0) {
+            while (pw_helper_next_line(buffer, (size_t)got, &at, line, sizeof(line)))
+                show_message(session, config, line, now_ms);
+            session->said += at ? at : (got == (ssize_t)sizeof(buffer) ? (size_t)got : 0);
+        }
+    }
+    if (session->dropped) {
+        say(config, "helper: %u messages over the limit not shown", session->dropped);
+        session->dropped = 0;
+    }
+
+    /* A question, once per id: shown, then open until its time is up. A new
+     * one replaces an open one, which gets no answer. */
+    if (session->can_ask && (fd = open(session->ask, O_RDONLY | O_NOFOLLOW)) >= 0) {
+        char text[PW_HELPER_NOTIFY_TEXT + 64];
+        const ssize_t got = read(fd, text, sizeof(text));
+        PwHelperQuestion question;
+
+        close(fd);
+        if (got > 0 && pw_helper_question_parse(text, (size_t)got, &question) && question.id != session->last_id) {
+            session->last_id = question.id;
+            if (show_message(session, config, question.text, now_ms)) {
+                session->open_id = question.id;
+                session->deadline_ms = now_ms + question.seconds * 1000ull;
+                say(config, "helper: question %llu open for %u s", (unsigned long long)question.id, question.seconds);
+            } else {
+                say(config, "helper: question %llu not asked: over the message limit", (unsigned long long)question.id);
+            }
+        }
+    }
+    if (session->open_id && now_ms >= session->deadline_ms) answer_question(session, config, 0);
+}
+
+uint64_t pw_helper_session_question(const PwHelper *helper)
+{
+    return helper ? helper->session.open_id : 0;
+}
+
+void pw_helper_session_accept(PwHelper *helper, const PwHelperConfig *config)
+{
+    if (helper && helper->session.open_id) answer_question(&helper->session, config, 1);
+}
+
 int pw_helper_alive(const PwHelper *helper)
 {
     struct pollfd watch;
@@ -221,6 +370,7 @@ int pw_helper_start(const PwHelperConfig *config, PwHelper *helper)
     helper->pid = 0;
     helper->channel = -1;
     helper->ready = 0;
+    memset(&helper->session, 0, sizeof(helper->session));
 
     if (pw_helper_mailbox_name(name, sizeof(name), config->title_id) != 0) return -1;
     shm_unlink(name);
@@ -259,6 +409,7 @@ int pw_helper_start(const PwHelperConfig *config, PwHelper *helper)
             traced = 1;
         }
     }
+    session_begin(config, &helper->session);
 
     memset(&info, 0, sizeof(info));
     if (sceKernelGetAppInfo(getpid(), &info) != 0) {
