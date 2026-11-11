@@ -58,6 +58,9 @@
  *   game_label = Gamepad   ; for the first program; those after it use [input].
  *   mouse = left_stick     ; Holding the touchpad swaps the two; label and
  *                          ; game_label name them in the notification
+ *   chain = off            ; no exec chain: the game starts on [input], and
+ *                          ; these lines are only what holding the touchpad
+ *                          ; swaps to (for menus a controller can't use)
  *
  *   [helper]               ; a second program beside the game, in a local
  *                          ; process on the same Wine server (off without
@@ -220,6 +223,7 @@ typedef struct PwGameProfile {
     PwGameDisplay display;
     PwGameInput input;          /* this profile's own [input] lines */
     int has_launcher;           /* [launcher]: starts through a launcher */
+    int launcher_chain_off;     /* [launcher] chain = off: only the touchpad switch, the game starts on [input] */
     PwGameInput launcher_input; /* [launcher]: the first program's input */
     char launcher_label[PW_GAME_LABEL_CAPACITY], game_label[PW_GAME_LABEL_CAPACITY];
     int has_helper;             /* [helper]: a second program beside the game */

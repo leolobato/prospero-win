@@ -301,13 +301,18 @@ static int section_of(const uint8_t *begin, const uint8_t *end)
            is(begin, (size_t)(end - begin), "environment") ? SECTION_ENVIRONMENT : -1;
 }
 
-/* [launcher]: label and game_label, or a line as in [input]. */
+/* [launcher]: label and game_label, chain = off, or a line as in [input]. */
 static int launcher_field(PwGameProfile *profile, const uint8_t *key, size_t key_length,
                           const uint8_t *v, size_t n)
 {
     char *label = is(key, key_length, "label") ? profile->launcher_label :
                   is(key, key_length, "game_label") ? profile->game_label : NULL;
 
+    if (is(key, key_length, "chain")) {
+        if (profile->launcher_chain_off || !is(v, n, "off")) return PW_ERR_MALFORMED;
+        profile->launcher_chain_off = 1;
+        return PW_OK;
+    }
     if (!label) return input_field(&profile->launcher_input, key, key_length, v, n, 0);
     if (label[0] || !n || n >= PW_GAME_LABEL_CAPACITY) return PW_ERR_MALFORMED;
     for (size_t i = 0; i < n; i++)

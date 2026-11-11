@@ -1949,8 +1949,10 @@ int main(int argc, char **argv)
             PS5LOG_LOG("PW_WINE64 chain stale request removed");
         }
         /* Only a game that starts through a launcher gets the chain: another
-         * program's start fails as before, so one that starts helpers runs on. */
-        exec_chain_enabled = game->has_launcher && exec_chain_depth < PW_WINE64_CHAIN_MAX;
+         * program's start fails as before, so one that starts helpers runs on.
+         * With chain = off [launcher] is only the touchpad switch. */
+        const int through_launcher = game->has_launcher && !game->launcher_chain_off;
+        exec_chain_enabled = through_launcher && exec_chain_depth < PW_WINE64_CHAIN_MAX;
         if (exec_chain_enabled) setenv("WINE_PS5_EXEC_CHAIN", exec_chain_request, 1);
         /* Without it, the first program a game couldn't start is noted, so a
          * launcher can be told from a game that failed by itself. */
@@ -1959,7 +1961,7 @@ int main(int argc, char **argv)
 
             snprintf(refused, sizeof(refused), "%s/.pw-exec-refused", prefix);
             unlink(refused);
-            if (!game->has_launcher) setenv("WINE_PS5_EXEC_REFUSED", refused, 1);
+            if (!through_launcher) setenv("WINE_PS5_EXEC_REFUSED", refused, 1);
         }
     }
     if (per_game_mode) {
@@ -2029,7 +2031,9 @@ int main(int argc, char **argv)
             needs_playstation = game_input.mode == PW_GAME_INPUT_PLAYSTATION;
             /* Starting through a launcher: its preset until it starts the game.
              * Either may be swapped in later, so a controller either one needs
-             * is set up from the start, and stays idle under the other. */
+             * is set up from the start, and stays idle under the other. With
+             * chain = off there is no launcher: the game starts on its own
+             * preset, and holding the touchpad swaps to the [launcher] lines. */
             if (game->has_launcher) {
                 other_input = game->launcher_input;
                 pw_game_input_default_mode(&other_input);
@@ -2039,15 +2043,15 @@ int main(int argc, char **argv)
                 input_label = game->game_label;
                 other_label = game->launcher_label;
                 pw_input_switch_init(&input_switch, PW_PAD_PS5_TOUCHPAD);
-                if (!exec_chain_depth) {
+                if (!exec_chain_depth && !game->launcher_chain_off) {
                     PwGameInput swap = game_input;
                     game_input = other_input;
                     other_input = swap;
                     input_label = game->launcher_label;
                     other_label = game->game_label;
                 }
-                PS5LOG_LOG("PW_WINE64 launcher mode chain=%u preset=%s controller=%d", exec_chain_depth,
-                           input_label[0] ? input_label : "-", needs_xinput);
+                PS5LOG_LOG("PW_WINE64 launcher mode chain=%u%s preset=%s controller=%d", exec_chain_depth,
+                           game->launcher_chain_off ? " (off)" : "", input_label[0] ? input_label : "-", needs_xinput);
             }
         } else {
             input_status = pw_wine_library_input(game, library_root, &game_input);

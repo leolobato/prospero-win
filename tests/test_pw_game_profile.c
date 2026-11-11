@@ -336,8 +336,14 @@ static void test_version(void)
     assert(p.has_launcher && !strcmp(p.launcher_label, "Mouse") && !strcmp(p.game_label, "Arrow keys"));
     assert(p.launcher_input.mouse == PW_GAME_STICK_LEFT && p.launcher_input.mode == PW_GAME_INPUT_KEYBOARD);
     assert(p.input.mouse == PW_GAME_STICK_NONE && !strcmp(p.input.preset, "gamepad"));
-    assert(parse(APP "[launcher]\n", &p) == PW_OK && p.has_launcher && !p.launcher_label[0]);
+    assert(parse(APP "[launcher]\n", &p) == PW_OK && p.has_launcher && !p.launcher_label[0] && !p.launcher_chain_off);
     assert(parse(APP "[launcher]\npreset = mouse\n", &p) == PW_ERR_MALFORMED);
+    /* chain = off: only the touchpad switch; off is the one value, once. */
+    assert(parse(APP "[launcher]\nchain = off\nlabel = Mouse\nmode = keyboard\n", &p) == PW_OK);
+    assert(p.has_launcher && p.launcher_chain_off && p.launcher_input.mode == PW_GAME_INPUT_KEYBOARD);
+    assert(parse(APP "[launcher]\nchain = on\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[launcher]\nchain = off\nchain = off\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[input]\nchain = off\n", &p) != PW_OK);
     /* [helper]: a second program beside the game; off without the section. */
     assert(parse(APP, &p) == PW_OK && !p.has_helper && !p.helper_program[0]);
     assert(parse(APP "[helper]\nprogram = C:\\Tools\\service.exe\nready = tools/service.ready\nwait = 45\n", &p) == PW_OK);
