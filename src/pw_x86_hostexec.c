@@ -502,7 +502,9 @@ static int publish(PwX86HostExec *h, const uint8_t *stub, size_t bytes, uint32_t
 
 /* PUSH m32 (FF /6) and POP m32 (8F /0) use the guest stack implicitly, so
  * they are emulated here instead of being rewritten for the host. The SEH
- * prologue/epilogue pair `push fs:[0]` / `pop fs:[0]` is the common case. */
+ * prologue/epilogue pair `push fs:[0]` / `pop fs:[0]` is the common case.
+ * With a 66 prefix they move a word and ESP by 2: Watcom code builds a
+ * far pointer on the stack with `push word [ebx+ecx*4+2]`. */
 /*
  * CPUID as the host's, less what the guest cannot run: AVX, AVX2, FMA, F16C,
  * BMI1/2 and AVX-512 are VEX or EVEX encoded, which neither translator nor
@@ -545,13 +547,14 @@ static int cpuid_form(PwX86State *s, const uint8_t *src, size_t n)
 static int stack_memory_form(PwX86State *s, const uint8_t *src, size_t n)
 {
     size_t at = 0;
-    unsigned fs = 0;
-    uint32_t address, value;
+    unsigned fs = 0, size = 4;
+    uint32_t address, value = 0;
     int len;
 
     while (at < n && at < 4 && (src[at] == 0x64 || src[at] == 0x2e || src[at] == 0x3e ||
-                                src[at] == 0x26 || src[at] == 0x36)) {
+                                src[at] == 0x26 || src[at] == 0x36 || src[at] == 0x66)) {
         fs |= src[at] == 0x64;
+        if (src[at] == 0x66) size = 2;
         at++;
     }
     if (at + 1 >= n || (src[at] != 0xff && src[at] != 0x8f)) return PW_ERR_UNSUPPORTED;
@@ -562,16 +565,16 @@ static int stack_memory_form(PwX86State *s, const uint8_t *src, size_t n)
         len = modrm_address(s, src + at + 1, n - at - 1, &address);
         if (len < 0) return len;
         if (fs) address += s->fs_base;
-        memcpy(&value, (const void *)(uintptr_t)address, 4);
-        s->gpr[4] -= 4;
-        memcpy((void *)(uintptr_t)s->gpr[4], &value, 4);
+        memcpy(&value, (const void *)(uintptr_t)address, size);
+        s->gpr[4] -= size;
+        memcpy((void *)(uintptr_t)s->gpr[4], &value, size);
     } else {
-        memcpy(&value, (const void *)(uintptr_t)s->gpr[4], 4);
-        s->gpr[4] += 4;   /* the destination address sees the popped ESP */
+        memcpy(&value, (const void *)(uintptr_t)s->gpr[4], size);
+        s->gpr[4] += size;   /* the destination address sees the popped ESP */
         len = modrm_address(s, src + at + 1, n - at - 1, &address);
-        if (len < 0) { s->gpr[4] -= 4; return len; }
+        if (len < 0) { s->gpr[4] -= size; return len; }
         if (fs) address += s->fs_base;
-        memcpy((void *)(uintptr_t)address, &value, 4);
+        memcpy((void *)(uintptr_t)address, &value, size);
     }
     s->eip += (uint32_t)(at + 1 + (size_t)len);
     return PW_OK;
