@@ -324,7 +324,9 @@ the executable, its arguments and its working folder.
   in a `.pw-symlinks` file per folder:
   - links inside the prefix (the `c:` and `z:` drives) are written there;
   - links pointing outside it (Wine's Desktop and Documents into your home
-    folder) become empty folders.
+    folder) become empty folders;
+  - a game finds a link in any letter case, as it finds a file. Folder
+    listings don't show links.
 
   A pull never writes through a link into your home folder. If an older
   prefix still has Wine's links, the pull turns each one it needs into a

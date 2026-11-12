@@ -417,6 +417,34 @@ int pw_cwd_links_end_with(const char *directory, char c)
     return found;
 }
 
+int pw_cwd_links_visit(const char *directory, pw_cwd_visit visit, void *context)
+{
+    size_t i, length = strlen(directory), used = 0, bytes = 0;
+    char *names = NULL, *name;
+    int result = 0;
+
+    /* Copied first: the visitor runs with no lock held. */
+    pthread_rwlock_rdlock(&cwd_lock);
+    for (i = 0; i < link_count; i++)
+        if (parent_length(links[i].path) == length && !strncmp(links[i].path, directory, length))
+            bytes += strlen(links[i].path + length) + 1;
+    if (bytes && (names = malloc(bytes)))
+        for (i = 0; i < link_count; i++) {
+            const char *path = links[i].path;
+
+            if (parent_length(path) != length || strncmp(path, directory, length)) continue;
+            path += length;
+            if (*path == '/') path++;
+            memcpy(names + used, path, strlen(path) + 1);
+            used += strlen(path) + 1;
+        }
+    pthread_rwlock_unlock(&cwd_lock);
+    if (bytes && !names) { errno = ENOMEM; return -1; }
+    for (name = names; !result && name < names + used; name += strlen(name) + 1) result = visit(name, context);
+    free(names);
+    return result;
+}
+
 /* The count of name changes: this module's own until another module's is
  * shared with it. */
 static unsigned long own_changes;

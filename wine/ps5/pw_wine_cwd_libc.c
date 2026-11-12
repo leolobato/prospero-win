@@ -723,6 +723,7 @@ int pw_cwd_scan_directory(int dirfd, const char *path, pw_cwd_visit visit, void 
         pw_cwd_listing_store(&st, changes_before, names, bytes, count);
         free(names);
     }
+    if (!result && (result = pw_cwd_links_visit(folded, visit, context)) < 0) return -1;
     if (!result && !reparse_names && !pw_cwd_links_end_with(folded, '?'))
         *flags |= PW_CWD_NO_REPARSE_NAMES;
     return result;

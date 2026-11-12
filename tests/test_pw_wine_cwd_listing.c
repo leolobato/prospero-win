@@ -312,6 +312,40 @@ static void test_through_links(void)
     assert(!rmdir(at("prefix/dosdevices")) && !rmdir(at("prefix")));
 }
 
+/* A virtual link is found in any letter case, as a file is (a Source game
+ * asks for "half-life 2" in steamapps\common): its name comes after the
+ * directory's own, and a link of another directory is not visited. The
+ * tables are written as the title writes them, before Wine looks. */
+static void test_link_names(void)
+{
+    char table[PATH_MAX * 2], found[256];
+    struct order got = { "", 0, 0 };
+    unsigned int ignored;
+    int fd;
+
+    assert(!mkdir(at("games"), 0777) && !mkdir(at("games/220"), 0777));
+    assert(!mkdir(at("common"), 0777) && !mkdir(at("other"), 0777));
+    snprintf(table, sizeof(table), "Half-Life 2\t%s\n", at("games/220"));
+    assert((fd = __real_open(at("common/" PW_CWD_LINK_TABLE), O_CREAT | O_WRONLY, 0644)) >= 0 &&
+           write(fd, table, strlen(table)) == (ssize_t)strlen(table) && !__real_close(fd));
+    snprintf(table, sizeof(table), "Elsewhere\t%s\n", at("games/220"));
+    assert((fd = __real_open(at("other/" PW_CWD_LINK_TABLE), O_CREAT | O_WRONLY, 0644)) >= 0 &&
+           write(fd, table, strlen(table)) == (ssize_t)strlen(table) && !__real_close(fd));
+    touch("games/220/hl2.exe");
+    touch("common/readme.txt");
+
+    assert(scan("common", "half-life 2", found, NULL) == 1 && !strcmp(found, "Half-Life 2"));
+    assert(scan("common", "HALF-LIFE 2", found, NULL) == 1 && !strcmp(found, "Half-Life 2"));
+    assert(scan("common", "README.TXT", found, NULL) == 1 && !strcmp(found, "readme.txt"));
+    assert(scan("common", "elsewhere", NULL, NULL) == 0);
+    assert(pw_cwd_scan_directory(AT_FDCWD, at("common"), record, &got, &ignored) == 0);
+    assert(strstr(got.text, "readme.txt/") < strstr(got.text, "Half-Life 2/") &&
+           !strcmp(strstr(got.text, "Half-Life 2/"), "Half-Life 2/") && !strstr(got.text, "Elsewhere"));
+    assert(!unlink(at("common/" PW_CWD_LINK_TABLE)) && !unlink(at("other/" PW_CWD_LINK_TABLE)));
+    assert(!unlink(at("common/readme.txt")) && !rmdir(at("common")) && !rmdir(at("other")));
+    assert(!unlink(at("games/220/hl2.exe")) && !rmdir(at("games/220")) && !rmdir(at("games")));
+}
+
 /* More directories than are kept, and one too large to keep. */
 static void test_limits(void)
 {
@@ -427,12 +461,13 @@ int main(void)
     test_counting();
     test_listing();
     test_through_links();
+    test_link_names();
     test_limits();
     test_threads();
     assert(!rmdir(root));
     printf("wine cwd listings passed: change count (creates only, renames, deletes, links, fopen), "
            "kept listings for misses and other spellings, create/delete/rename/mkdir/rmdir after, "
            "appends drop nothing, reparse names and links, outside writers by times, shared count, "
-           "visitor results and order, failures, off, links on the way, eviction, size cap, threads\n");
+           "visitor results and order, failures, off, links on the way, link names in any case, eviction, size cap, threads\n");
     return 0;
 }
