@@ -129,6 +129,7 @@
  * keys and values are refused, so a typo never plays with defaults.
  */
 #include "pw_app_profile.h"
+#include "pw_steam_view.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -230,6 +231,9 @@ typedef struct PwGameProfile {
     char helper_program[PW_GAME_HELPER_PATH_CAPACITY];  /* a Windows path */
     char helper_ready[PW_GAME_HELPER_PATH_CAPACITY];    /* below drive_c, '/' separated; empty for none */
     uint32_t helper_wait;       /* seconds to wait for helper_ready */
+    /* [steam] install_dir: the game's folder in steamapps\common, where the
+     * title shows it to Wine (pw_steam_view.h); empty for none. */
+    char steam_install_dir[PW_STEAM_INSTALL_DIR_CAPACITY];
     /* [debug] winedebug: WINEDEBUG for this game, empty for the title's. */
     char winedebug[PW_GAME_WINEDEBUG_CAPACITY];
     PwGameDebugEnv debug_env[PW_GAME_DEBUG_ENV_MAX];    /* [debug] env lines */

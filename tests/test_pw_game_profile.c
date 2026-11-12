@@ -361,6 +361,21 @@ static void test_version(void)
     assert(parse(APP "[helper]\nprogram = C:\\a.exe\nwait = 0\n", &p) == PW_ERR_MALFORMED);
     assert(parse(APP "[helper]\nprogram = C:\\a.exe\nwait = 121\n", &p) == PW_ERR_MALFORMED);
     assert(parse(APP "[helper]\nprogram = C:\\a.exe\nother = 1\n", &p) == PW_ERR_MALFORMED);
+    /* [steam] install_dir: the folder in steamapps\common; none without the section. */
+    assert(parse(APP, &p) == PW_OK && !p.steam_install_dir[0]);
+    assert(parse(APP "[steam]\ninstall_dir = The Talos Principle\n", &p) == PW_OK &&
+           !strcmp(p.steam_install_dir, "The Talos Principle"));
+    assert(parse(APP "[steam]\ninstall_dir =   Half-Life 2  \n[helper]\nprogram = C:\\a.exe\n", &p) == PW_OK &&
+           !strcmp(p.steam_install_dir, "Half-Life 2") && p.has_helper);
+    assert(parse(APP "[steam]\n", &p) == PW_ERR_MALFORMED);                                   /* no folder */
+    assert(parse(APP "[steam]\ninstall_dir =\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[steam]\ninstall_dir = a\ninstall_dir = b\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[steam]\ninstall_dir = ..\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[steam]\ninstall_dir = a\\b\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[steam]\ninstall_dir = a/b\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[steam]\ninstall_dir = C:\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[steam]\ninstall_dir = a\nother = 1\n", &p) == PW_ERR_MALFORMED);
+    assert(parse(APP "[steam]\ninstall_dir = a\n[steam]\ninstall_dir = b\n", &p) == PW_ERR_MALFORMED);
     assert(parse(APP "[launcher]\nplayer2 = mouse\n", &p) == PW_ERR_MALFORMED);
     assert(parse(APP "[launcher]\nlabel = a\nlabel = b\n", &p) == PW_ERR_MALFORMED);
     assert(parse(APP "[launcher]\nlabel = a\"b\n", &p) == PW_ERR_MALFORMED);

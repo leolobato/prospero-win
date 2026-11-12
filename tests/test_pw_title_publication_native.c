@@ -832,6 +832,18 @@ static void usb_drive_substitution_contract(void)
     memset(profile.app.executable, 'a', PW_APP_PATH_CAPACITY - 1);
     memcpy(profile.app.executable, "Z:\\mnt\\usb\\", 11);
     CHECK(pw_title_publication_use_game_mount(&profile, "/mnt/usb0", error, sizeof(error)) != PW_OK);
+    /* The game root on the found drive, as the title links it for [steam]. */
+    {
+        char root[64];
+        CHECK(pw_title_publication_game_path("/mnt/usb/playden/games/257510", "/mnt/usb1", root, sizeof(root)) == 0);
+        CHECK(!strcmp(root, "/mnt/usb1/playden/games/257510"));
+        CHECK(pw_title_publication_game_path("/data/playden-games/220", "", root, sizeof(root)) == 0);
+        CHECK(!strcmp(root, "/data/playden-games/220"));
+        CHECK(pw_title_publication_game_path("/data/playden-games/220", "/mnt/usb1", root, sizeof(root)) != 0);
+        CHECK(pw_title_publication_game_path("/mnt/usbx/g", "/mnt/usb1", root, sizeof(root)) != 0);
+        CHECK(pw_title_publication_game_path("/mnt/usb/g", "/mnt/usb8", root, sizeof(root)) != 0);
+        CHECK(pw_title_publication_game_path("/mnt/usb/playden/games/257510", "/mnt/usb1", root, 16) != 0);
+    }
 }
 
 int main(void)

@@ -305,6 +305,8 @@ src/pw_wine_launch.c
 src/pw_wine_launch.h
 src/pw_game_profile.c
 src/pw_game_profile.h
+src/pw_steam_view.c
+src/pw_steam_view.h
 src/pw_prefix_temp.c
 src/pw_prefix_temp.h
 native/pw_wine_prefix.c
@@ -314,6 +316,7 @@ tests/test_pw_wine_prefix_cpu.c
 tests/test_pw_wine_start.c
 tests/test_pw_wine_launch.c
 tests/test_pw_game_profile.c
+tests/test_pw_steam_view.c
 tests/test_pw_gameplay_run.py
 tests/test_pw_cache_stats.py
 tests/test_pw_exec_cpu.py

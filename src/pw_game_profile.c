@@ -271,7 +271,7 @@ static int display_field(PwGameDisplay *display, uint32_t *seen, const uint8_t *
 }
 
 enum { SECTION_NONE, SECTION_APPLICATION, SECTION_DISPLAY, SECTION_INPUT, SECTION_DEBUG, SECTION_RUNTIME,
-       SECTION_ENVIRONMENT, SECTION_LAUNCHER, SECTION_HELPER };
+       SECTION_ENVIRONMENT, SECTION_LAUNCHER, SECTION_HELPER, SECTION_STEAM };
 
 /* One line: its trimmed extent and where the next begins. */
 static size_t next_line(const uint8_t *bytes, size_t length, size_t cursor,
@@ -296,6 +296,7 @@ static int section_of(const uint8_t *begin, const uint8_t *end)
            is(begin, (size_t)(end - begin), "input") ? SECTION_INPUT :
            is(begin, (size_t)(end - begin), "launcher") ? SECTION_LAUNCHER :
            is(begin, (size_t)(end - begin), "helper") ? SECTION_HELPER :
+           is(begin, (size_t)(end - begin), "steam") ? SECTION_STEAM :
            is(begin, (size_t)(end - begin), "debug") ? SECTION_DEBUG :
            is(begin, (size_t)(end - begin), "runtime") ? SECTION_RUNTIME :
            is(begin, (size_t)(end - begin), "environment") ? SECTION_ENVIRONMENT : -1;
@@ -369,6 +370,18 @@ static int helper_field(PwGameProfile *profile, const uint8_t *key, size_t key_l
         return PW_OK;
     }
     return PW_ERR_MALFORMED;
+}
+
+/* [steam]: install_dir, the game's folder in steamapps\common (one path part). */
+static int steam_field(PwGameProfile *profile, const uint8_t *key, size_t key_length,
+                       const uint8_t *v, size_t n)
+{
+    if (!is(key, key_length, "install_dir") || profile->steam_install_dir[0] ||
+        !pw_steam_install_dir_valid((const char *)v, n))
+        return PW_ERR_MALFORMED;
+    memcpy(profile->steam_install_dir, v, n);
+    profile->steam_install_dir[n] = 0;
+    return PW_OK;
 }
 
 /* [debug] winedebug = Wine's channel list (e.g. +seh,warn+module,-all):
@@ -579,6 +592,8 @@ static int parse_sections(const uint8_t *bytes, size_t length, PwGameProfile *pr
             launcher_field(profile, begin, (size_t)(key_end - begin), value, (size_t)(end - value)) :
             section == SECTION_HELPER ?
             helper_field(profile, begin, (size_t)(key_end - begin), value, (size_t)(end - value)) :
+            section == SECTION_STEAM ?
+            steam_field(profile, begin, (size_t)(key_end - begin), value, (size_t)(end - value)) :
             section == SECTION_ENVIRONMENT ?
             environment_field(profile, begin, (size_t)(key_end - begin), value, (size_t)(end - value)) :
             section == SECTION_DEBUG ?
@@ -598,6 +613,8 @@ static int parse_sections(const uint8_t *bytes, size_t length, PwGameProfile *pr
         return PW_ERR_MALFORMED;
     /* [helper] names its program. */
     if (profile && profile->has_helper && !profile->helper_program[0]) return PW_ERR_MALFORMED;
+    /* [steam] names the folder. */
+    if (profile && (seen_sections & (1u << SECTION_STEAM)) && !profile->steam_install_dir[0]) return PW_ERR_MALFORMED;
     return PW_OK;
 }
 

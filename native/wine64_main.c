@@ -43,6 +43,7 @@
 #include "../src/pw_game_menu.h"
 #include "../src/pw_input_switch.h"
 #include "../src/pw_invite_prompt.h"
+#include "../src/pw_steam_view.h"
 #include "pw_data_mount.h"
 #include "pw_file_limits.h"
 #include "pw_helper_ps5.h"
@@ -516,6 +517,115 @@ static int per_game_argument(int argc, char **argv, char *error, size_t error_si
     return 0;
 }
 
+/* [steam]: the game's folder as Wine's Z: path and as the Steam library
+ * shows it (src/pw_steam_view.h); both empty without [steam]. A program a
+ * launcher queued in the Steam form maps back with them even when this start
+ * could not link the folder; Wine gets the Steam form only when it could
+ * (steam_view_ready). */
+static char steam_z_root[PW_APP_PATH_CAPACITY], steam_view_root[PW_APP_PATH_CAPACITY];
+static int steam_view_ready;
+
+/* A folder of the steamapps path in the prefix, made if missing; 0 when it
+ * is a real directory. */
+static int steam_view_folder(const char *path)
+{
+    struct stat st;
+
+    if (mkdir(path, 0777) != 0 && errno != EEXIST) return -1;
+    return lstat(path, &st) == 0 && S_ISDIR(st.st_mode) ? 0 : -1;
+}
+
+/* Link steamapps\common\<install_dir> in the prefix to the game's folder on
+ * the drive admission found, so Wine sees the game where Steam keeps it. Done
+ * on every start: the drive's number can change. On any failure the game
+ * keeps its Z: paths and still starts. */
+static void steam_view_setup(const char *prefix, const PwGameProfile *game)
+{
+    static const char *const folders[] = { "drive_c/Program Files (x86)", "drive_c/Program Files (x86)/Steam",
+                                           "drive_c/Program Files (x86)/Steam/steamapps", PW_STEAM_COMMON_PREFIX };
+    char host_root[PW_TITLE_SESSION_PATH_SIZE], z_root[PW_APP_PATH_CAPACITY], view_root[PW_APP_PATH_CAPACITY];
+    char path[PW_TITLE_SESSION_PATH_SIZE + 64], next[sizeof(path) + 8];
+    char existing[PW_STEAM_TABLE_MAX], table[PW_STEAM_TABLE_MAX];
+    const char *reason = NULL;
+    ssize_t got = 0;
+    long length;
+    struct stat st;
+    int fd, written;
+
+    steam_z_root[0] = steam_view_root[0] = 0;
+    steam_view_ready = 0;
+    if (!game || !game->steam_install_dir[0]) return;
+    if (pw_title_publication_game_path(title_launch.game_root, title_publication.game_mount, host_root,
+                                       sizeof(host_root)) != 0 || host_root[0] != '/' ||
+        (written = snprintf(z_root, sizeof(z_root), "Z:%s", host_root)) < 0 || (size_t)written >= sizeof(z_root)) {
+        reason = "game root";
+        goto refused;
+    }
+    for (char *c = z_root; *c; c++) if (*c == '/') *c = '\\';
+    if (pw_steam_view_root(game->steam_install_dir, view_root, sizeof(view_root)) != 0) {
+        reason = "install_dir too long";
+        goto refused;
+    }
+    snprintf(steam_z_root, sizeof(steam_z_root), "%s", z_root);
+    snprintf(steam_view_root, sizeof(steam_view_root), "%s", view_root);
+    for (size_t i = 0; i < sizeof(folders) / sizeof(folders[0]); i++) {
+        snprintf(path, sizeof(path), "%s/%s", prefix, folders[i]);
+        if (steam_view_folder(path) != 0) {
+            reason = "steamapps folder";
+            goto refused;
+        }
+    }
+    /* A real folder or file of that name would hide the link. */
+    snprintf(path, sizeof(path), "%s/" PW_STEAM_COMMON_PREFIX "/%s", prefix, game->steam_install_dir);
+    if (lstat(path, &st) == 0 || errno != ENOENT) {
+        reason = "install_dir exists in the prefix";
+        goto refused;
+    }
+    snprintf(path, sizeof(path), "%s/" PW_STEAM_COMMON_PREFIX "/.pw-symlinks", prefix);
+    if ((fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)) >= 0) {
+        got = read(fd, existing, sizeof(existing));
+        close(fd);
+    } else if (errno != ENOENT) {
+        got = -1;
+    }
+    if (got < 0 || (size_t)got >= sizeof(existing) ||
+        (length = pw_steam_view_table(existing, (size_t)got, game->steam_install_dir, host_root, table,
+                                      sizeof(table))) < 0) {
+        reason = "link table";
+        goto refused;
+    }
+    if (length != got || memcmp(existing, table, (size_t)length)) {
+        snprintf(next, sizeof(next), "%s.new", path);
+        fd = open(next, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+        written = fd < 0 ? -1 : (int)write(fd, table, (size_t)length);
+        if (fd >= 0 && close(fd) != 0) written = -1;
+        if (written != (int)length || rename(next, path) != 0) {
+            if (fd >= 0) unlink(next);
+            reason = "link table write";
+            goto refused;
+        }
+    }
+    steam_view_ready = 1;
+    PS5LOG_LOG("PW_WINE64 steam view=%s target=%s", steam_view_root, host_root);
+    return;
+refused:
+    PS5LOG_LOG("PW_WINE64 steam view refused reason=%s install_dir=%s errno=%d", reason, game->steam_install_dir,
+               errno);
+}
+
+/* A Windows path between the Z: and the Steam form; 0 also when it is
+ * outside the game's folder, -1 when the result does not fit. */
+static int steam_view_map(const char *from_root, const char *to_root, char *path, size_t size)
+{
+    char mapped[PW_APP_PATH_CAPACITY];
+
+    if (!steam_view_root[0] || !path[0]) return 0;
+    if (pw_steam_view_map(from_root, to_root, path, mapped, sizeof(mapped) < size ? sizeof(mapped) : size) < 0)
+        return -1;
+    snprintf(path, size, "%s", mapped);
+    return 0;
+}
+
 /* Read and delete the request this chained start came from: the Windows
  * program, its arguments and its working directory, or the program's own
  * folder when that one does not exist (a launcher may name a relative folder
@@ -542,6 +652,12 @@ static int exec_chain_take(const char *prefix, char *executable, size_t executab
             snprintf(exec_chain_cwd, sizeof(exec_chain_cwd), "%s", line + 4);
     }
     if (!version || !image) return -1;
+    /* The game sees itself in steamapps\common: back to the paths admission checked. */
+    if (steam_view_map(steam_view_root, steam_z_root, executable, executable_size) != 0 ||
+        steam_view_map(steam_view_root, steam_z_root, exec_chain_cwd, sizeof(exec_chain_cwd)) != 0) {
+        PS5LOG_LOG("PW_WINE64 chain program path too long for its drive: %s", executable);
+        return -1;
+    }
     {
         char storage[PW_APP_ARGUMENTS_CAPACITY];
         const char *words[PW_WINE_LAUNCH_WORDS];
@@ -1934,6 +2050,7 @@ int main(int argc, char **argv)
         return 1;
     }
     if (per_game_mode) {
+        steam_view_setup(prefix, game);
         snprintf(exec_chain_request, sizeof(exec_chain_request), "%s/.pw-exec-chain", prefix);
         if (exec_chain_depth) {
             if (exec_chain_take(prefix, launch.executable, sizeof(launch.executable)) != 0) {
@@ -2004,6 +2121,12 @@ int main(int argc, char **argv)
             }
             PS5LOG_LOG("PW_WINE64 chain program facts=%s architecture=%s opengl_only=%d", pw_result_name(facts),
                        facts != PW_OK ? "-" : architecture == PW_APP_ARCH_PE32 ? "pe32" : "pe64", opengl_only);
+        }
+        /* Checked as admitted; Wine gets the Steam form (wine_argv[1] is this buffer). */
+        if (steam_view_ready &&
+            steam_view_map(steam_z_root, steam_view_root, launch.executable, sizeof(launch.executable)) != 0) {
+            PS5LOG_LOG("PW_WINE64 steam view keeps exe=%s: too long", launch.executable);
+            steam_view_ready = 0;
         }
     }
     /* [display] refresh and frame_rate: the video output's rate and cap, set
@@ -2490,6 +2613,14 @@ int main(int argc, char **argv)
          * which Wine reads as the process's current directory. */
         const char *working_directory = exec_chain_depth ? exec_chain_cwd :
                                         game ? game->app.working_directory : "";
+        /* In the Steam form the folder is the link's logical path, which Wine
+         * names C:\...\steamapps\common\<install_dir> as the program does. */
+        static char steam_working[PW_APP_PATH_CAPACITY];
+        if (steam_view_ready) {
+            snprintf(steam_working, sizeof(steam_working), "%s", working_directory);
+            if (steam_view_map(steam_z_root, steam_view_root, steam_working, sizeof(steam_working)) == 0)
+                working_directory = steam_working;
+        }
         if (working_directory[0]) {
             int (*set_cwd)(const char *) = (int (*)(const char *))
                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_cwd_set");

@@ -810,6 +810,17 @@ static int use_mount_in(char *text, size_t capacity, char number)
     return 0;
 }
 
+int pw_title_publication_game_path(const char *token_path, const char *mount, char *output, size_t capacity)
+{
+    size_t token = sizeof(usb_token) - 1;
+    if (!token_path || !mount || !output || !capacity) return -1;
+    if (mount[0] && (strncmp(mount, usb_token, token) || mount[token] < '0' || mount[token] >= '0' + USB_MOUNTS ||
+                     mount[token + 1] || strncmp(token_path, usb_token, token) ||
+                     (token_path[token] != '/' && token_path[token])))
+        return -1;
+    return game_path(token_path, mount, output, capacity);
+}
+
 int pw_title_publication_use_game_mount(PwGameProfile *profile, const char *mount,
                                         char *error, size_t error_size)
 {

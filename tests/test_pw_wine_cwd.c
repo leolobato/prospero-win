@@ -147,6 +147,51 @@ static void test_links_on_create(void)
     assert(!rmdir(at_root("prefix/drive_c/game2")) && !__real_unlink(at_root("sink")));
 }
 
+/* A Steam game seen in steamapps\common (src/pw_steam_view.h): a folder link
+ * the title writes in a folder deep in drive_c, pointing at the game outside
+ * the prefix. Nothing has looked below it yet; the program, a folder in it and
+ * the working directory are reached through the c: drive. */
+static void test_folder_link_outside_prefix(void)
+{
+    char table[PATH_MAX * 2], buffer[PW_CWD_PATH_MAX];
+    struct stat st;
+    DIR *dir;
+    int fd;
+
+    assert(!mkdir(at_root("games"), 0777) && !mkdir(at_root("games/257510"), 0777) &&
+           !mkdir(at_root("games/257510/Bin"), 0777));
+    assert((fd = __real_open(at_root("games/257510/Bin/Talos.exe"), O_CREAT | O_WRONLY, 0644)) >= 0 &&
+           !__real_close(fd));
+    assert(!mkdir(at_root("prefix/drive_c/Steam"), 0777) && !mkdir(at_root("prefix/drive_c/Steam/steamapps"), 0777) &&
+           !mkdir(at_root("prefix/drive_c/Steam/steamapps/common"), 0777));
+    snprintf(table, sizeof(table), "The Talos Principle\t%s\n", at_root("games/257510"));
+    write_table("prefix/drive_c/Steam/steamapps/common", table);
+
+    assert(!stat(at_root("prefix/dosdevices/c:/Steam/steamapps/common/The Talos Principle/Bin/Talos.exe"), &st) &&
+           S_ISREG(st.st_mode));
+    assert((fd = open(at_root("prefix/dosdevices/c:/Steam/steamapps/common/The Talos Principle/Bin/Talos.exe"),
+                      O_RDONLY)) >= 0 && !close(fd));
+    assert(!lstat(at_root("prefix/drive_c/Steam/steamapps/common/The Talos Principle"), &st) && S_ISLNK(st.st_mode));
+    assert((dir = opendir(at_root("prefix/dosdevices/c:/Steam/steamapps/common/The Talos Principle/Bin"))) &&
+           !closedir(dir));
+    /* Files the game writes land in its real folder. */
+    assert((fd = open(at_root("prefix/dosdevices/c:/Steam/steamapps/common/The Talos Principle/Bin/Talos.log"),
+                      O_WRONLY | O_CREAT, 0644)) >= 0 && !close(fd));
+    assert(!__real_lstat(at_root("games/257510/Bin/Talos.log"), &st) && S_ISREG(st.st_mode));
+    /* The working directory stays the logical path, so Wine names it on C:. */
+    assert(!chdir(at_root("prefix/dosdevices/c:/Steam/steamapps/common/The Talos Principle/Bin")));
+    assert(getcwd(buffer, sizeof(buffer)) == buffer);
+    assert(!strcmp(buffer, at_root("prefix/dosdevices/c:/Steam/steamapps/common/The Talos Principle/Bin")));
+    assert(!stat("Talos.exe", &st) && S_ISREG(st.st_mode));
+    assert(!chdir("/"));
+
+    assert(!unlink(at_root("games/257510/Bin/Talos.log")) && !unlink(at_root("games/257510/Bin/Talos.exe")));
+    assert(!rmdir(at_root("games/257510/Bin")) && !rmdir(at_root("games/257510")) && !rmdir(at_root("games")));
+    remove_table("prefix/drive_c/Steam/steamapps/common");
+    assert(!rmdir(at_root("prefix/drive_c/Steam/steamapps/common")) &&
+           !rmdir(at_root("prefix/drive_c/Steam/steamapps")) && !rmdir(at_root("prefix/drive_c/Steam")));
+}
+
 static void test_fold(void)
 {
     char out[PW_CWD_PATH_MAX], small[8];
@@ -495,6 +540,7 @@ int main(void)
     }
 
     test_links_on_create();
+    test_folder_link_outside_prefix();
 
     /* chdir() refusals and getcwd() buffers. */
     errno = 0;

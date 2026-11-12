@@ -109,6 +109,11 @@ int pw_title_publication_open(
 int pw_title_publication_use_game_mount(PwGameProfile *profile, const char *mount,
                                         char *error, size_t error_size);
 
+/* The host path of a published token path (the descriptor's game_root) on the
+ * drive found at admission (/mnt/usbN, or empty for none). 0, or -1 for an
+ * invalid mount or when it does not fit. */
+int pw_title_publication_game_path(const char *token_path, const char *mount, char *output, size_t capacity);
+
 #ifdef __cplusplus
 }
 #endif
