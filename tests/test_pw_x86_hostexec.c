@@ -99,6 +99,60 @@ static void test_integer_forms(void)
     s.gpr[4] = addr(0x7ffc);
     assert(run(&s, (const uint8_t[]){0x8f, 0x04, 0x24}, 3) == PW_OK);
     assert(!memcmp(guest + 0x8000, &(uint32_t){0x13572468}, 4));
+    /* 66 FF 74 8B 02 / 66 8F 03: push word [ebx+ecx*4+2] and pop word [ebx]
+     * move two bytes and ESP by 2, as Watcom code builds a far pointer;
+     * the stack's neighbouring bytes stay as they were. */
+    reset_state(&s);
+    s.gpr[3] = addr(0x300);
+    s.gpr[1] = 1;
+    memcpy(guest + 0x304, &(uint32_t){0xbeefcafe}, 4);
+    memcpy(guest + 0x7ffc, &(uint32_t){0xa5a5a5a5u}, 4);
+    assert(run(&s, (const uint8_t[]){0x66, 0xff, 0x74, 0x8b, 0x02}, 5) == PW_OK);
+    assert(s.gpr[4] == addr(0x7ffe) && s.eip == 0x1005);
+    assert(!memcmp(guest + 0x7ffc, &(uint32_t){0xbeefa5a5u}, 4));
+    assert(run(&s, (const uint8_t[]){0x66, 0x8f, 0x03}, 3) == PW_OK);
+    assert(s.gpr[4] == addr(0x8000) && s.eip == 0x1008);
+    assert(!memcmp(guest + 0x300, &(uint16_t){0xbeef}, 2));
+    /* The prefix order doesn't matter: 64 66 FF 35 pushes the word at fs:[0]. */
+    memcpy(guest + 0x4000, &(uint32_t){0x12345678}, 4);
+    assert(run(&s, (const uint8_t[]){0x64, 0x66, 0xff, 0x35, 0, 0, 0, 0}, 8) == PW_OK);
+    assert(s.gpr[4] == addr(0x7ffe) && !memcmp(guest + 0x7ffe, &(uint16_t){0x5678}, 2));
+    /* 66 64 in the other order pops it back to fs:[2]. */
+    assert(run(&s, (const uint8_t[]){0x66, 0x64, 0x8f, 0x05, 2, 0, 0, 0}, 8) == PW_OK);
+    assert(s.gpr[4] == addr(0x8000) && !memcmp(guest + 0x4000, &(uint32_t){0x56785678}, 4));
+    /* With ESP as the base: push word [esp] reads at the old ESP; pop word
+     * [esp] writes at the incremented one, leaving the popped slot alone. */
+    reset_state(&s);
+    s.eflags = 0x2 | 0x41;
+    s.gpr[4] = addr(0x7ff0);
+    memcpy(guest + 0x7fec, &(uint64_t){0x8877665544332211ull}, 8);
+    assert(run(&s, (const uint8_t[]){0x66, 0xff, 0x34, 0x24}, 4) == PW_OK);
+    assert(s.gpr[4] == addr(0x7fee) && s.eip == 0x1004 && s.eflags == (0x2 | 0x41));
+    assert(!memcmp(guest + 0x7fec, &(uint64_t){0x8877665566552211ull}, 8));
+    memcpy(guest + 0x7fee, &(uint16_t){0xbeef}, 2);
+    assert(run(&s, (const uint8_t[]){0x66, 0x8f, 0x04, 0x24}, 4) == PW_OK);
+    assert(s.gpr[4] == addr(0x7ff0) && s.eip == 0x1008 && s.eflags == (0x2 | 0x41));
+    assert(!memcmp(guest + 0x7fec, &(uint64_t){0x8877beefbeef2211ull}, 8));   /* [old ESP+2] = beef */
+    /* 67 64 66 FF 36 0000 / 67 64 66 8F 06 0000: the [disp16] forms push and
+     * pop a word too, and EIP moves by the original length. */
+    reset_state(&s);
+    memcpy(guest + 0x4000, &(uint32_t){0xaabbccdd}, 4);
+    memcpy(guest + 0x7ffc, &(uint32_t){0x11111111}, 4);
+    assert(run(&s, (const uint8_t[]){0x67, 0x64, 0x66, 0xff, 0x36, 0x00, 0x00}, 7) == PW_OK);
+    assert(s.gpr[4] == addr(0x7ffe) && s.eip == 0x1007);
+    assert(!memcmp(guest + 0x7ffc, &(uint32_t){0xccdd1111u}, 4));
+    memcpy(guest + 0x7ffe, &(uint16_t){0x4242}, 2);
+    assert(run(&s, (const uint8_t[]){0x67, 0x64, 0x66, 0x8f, 0x06, 0x00, 0x00}, 7) == PW_OK);
+    assert(s.gpr[4] == addr(0x8000) && s.eip == 0x100e);
+    assert(!memcmp(guest + 0x4000, &(uint32_t){0xaabb4242u}, 4));
+    /* Still refused, with the state untouched: a 16-bit [bx+si] address,
+     * a register form and a GS override. */
+    {
+        PwX86State before = s;
+        assert(run(&s, (const uint8_t[]){0x67, 0x66, 0xff, 0x30}, 4) == PW_ERR_UNSUPPORTED);
+        assert(run(&s, (const uint8_t[]){0x66, 0x65, 0xff, 0x30}, 4) == PW_ERR_UNSUPPORTED);
+        assert(!memcmp(&before, &s, sizeof(s)));
+    }
 
     /* 9C/9D: pushfd stores the guest flags with bit 1 and IF; the CPUID
      * probe (pushfd; pushfd; btc [esp], 21; popfd; pushfd; pop eax) sees ID
