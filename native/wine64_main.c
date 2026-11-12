@@ -2628,6 +2628,13 @@ int main(int argc, char **argv)
             int mapped = pw_wine_launch_host_dir(prefix, working_directory, host_dir,
                                                  sizeof(host_dir));
             int cwd_status = set_cwd && mapped == 0 ? set_cwd(host_dir) : -1;
+            /* Wine reads its starting directory back after entering the
+             * prefix: it opens ".", and fchdir() to that descriptor gives the
+             * folder a virtual link leads to (/data/... on Z:), not the
+             * steamapps\common path set above. Wine prefers PWD when it names
+             * the same directory, as it does for a Unix symlink, and keeps it
+             * out of the game's environment. */
+            if (cwd_status == 0) setenv("PWD", host_dir, 1);
             PS5LOG_LOG("PW_WINE64 cwd=%s host=%s status=%d", working_directory,
                        mapped == 0 ? host_dir : "-", cwd_status);
         }
