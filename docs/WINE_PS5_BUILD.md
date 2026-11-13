@@ -46,6 +46,43 @@ carries the math functions, so the build supplies an empty `libm.a` for the
 `-lm` that win32u requests, and links LLVM `libunwind` for
 `_Unwind_Find_FDE`.
 
+### Build time and reproducible output
+
+The patched PE modules of both architectures build in one `make` run, so
+`--jobs` applies across modules and the import libraries they need, not
+only inside one module.
+
+The PE output depends only on the inputs:
+
+- The assembler gets the work folder's prefix map as well
+  (`-Wa,--debug-prefix-map`). It takes the first matching map, so without
+  this a broader map from a compiler wrapper could put the work folder's
+  name into the debug information of assembled sources, and from there into
+  the CodeView GUID.
+- The linker stamps `SOURCE_DATE_EPOCH` as the PE time. The default is the
+  pinned Wine commit's time; a caller can set its own.
+
+So two builds of the same inputs give byte-identical `.prx` and PE files in
+any work folder, and two builds can be compared module by module to find
+what a change touched.
+
+A successful build from a clean checkout writes `<work>/input-key`: one
+hash of everything the build reads (this checkout's tree, the Wine commit,
+the SDK, the host tools, the compilers and any wrappers in front of them,
+the PRX foundation's tool, the Vulkan driver, the media and TLS roots,
+`CFLAGS` and the PE time). `<work>/input-key.txt` lists what was hashed.
+`--print-input-key`, with the same arguments as the build, prints the key
+and builds nothing, so a finished work folder with the same key can be used
+instead of building again:
+
+~~~sh
+key=$(tools/build_wine_ps5.sh --print-input-key <build arguments>)
+grep -lx "$key" <work folders>/*/input-key
+~~~
+
+A checkout with uncommitted or untracked changes has no input key. Build a
+release in a fresh work folder, without reuse.
+
 ## Patch series
 
 `wine/patches/NNNN-name.patch` files are mail-formatted patches applied with

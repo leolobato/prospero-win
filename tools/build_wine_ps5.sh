@@ -54,8 +54,25 @@
 # travel with the modules for tools/package_release.sh. Without the TLS
 # build Wine is configured --without-gnutls, as before.
 #
+# The PE modules build in one make run, so they share the jobs instead of
+# building one module at a time. They are reproducible: the assembler gets
+# the work folder's prefix map too (an earlier, broader map from a compiler
+# wrapper would win there otherwise, since the assembler takes the first
+# match), and the linker stamps SOURCE_DATE_EPOCH, by default the pinned
+# Wine commit's time, instead of the time of the build. A build of the same
+# inputs in any work folder gives the same bytes, so builds can be compared
+# module by module.
+#
+# Input key: a successful build from a clean checkout writes
+# <work>/input-key, a hash of everything the build reads (this checkout's
+# tree, the Wine commit, the SDK, the host tools, the compilers, the PRX
+# foundation, the Vulkan driver, the media and TLS roots), and the material
+# it hashes to <work>/input-key.txt. --print-input-key prints the key for
+# the given arguments and builds nothing, so a caller can reuse a finished
+# work folder whose input-key matches instead of building it again.
+#
 # Usage:
-#   tools/build_wine_ps5.sh [--check-patches] [--patches DIR] [--work DIR]
+#   tools/build_wine_ps5.sh [--check-patches] [--print-input-key] [--patches DIR] [--work DIR]
 #       [--source DIR] [--host-tools DIR] [--foundation DIR] [--sdk DIR]
 #       [--prx-foundation DIR] [--ps5vk-sdk DIR | --radv DIR] [--media-root DIR] [--jobs N]
 set -eu
@@ -145,11 +162,13 @@ radv=${PROSPERO_RADV:-}
 media_root=${PROSPERO_MEDIA_ROOT:-}
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 check_only=0
+print_key=0
 
 fail() { echo "build_wine_ps5: $*" >&2; exit 1; }
 while [ $# -gt 0 ]; do
     case $1 in
     --check-patches) check_only=1 ;;
+    --print-input-key) print_key=1 ;;
     --patches) patches=$2; shift ;;
     --work) work=$2; shift ;;
     --source) source_dir=$2; shift ;;
@@ -204,8 +223,75 @@ sdk=${sdk:-$foundation/.deps/native/ps5-payload-sdk}
 [ "$(git -C "$source_dir" rev-parse HEAD 2>/dev/null)" = "$WINE_COMMIT" ] ||
     fail "$source_dir is not the pinned Wine revision $WINE_COMMIT"
 
+# The PE link time: the caller's SOURCE_DATE_EPOCH, or the pinned Wine
+# commit's time, so the bytes depend on the inputs, not on the clock.
+pe_epoch=${SOURCE_DATE_EPOCH:-$(git -C "$source_dir" log -1 --format=%ct "$WINE_COMMIT")}
+
+# digest PATH...: one hash of each file, or of every file under each
+# directory (names relative to it, contents, in a fixed order); an absent
+# PATH counts as absent.
+digest() {
+    for dir in "$@"; do
+        if [ -f "$dir" ]; then
+            sha256sum < "$dir"
+        elif [ -d "$dir" ]; then
+            (cd "$dir" && find -L . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum)
+        else
+            echo "absent"
+        fi
+    done | sha256sum | cut -c1-64
+}
+# tool_id COMMAND: the file it runs (a wrapper counts: it can add flags) and
+# its version.
+tool_id() {
+    path=$(command -v "$1" 2>/dev/null) || { echo "$1 absent"; return; }
+    printf '%s %s %s\n' "$1" "$(sha256sum < "$path" | cut -c1-64)" "$("$path" --version 2>&1 | head -n 1)"
+}
+# The input key's material, or nothing when this checkout has changes git
+# does not record (they would not be in the tree hash).
+input_material() {
+    [ -z "$(git -C "$root" status --porcelain 2>/dev/null)" ] || return 0
+    tree=$(git -C "$root" rev-parse 'HEAD^{tree}' 2>/dev/null) || return 0
+    key_prx_foundation=${prx_foundation:-$foundation}
+    key_tls=${PROSPERO_TLS_ROOT:-$work/tls/root}
+    key_ca=${PROSPERO_CA_BUNDLE:-$key_tls/ca-certificates.crt}
+    echo "build_wine_ps5 input key 1"
+    echo "tree $tree"
+    echo "wine $WINE_COMMIT"
+    echo "patches $(digest "$patches")"
+    echo "sdk $(digest "$sdk/bin" "$sdk/target" "$sdk/ldscripts")"
+    tool_id "$sdk/bin/prospero-clang"
+    echo "host-tools $(digest "$host_tools/tools")"
+    tool_id i686-w64-mingw32-gcc
+    tool_id x86_64-w64-mingw32-gcc
+    tool_id i686-w64-mingw32-ld
+    tool_id x86_64-w64-mingw32-ld
+    tool_id make
+    tool_id python3
+    echo "prx-tool $(digest "$key_prx_foundation/build/host/ps5-native-tool" "$key_prx_foundation/tooling/native/ps5-pie.ld")"
+    if [ -n "$ps5vk_sdk" ]; then
+        echo "ps5vk $(digest "$ps5vk_sdk/lib")"
+    elif [ -n "$radv" ]; then
+        echo "radv $(digest "$radv/.deps/native/radv-release" "$radv/.deps/native/ps5-payload-sdk/bin" "$radv/tools" "$radv/vendor/ps5/sdk/stubs")"
+    fi
+    [ -z "$media_root" ] || echo "media $(digest "$media_root")"
+    echo "tls $(digest "$key_tls") ca $(digest "$key_ca")"
+    echo "cflags ${CFLAGS-default}"
+    echo "epoch $pe_epoch"
+    echo "host $(uname -sm)"
+}
+material=$(input_material)
+input_key=
+[ -z "$material" ] || input_key=$(printf '%s\n' "$material" | sha256sum | cut -c1-64)
+if [ "$print_key" -eq 1 ]; then
+    [ -n "$input_key" ] || fail "$root has uncommitted changes: no input key"
+    printf '%s\n' "$input_key"
+    exit 0
+fi
+
 # A private copy keeps the shared checkout pristine for the host build.
 mkdir -p "$work"
+rm -f "$work/input-key" "$work/input-key.txt"
 
 # FreeType, once per pinned release: a static archive for configure and the
 # objects the PRX stage links. PROSPERO_FREETYPE_TARBALL names a local copy.
@@ -377,8 +463,13 @@ for step in "dlls/ntdll/ntdll.so|$heap $dmem" "dlls/win32u/win32u.so|" "server/w
     make -C "$build" -k -j"$jobs" LDFLAGS="$objects $base" "$target" \
         >> "$work/make.log" 2>&1 || status=$?
 done
-# The patched PE modules, built by the PE cross compilers into <work>/pe.
+# The patched PE modules, built by the PE cross compilers into <work>/pe:
+# one make run for both architectures, so modules and the import libraries
+# they need build side by side.
 rm -rf "$work/pe"
+pe_cflags="$cflags -Wa,--debug-prefix-map=$work=/build/prospero-wine"
+[ -z "$media_root" ] || pe_cflags="$pe_cflags -Wa,--debug-prefix-map=$media_root=/build/media"
+pe_targets=
 for arch in i386 x86_64; do
     mkdir -p "$work/pe/$arch-windows"
     modules="$PE_MODULES"
@@ -386,10 +477,16 @@ for arch in i386 x86_64; do
     for module in $modules; do
         file=$module
         case $module in *.*) ;; *) file=$module.dll ;; esac
-        target=dlls/$module/$arch-windows/$file
-        make -C "$build" -k -j"$jobs" "${arch}_CFLAGS=$cflags" "$target" >> "$work/make.log" 2>&1 || status=$?
-        [ ! -f "$build/$target" ] || cp "$build/$target" "$work/pe/$arch-windows/"
+        pe_targets="$pe_targets dlls/$module/$arch-windows/$file"
     done
+done
+# shellcheck disable=SC2086
+SOURCE_DATE_EPOCH=$pe_epoch make -C "$build" -k -j"$jobs" "i386_CFLAGS=$pe_cflags" "x86_64_CFLAGS=$pe_cflags" \
+    $pe_targets >> "$work/make.log" 2>&1 || status=$?
+for target in $pe_targets; do
+    arch_dir=${target#dlls/*/}
+    arch_dir=${arch_dir%%/*}
+    [ ! -f "$build/$target" ] || cp "$build/$target" "$work/pe/$arch_dir/"
 done
 
 # The PRX link. Each module takes the objects of its ELF link (read back
@@ -833,4 +930,11 @@ then title_status=0; else title_status=$?; fi
 [ "$title_status" -ne 4 ] ||
     echo "build_wine_ps5: WARNING: PRX executes raw syscalls, which kill a title" >&2
 [ "$prx_status" != 1 ] || fail "PRX link failed; see $prx/*.link.log"
+if [ -n "$input_key" ]; then
+    printf '%s\n' "$material" > "$work/input-key.txt"
+    printf '%s\n' "$input_key" > "$work/input-key"
+    echo "input key: $input_key"
+else
+    echo "input key: none ($root has uncommitted changes)"
+fi
 echo "report: $work/report.json"

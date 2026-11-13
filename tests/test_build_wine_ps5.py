@@ -44,16 +44,31 @@ build=$PW_PE_BUILD
 work=$PW_PE_WORK
 jobs=1
 cflags="-O2 -ffile-prefix-map=$work=/build/prospero-wine"
+media_root=
+pe_epoch=1234567890
 status=0
+# A make that builds every target it is given except PW_PE_FAIL_TARGET, as
+# -k does, and fails if one failed.
 make() {
-    for option in "$@"; do
-        case "$option" in *_CFLAGS=*) printf '%s\n' "$option" >> "$work/cflags";; esac
+    printf '%s\n' "${SOURCE_DATE_EPOCH:-unset}" >> "$work/calls"
+    result=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        -C) shift ;;
+        *_CFLAGS=*) printf '%s\n' "$1" >> "$work/cflags" ;;
+        -*) ;;
+        *)
+            printf '%s\n' "$1" >> "$work/requests"
+            if [ "$1" = "${PW_PE_FAIL_TARGET:-}" ]; then
+                result=17
+            else
+                mkdir -p "$build/$(dirname "$1")"
+                printf 'MZfresh:%s' "$1" > "$build/$1"
+            fi ;;
+        esac
+        shift
     done
-    for target in "$@"; do :; done
-    printf '%s\n' "$target" >> "$work/requests"
-    if [ "$target" = "${PW_PE_FAIL_TARGET:-}" ]; then return 17; fi
-    mkdir -p "$build/$(dirname "$target")"
-    printf 'MZfresh:%s' "$target" > "$build/$target"
+    return $result
 }
 """
         script = setup + modules + block + '\nprintf "%s" "$status" > "$work/status"\n'
@@ -62,8 +77,12 @@ make() {
         assert not stale.exists()
         requests = (work / 'requests').read_text().splitlines()
         compile_flags = (work / 'cflags').read_text().splitlines()
+        # One make run for every module of both architectures, linked at the
+        # pinned epoch, and the assembler gets the work folder's map too.
+        assert (work / 'calls').read_text().splitlines() == ['1234567890']
         for arch in ('i386', 'x86_64'):
-            assert f'{arch}_CFLAGS=-O2 -ffile-prefix-map={work}=/build/prospero-wine' in compile_flags
+            assert (f'{arch}_CFLAGS=-O2 -ffile-prefix-map={work}=/build/prospero-wine '
+                    f'-Wa,--debug-prefix-map={work}=/build/prospero-wine') in compile_flags
         for arch in ('i386', 'x86_64'):
             target = f'dlls/winevulkan/{arch}-windows/winevulkan.dll'
             assert requests.count(target) == 1
@@ -79,11 +98,81 @@ make() {
         assert (work / 'status').read_text() == '0'
         failed = 'dlls/winevulkan/i386-windows/winevulkan.dll'
         (build / failed).unlink()
+        (work / 'calls').unlink()
         env['PW_PE_FAIL_TARGET'] = failed
         result = subprocess.run(['sh'], input=script, env=env, capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
         assert (work / 'status').read_text() == '17'
         assert not (work / 'pe/i386-windows/winevulkan.dll').exists()
+        # The other modules still build and are staged.
+        assert (work / 'pe/x86_64-windows/winevulkan.dll').exists()
+        assert (work / 'pe/i386-windows/rtworkq.dll').exists()
+
+
+def check_input_key() -> None:
+    # Execute the real input-key stanza against a scratch checkout and scratch
+    # inputs: the key is stable, follows every input it hashes, and is absent
+    # while the checkout has changes git does not record.
+    text = SCRIPT.read_text()
+    start = text.index('pe_epoch=${SOURCE_DATE_EPOCH')
+    block = text[start:text.index('if [ "$print_key" -eq 1 ]; then', start)]
+    with tempfile.TemporaryDirectory() as directory:
+        base = Path(directory)
+        root, sdk, tools, media = base / 'root', base / 'sdk', base / 'host/tools', base / 'media'
+        for path in (root, sdk / 'bin', sdk / 'target', tools, media):
+            path.mkdir(parents=True)
+        clang = sdk / 'bin/prospero-clang'
+        clang.write_text('#!/bin/sh\necho "clang version 18.1.8"\n'); clang.chmod(0o755)
+        (sdk / 'target/libc.a').write_bytes(b'libc')
+        (tools / 'winebuild').write_bytes(b'winebuild')
+        (media / 'libgst.a').write_bytes(b'gst')
+        env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        env.update(GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t', GIT_COMMITTER_NAME='t',
+                   GIT_COMMITTER_EMAIL='t@t', GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
+                   SOURCE_DATE_EPOCH='1234567890')
+        env.pop('CFLAGS', None)
+        def git(*args: str) -> None:
+            subprocess.run(['git', '-C', str(root), *args], env=env, check=True, capture_output=True)
+        git('init', '-q'); (root / 'a.txt').write_text('a'); git('add', 'a.txt'); git('commit', '-q', '-m', 'a')
+        setup = f"""
+set -eu
+fail() {{ echo "$*" >&2; exit 1; }}
+root={shlex.quote(str(root))}
+WINE_COMMIT=490f6d5dcbb2a5047345b8af88d114bbcaad69a8
+source_dir=/absent
+patches={shlex.quote(str(root))}
+sdk={shlex.quote(str(sdk))}
+host_tools={shlex.quote(str(base / 'host'))}
+foundation=/absent
+prx_foundation=
+ps5vk_sdk=
+radv=
+media_root={shlex.quote(str(media))}
+work={shlex.quote(str(base / 'work'))}
+"""
+        script = setup + block + 'printf "%s" "$input_key"\n'
+        def key() -> str:
+            result = subprocess.run(['sh'], input=script, env=env, capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            return result.stdout
+        first = key()
+        assert len(first) == 64 and key() == first
+        changes = [lambda: (sdk / 'target/libc.a').write_bytes(b'libc2'),
+                   lambda: (tools / 'winebuild').write_bytes(b'winebuild2'),
+                   lambda: (media / 'libgst.a').write_bytes(b'gst2'),
+                   lambda: env.update(CFLAGS='-O3'),
+                   lambda: env.update(SOURCE_DATE_EPOCH='1'),
+                   lambda: ((root / 'a.txt').write_text('b'), git('commit', '-q', '-am', 'b'))]
+        seen = {first}
+        for change in changes:
+            change()
+            now = key()
+            assert len(now) == 64 and now not in seen, change
+            seen.add(now)
+        (root / 'a.txt').write_text('dirty')
+        assert key() == ''
+        (root / 'a.txt').write_text('b'); (root / 'new.txt').write_text('untracked')
+        assert key() == ''
 
 
 def check_prx_foundation_gate() -> None:
@@ -135,6 +224,7 @@ def main() -> int:
     check_memory_status()
     check_vk_runtime_staging()
     check_patched_pe_staging()
+    check_input_key()
     check_prx_foundation_gate()
     # The committed series itself.
     result = subprocess.run(["sh", str(SCRIPT), "--check-patches"], capture_output=True, text=True)
