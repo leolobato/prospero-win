@@ -260,6 +260,31 @@ tool_id() {
     path=$(command -v "$1" 2>/dev/null) || { echo "$1 absent"; return; }
     printf '%s %s %s\n' "$1" "$(sha256sum < "$path" | cut -c1-64)" "$("$path" --version 2>&1 | head -n 1)"
 }
+# compiler_id COMMAND: tool_id, every program the driver runs for a compile
+# (its -### lines), and its own headers and runtime: clang's resource folder,
+# or gcc's libgcc folder, target folder, assembler and linker.
+compiler_id() {
+    tool_id "$1"
+    path=$(command -v "$1" 2>/dev/null) || return 0
+    "$path" -### -c -x c /dev/null -o /dev/null 2>&1 |
+        sed -n 's|^ "\{0,1\}\(/[^" ]*\).*|\1|p' | while IFS= read -r program; do
+            echo "runs $program $(digest "$program")"
+        done
+    if "$path" --version 2>&1 | head -n 1 | grep -q clang; then
+        echo "resource $(digest "$("$path" -print-resource-dir 2>/dev/null)")"
+    else
+        echo "libgcc $(digest "$(dirname "$("$path" -print-libgcc-file-name 2>/dev/null)")")"
+        echo "target $(digest "$(dirname "$path")/../$("$path" -dumpmachine 2>/dev/null)")"
+        for program in as ld; do
+            program=$("$path" -print-prog-name=$program 2>/dev/null) || program=absent
+            case $program in
+            /*) ;;
+            *) program=$(command -v "$program" 2>/dev/null) || program=absent ;;
+            esac
+            echo "$program $(digest "$program")"
+        done
+    fi
+}
 # The input key's material, or nothing when this checkout has changes git
 # does not record (they would not be in the tree hash).
 input_material() {
@@ -273,10 +298,10 @@ input_material() {
     echo "wine $WINE_COMMIT"
     echo "patches $(digest "$patches")"
     echo "sdk $(digest "$sdk/bin" "$sdk/target" "$sdk/ldscripts")"
-    tool_id "$sdk/bin/prospero-clang"
+    compiler_id "$sdk/bin/prospero-clang"
     echo "host-tools $(digest "$host_tools/tools")"
-    tool_id i686-w64-mingw32-gcc
-    tool_id x86_64-w64-mingw32-gcc
+    compiler_id i686-w64-mingw32-gcc
+    compiler_id x86_64-w64-mingw32-gcc
     tool_id i686-w64-mingw32-ld
     tool_id x86_64-w64-mingw32-ld
     tool_id make
@@ -285,11 +310,13 @@ input_material() {
     if [ -n "$ps5vk_sdk" ]; then
         echo "ps5vk $(digest "$ps5vk_sdk/lib")"
     elif [ -n "$radv" ]; then
-        echo "radv $(digest "$radv/.deps/native/radv-release" "$radv/.deps/native/ps5-payload-sdk/bin" "$radv/tools" "$radv/vendor/ps5/sdk/stubs")"
+        echo "radv $(digest "$radv/.deps/native/radv-release" "$radv/.deps/native/ps5-payload-sdk" "$radv/tools" "$radv/vendor/ps5/sdk/stubs")"
     fi
     [ -z "$media_root" ] || echo "media $(digest "$media_root")"
     echo "tls $(digest "$key_tls") ca $(digest "$key_ca")"
     echo "cflags ${CFLAGS-default}"
+    # What the compilers and linkers also read from the environment.
+    echo "env $(env | LC_ALL=C sort | grep -E '^(CPATH|C_INCLUDE_PATH|CPLUS_INCLUDE_PATH|LIBRARY_PATH|GCC_EXEC_PREFIX|COMPILER_PATH|CPPFLAGS|LDFLAGS|LD_LIBRARY_PATH)=' | tr '\n' ' ' || true)"
     echo "ccache $ccache"
     echo "epoch $pe_epoch"
     echo "host $(uname -sm)"
@@ -973,10 +1000,15 @@ then title_status=0; else title_status=$?; fi
 [ "$title_status" -ne 4 ] ||
     echo "build_wine_ps5: WARNING: PRX executes raw syscalls, which kill a title" >&2
 [ "$prx_status" != 1 ] || fail "PRX link failed; see $prx/*.link.log"
-if [ -n "$input_key" ]; then
+[ "$title_status" -eq 0 ] || [ "$title_status" -eq 4 ] || fail "report failed (status $title_status)"
+# Only a complete build gets an input key: one whose PRX link was skipped
+# lacks the modules a reuse would look for.
+if [ -n "$input_key" ] && [ "$prx_status" = 0 ]; then
     printf '%s\n' "$material" > "$work/input-key.txt"
     printf '%s\n' "$input_key" > "$work/input-key"
     echo "input key: $input_key"
+elif [ -n "$input_key" ]; then
+    echo "input key: none (PRX link $prx_status)"
 else
     echo "input key: none ($root has uncommitted changes)"
 fi

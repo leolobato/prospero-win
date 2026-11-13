@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -122,9 +123,45 @@ def check_input_key() -> None:
         root, sdk, tools, media = base / 'root', base / 'sdk', base / 'host/tools', base / 'media'
         for path in (root, sdk / 'bin', sdk / 'target', tools, media):
             path.mkdir(parents=True)
+        # A clang driver: its resource folder holds its headers; -### names what it runs.
+        resource, real_clang = base / 'clang/resource', base / 'clang/bin/clang'
+        resource.mkdir(parents=True); real_clang.parent.mkdir(parents=True)
+        (resource / 'stddef.h').write_text('a'); real_clang.write_text('clang-1')
         clang = sdk / 'bin/prospero-clang'
-        clang.write_text('#!/bin/sh\necho "clang version 18.1.8"\n'); clang.chmod(0o755)
+        clang.write_text('#!/bin/sh\ncase "$1" in\n'
+                         '--version) echo "clang version 18.1.8" ;;\n'
+                         f'-print-resource-dir) echo {resource} ;;\n'
+                         f'-###) echo \' "{real_clang}" "-cc1"\' >&2 ;;\nesac\n')
+        clang.chmod(0o755)
         (sdk / 'target/libc.a').write_bytes(b'libc')
+        # A MinGW gcc in the GNU cross layout: bin/, lib/gcc/<triple>/<version>, <triple>/.
+        gcc_root = base / 'mingw'
+        gcc_lib = gcc_root / 'lib/gcc/x86_64-w64-mingw32/13'
+        for path in (gcc_root / 'bin', gcc_lib, gcc_root / 'x86_64-w64-mingw32/lib'):
+            path.mkdir(parents=True)
+        (gcc_lib / 'cc1').write_text('cc1'); (gcc_lib / 'libgcc.a').write_text('libgcc')
+        (gcc_root / 'x86_64-w64-mingw32/lib/libmsvcrt.a').write_text('crt')
+        for name in ('x86_64-w64-mingw32-as', 'x86_64-w64-mingw32-ld'):
+            (gcc_root / 'bin' / name).write_text(name)
+        gcc = gcc_root / 'bin/x86_64-w64-mingw32-gcc'
+        gcc.write_text('#!/bin/sh\ncase "$1" in\n'
+                       '--version) echo "x86_64-w64-mingw32-gcc (GCC) 13" ;;\n'
+                       f'-print-libgcc-file-name) echo {gcc_lib}/libgcc.a ;;\n'
+                       '-dumpmachine) echo x86_64-w64-mingw32 ;;\n'
+                       f'-print-prog-name=as) echo {gcc_root}/bin/x86_64-w64-mingw32-as ;;\n'
+                       f'-print-prog-name=ld) echo {gcc_root}/bin/x86_64-w64-mingw32-ld ;;\n'
+                       f'-###) echo \' {gcc_lib}/cc1 -quiet\' >&2 ;;\nesac\n')
+        gcc.chmod(0o755)
+        radv_sdk = base / 'radv/.deps/native/ps5-payload-sdk/target/lib'
+        radv_sdk.mkdir(parents=True); (radv_sdk / 'libkernel.so').write_text('stub')
+        # Only the tools the stanza needs, so the real compilers on this machine are not hashed.
+        path_dir = base / 'path'
+        path_dir.mkdir()
+        for tool in ('sh', 'git', 'sha256sum', 'find', 'sort', 'xargs', 'cut', 'sed', 'head', 'cat', 'uname',
+                     'grep', 'tr', 'dirname', 'env', 'printf'):
+            found = shutil.which(tool)
+            if found:
+                (path_dir / tool).symlink_to(found)
         (tools / 'winebuild').write_bytes(b'winebuild')
         (media / 'libgst.a').write_bytes(b'gst')
         env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
@@ -132,6 +169,9 @@ def check_input_key() -> None:
                    GIT_COMMITTER_EMAIL='t@t', GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
                    SOURCE_DATE_EPOCH='1234567890')
         env.pop('CFLAGS', None)
+        env['PATH'] = f'{gcc_root / "bin"}:{path_dir}'
+        for name in ('CPATH', 'C_INCLUDE_PATH', 'LIBRARY_PATH', 'LDFLAGS', 'CPPFLAGS'):
+            env.pop(name, None)
         def git(*args: str) -> None:
             subprocess.run(['git', '-C', str(root), *args], env=env, check=True, capture_output=True)
         git('init', '-q'); (root / 'a.txt').write_text('a'); git('add', 'a.txt'); git('commit', '-q', '-m', 'a')
@@ -147,7 +187,7 @@ host_tools={shlex.quote(str(base / 'host'))}
 foundation=/absent
 prx_foundation=
 ps5vk_sdk=
-radv=
+radv={shlex.quote(str(base / 'radv'))}
 media_root={shlex.quote(str(media))}
 work={shlex.quote(str(base / 'work'))}
 ccache=${{PW_CCACHE:-0}}
@@ -165,6 +205,15 @@ ccache=${{PW_CCACHE:-0}}
                    lambda: env.update(CFLAGS='-O3'),
                    lambda: env.update(SOURCE_DATE_EPOCH='1'),
                    lambda: env.update(PW_CCACHE='1'),
+                   lambda: (resource / 'stddef.h').write_text('b'),
+                   lambda: real_clang.write_text('clang-2'),
+                   lambda: (gcc_lib / 'cc1').write_text('cc1-2'),
+                   lambda: (gcc_lib / 'libgcc.a').write_text('libgcc-2'),
+                   lambda: (gcc_root / 'x86_64-w64-mingw32/lib/libmsvcrt.a').write_text('crt-2'),
+                   lambda: (gcc_root / 'bin/x86_64-w64-mingw32-as').write_text('as-2'),
+                   lambda: (gcc_root / 'bin/x86_64-w64-mingw32-ld').write_text('ld-2'),
+                   lambda: (radv_sdk / 'libkernel.so').write_text('stub-2'),
+                   lambda: env.update(CPATH='/x'),
                    lambda: ((root / 'a.txt').write_text('b'), git('commit', '-q', '-am', 'b'))]
         seen = {first}
         for change in changes:
@@ -176,6 +225,34 @@ ccache=${{PW_CCACHE:-0}}
         assert key() == ''
         (root / 'a.txt').write_text('b'); (root / 'new.txt').write_text('untracked')
         assert key() == ''
+
+
+def check_input_key_publication() -> None:
+    # Execute the real closing stanza: only a complete build (make, report and
+    # PRX link all good) writes <work>/input-key; a failed report stops.
+    text = SCRIPT.read_text()
+    start = text.index('[ "$status" -eq 0 ] || fail "build failed')
+    block = text[start:text.index('echo "report: $work/report.json"', start)]
+    with tempfile.TemporaryDirectory() as directory:
+        work = Path(directory)
+        def run(prx_status: str, title_status: int, key: str = 'k' * 64) -> subprocess.CompletedProcess[str]:
+            for name in ('input-key', 'input-key.txt'):
+                (work / name).unlink(missing_ok=True)
+            script = (f'set -eu\nfail() {{ echo "$*" >&2; exit 1; }}\nwork={shlex.quote(str(work))}\n'
+                      f'root=/r\nprx=/p\nstatus=0\ntitle_status={title_status}\n'
+                      f'prx_status={shlex.quote(prx_status)}\ninput_key={key}\nmaterial=m\n' + block)
+            return subprocess.run(['sh'], input=script, capture_output=True, text=True)
+        result = run('0', 0)
+        assert result.returncode == 0 and (work / 'input-key').read_text() == 'k' * 64 + '\n', result.stderr
+        result = run('0', 4)  # raw-syscall warning only
+        assert result.returncode == 0 and (work / 'input-key').exists(), result.stderr
+        result = run('skipped: no built ps5-native-tool in /f', 0)
+        assert result.returncode == 0 and not (work / 'input-key').exists(), result.stderr
+        assert 'input key: none (PRX link skipped' in result.stdout, result.stdout
+        result = run('0', 1)  # the report itself failed
+        assert result.returncode != 0 and 'report failed' in result.stderr and not (work / 'input-key').exists()
+        result = run('0', 0, key='')
+        assert result.returncode == 0 and not (work / 'input-key').exists()
 
 
 def check_ccache_settings() -> None:
@@ -278,6 +355,7 @@ def main() -> int:
     check_vk_runtime_staging()
     check_patched_pe_staging()
     check_input_key()
+    check_input_key_publication()
     check_ccache_settings()
     check_prx_foundation_gate()
     # The committed series itself.
