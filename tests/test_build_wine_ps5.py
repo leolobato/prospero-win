@@ -46,6 +46,7 @@ jobs=1
 cflags="-O2 -ffile-prefix-map=$work=/build/prospero-wine"
 media_root=
 pe_epoch=1234567890
+cc_launcher=
 status=0
 # A make that builds every target it is given except PW_PE_FAIL_TARGET, as
 # -k does, and fails if one failed.
@@ -149,6 +150,7 @@ ps5vk_sdk=
 radv=
 media_root={shlex.quote(str(media))}
 work={shlex.quote(str(base / 'work'))}
+ccache=${{PW_CCACHE:-0}}
 """
         script = setup + block + 'printf "%s" "$input_key"\n'
         def key() -> str:
@@ -162,6 +164,7 @@ work={shlex.quote(str(base / 'work'))}
                    lambda: (media / 'libgst.a').write_bytes(b'gst2'),
                    lambda: env.update(CFLAGS='-O3'),
                    lambda: env.update(SOURCE_DATE_EPOCH='1'),
+                   lambda: env.update(PW_CCACHE='1'),
                    lambda: ((root / 'a.txt').write_text('b'), git('commit', '-q', '-am', 'b'))]
         seen = {first}
         for change in changes:
@@ -173,6 +176,56 @@ work={shlex.quote(str(base / 'work'))}
         assert key() == ''
         (root / 'a.txt').write_text('b'); (root / 'new.txt').write_text('untracked')
         assert key() == ''
+
+
+def check_ccache_settings() -> None:
+    # Execute the real compiler-cache stanza: with --ccache the compilers go
+    # through ccache, which shares objects between work folders (base
+    # directory, no current-directory hash, prefix maps out of the hash);
+    # without it nothing changes; without ccache on PATH it stops.
+    text = SCRIPT.read_text()
+    start = text.index('# Compiler cache (--ccache)')
+    block = text[start:text.index('# Reconfigure whenever', start)]
+    with tempfile.TemporaryDirectory() as directory:
+        bin_dir = Path(directory) / 'bin'
+        bin_dir.mkdir()
+        (bin_dir / 'ccache').write_text('#!/bin/sh\n'); (bin_dir / 'ccache').chmod(0o755)
+        script = ('set -eu\nfail() { echo "$*" >&2; exit 1; }\nwork=$PW_WORK\nccache=$PW_CCACHE\n'
+                  'cflags="-O2 -ffile-prefix-map=$work=/build/prospero-wine"\n' + block +
+                  'printf "[%s]|%s|%s|%s|%s|%s\\n" "$cc_launcher" "${CCACHE_BASEDIR:-}" "${CCACHE_NOHASHDIR:-}" '
+                  '"${CCACHE_IGNOREOPTIONS:-}" "$cflags" "${CCACHE_NAMESPACE:-}"\n')
+        script_file = Path(directory) / 'script.sh'
+        script_file.write_text(script)
+        def run(cache: str, path: str, ignore: str = '', work: str = '/w/one') -> subprocess.CompletedProcess[str]:
+            # The digest needs the usual tools; the no-ccache cases search an empty PATH.
+            env = {'PATH': f"{path}:{os.environ['PATH']}" if cache == '1' and path != system else path,
+                   'PW_CCACHE': cache, 'PW_WORK': work}
+            if ignore: env['CCACHE_IGNOREOPTIONS'] = ignore
+            return subprocess.run(['/bin/sh', str(script_file)], env=env, capture_output=True, text=True)
+        empty = Path(directory) / 'empty'
+        empty.mkdir()
+        system = str(empty)  # the stanza needs no program but ccache
+        result = run('1', f'{bin_dir}:{system}', '-fkeep')
+        assert result.returncode == 0, result.stderr
+        launcher, basedir, nohash, ignore, cflags, namespace = result.stdout.strip().split('|')
+        assert launcher == '[ccache ]' and basedir == '/w/one' and nohash == '1'
+        # The relative paths ccache passes map to the same name as the work folder.
+        assert cflags == ('-O2 -ffile-prefix-map=/w/one=/build/prospero-wine -ffile-prefix-map=..=/build/prospero-wine '
+                          '-fmacro-prefix-map=..=/build/prospero-wine'), cflags
+        # Work folders share a namespace; a change to the script or its flags gets a new one.
+        assert namespace.startswith('build_wine_ps5-') and len(namespace) == len('build_wine_ps5-') + 16
+        other = run('1', f'{bin_dir}:{system}', '-fkeep', work='/w/two').stdout.strip().split('|')
+        assert other[5] == namespace and other[1] == '/w/two'
+        script_file.write_text(script.replace('cflags="-O2 ', 'cflags="-O3 '))
+        assert run('1', f'{bin_dir}:{system}', '-fkeep').stdout.strip().split('|')[5] != namespace
+        script_file.write_text(script)
+        assert ignore.split() == ['-fkeep', '-ffile-prefix-map=*', '-fmacro-prefix-map=*',
+                                  '-fdebug-prefix-map=*', '-Wa,--debug-prefix-map=*'], ignore
+        result = run('0', system)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == '[]||||-O2 -ffile-prefix-map=/w/one=/build/prospero-wine|', result.stdout
+        result = run('1', system)
+        assert result.returncode != 0 and 'no ccache' in result.stderr, result.stderr
 
 
 def check_prx_foundation_gate() -> None:
@@ -225,6 +278,7 @@ def main() -> int:
     check_vk_runtime_staging()
     check_patched_pe_staging()
     check_input_key()
+    check_ccache_settings()
     check_prx_foundation_gate()
     # The committed series itself.
     result = subprocess.run(["sh", str(SCRIPT), "--check-patches"], capture_output=True, text=True)

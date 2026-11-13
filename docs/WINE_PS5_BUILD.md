@@ -83,6 +83,22 @@ grep -lx "$key" <work folders>/*/input-key
 A checkout with uncommitted or untracked changes has no input key. Build a
 release in a fresh work folder, without reuse.
 
+`--ccache` (or `PROSPERO_CCACHE=1`) compiles Wine's Unix side and the PE
+modules through ccache, for development builds. Because the output does not
+depend on the work folder, the cache is shared between work folders: the
+script sets ccache's base directory to the work folder, turns off hashing of
+the current directory, and leaves the prefix maps out of ccache's hash
+(`CCACHE_IGNOREOPTIONS`; they only rename a folder to a fixed name). With a
+base directory ccache hands the compiler relative paths (`../source/...`), so
+the script maps `..` to the same fixed name as the work folder: the output,
+`__FILE__` strings included, is byte for byte what a build without ccache
+makes. Because the maps are out of ccache's hash, the script sets ccache's
+namespace to a digest of itself and its flags (with the work folder named by
+a placeholder): a change to either starts from an empty namespace instead of
+reusing objects made with other maps. A build
+after a change that touches a few files recompiles only those. The input
+key records whether ccache was on. Build a release without it.
+
 ## Patch series
 
 `wine/patches/NNNN-name.patch` files are mail-formatted patches applied with

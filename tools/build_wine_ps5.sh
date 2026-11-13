@@ -63,6 +63,17 @@
 # inputs in any work folder gives the same bytes, so builds can be compared
 # module by module.
 #
+# --ccache (or PROSPERO_CCACHE=1) compiles Wine's Unix side and the PE
+# modules through ccache, for development builds. Since the output does not
+# depend on the work folder, objects are shared between work folders: ccache
+# gets the work folder as its base directory, does not hash the current
+# directory, and leaves out of its hash the prefix maps, which only rename
+# the work folder (or a wrapper's folder) to a fixed name. The base
+# directory makes ccache hand the compiler relative paths (../source/...), so
+# ".." is mapped to the same fixed name as the work folder: the objects,
+# __FILE__ strings included, are the ones a build without ccache makes. A
+# release is built without it.
+#
 # Input key: a successful build from a clean checkout writes
 # <work>/input-key, a hash of everything the build reads (this checkout's
 # tree, the Wine commit, the SDK, the host tools, the compilers, the PRX
@@ -72,7 +83,7 @@
 # work folder whose input-key matches instead of building it again.
 #
 # Usage:
-#   tools/build_wine_ps5.sh [--check-patches] [--print-input-key] [--patches DIR] [--work DIR]
+#   tools/build_wine_ps5.sh [--check-patches] [--print-input-key] [--ccache] [--patches DIR] [--work DIR]
 #       [--source DIR] [--host-tools DIR] [--foundation DIR] [--sdk DIR]
 #       [--prx-foundation DIR] [--ps5vk-sdk DIR | --radv DIR] [--media-root DIR] [--jobs N]
 set -eu
@@ -163,12 +174,14 @@ media_root=${PROSPERO_MEDIA_ROOT:-}
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 check_only=0
 print_key=0
+ccache=${PROSPERO_CCACHE:-0}
 
 fail() { echo "build_wine_ps5: $*" >&2; exit 1; }
 while [ $# -gt 0 ]; do
     case $1 in
     --check-patches) check_only=1 ;;
     --print-input-key) print_key=1 ;;
+    --ccache) ccache=1 ;;
     --patches) patches=$2; shift ;;
     --work) work=$2; shift ;;
     --source) source_dir=$2; shift ;;
@@ -277,6 +290,7 @@ input_material() {
     [ -z "$media_root" ] || echo "media $(digest "$media_root")"
     echo "tls $(digest "$key_tls") ca $(digest "$key_ca")"
     echo "cflags ${CFLAGS-default}"
+    echo "ccache $ccache"
     echo "epoch $pe_epoch"
     echo "host $(uname -sm)"
 }
@@ -395,10 +409,30 @@ if [ -n "$media_root" ]; then
     cflags="$cflags -ffile-prefix-map=$media_root=/build/media -fmacro-prefix-map=$media_root=/build/media"
 fi
 
+# Compiler cache (--ccache): see the top of this file.
+cc_launcher=
+if [ "$ccache" = 1 ]; then
+    command -v ccache > /dev/null 2>&1 || fail "--ccache: no ccache on PATH"
+    cc_launcher="ccache "
+    CCACHE_BASEDIR=$work
+    CCACHE_NOHASHDIR=1
+    CCACHE_IGNOREOPTIONS="${CCACHE_IGNOREOPTIONS:+$CCACHE_IGNOREOPTIONS }-ffile-prefix-map=* -fmacro-prefix-map=* -fdebug-prefix-map=* -Wa,--debug-prefix-map=*"
+    export CCACHE_BASEDIR CCACHE_NOHASHDIR CCACHE_IGNOREOPTIONS
+    # ccache passes paths under the work folder relative to build/.
+    cflags="$cflags -ffile-prefix-map=..=/build/prospero-wine -fmacro-prefix-map=..=/build/prospero-wine"
+    # The maps are out of the hash, so a change to them, or to how this
+    # script compiles, must not reuse old objects: the namespace (part of
+    # every hash) is this script and the flags, with the work folder named
+    # by a placeholder so that work folders still share it.
+    CCACHE_NAMESPACE=build_wine_ps5-$({ cat "$0"; printf '%s\n' "$cflags" | sed "s|$work|@WORK@|g"; } |
+        sha256sum | cut -c1-16)
+    export CCACHE_NAMESPACE
+fi
+
 # Reconfigure whenever the patches, staged Vulkan sources or arguments change.
 stamp=$(
     { printf '%s\n' "$WINE_COMMIT" "$CONFIGURE_ARGS" "$sdk" "$FREETYPE_SHA256" \
-        "$cflags" "$gnutls_args" "${GNUTLS_LIBS:-}" \
+        "$cflags" "$gnutls_args" "${GNUTLS_LIBS:-}" "ccache=$ccache" \
         "${GSTREAMER_CFLAGS:-}" "${GSTREAMER_LIBS:-}"
       for patch in $ordered; do cat "$patches/$patch"; done
       cat "$root/tools/stage_vk_batch.py" "$root/tools/generate_vk_codecs.py" "$root"/wine/ps5/pw_vk_*.[ch] \
@@ -408,15 +442,23 @@ build=$work/build
 if [ ! -f "$build/Makefile" ] || [ "$(cat "$build/.prospero-stamp" 2>/dev/null)" != "$stamp" ]; then
     rm -rf "$build"
     mkdir -p "$build"
-    # shellcheck disable=SC2086
     # FreeType is found by its flags; its soname is the name Wine dlopens,
-    # which pw_wine_dl turns into libfreetype.prx beside ntdll.prx.
-    (cd "$build" && "$tree/configure" $CONFIGURE_ARGS CC="$sdk/bin/prospero-clang" \
-        CFLAGS="$cflags" \
-        FREETYPE_CFLAGS="-I$ft/src/include" FREETYPE_LIBS="$ft/libfreetype.a" \
-        ac_cv_lib_soname_freetype=libfreetype.so ac_cv_lib_soname_vulkan=libvulkan.so \
-        $gnutls_args --with-wine-tools="$host_tools" > "$work/configure.log" 2>&1) ||
-        fail "configure failed; see $work/configure.log"
+    # which pw_wine_dl turns into libfreetype.prx beside ntdll.prx. Extra
+    # arguments: the PE compilers behind ccache.
+    run_configure() {
+        # shellcheck disable=SC2086
+        (cd "$build" && "$tree/configure" $CONFIGURE_ARGS CC="$cc_launcher$sdk/bin/prospero-clang" \
+            CFLAGS="$cflags" \
+            FREETYPE_CFLAGS="-I$ft/src/include" FREETYPE_LIBS="$ft/libfreetype.a" \
+            ac_cv_lib_soname_freetype=libfreetype.so ac_cv_lib_soname_vulkan=libvulkan.so \
+            $gnutls_args --with-wine-tools="$host_tools" "$@" > "$work/configure.log" 2>&1) ||
+            fail "configure failed; see $work/configure.log"
+    }
+    if [ -n "$cc_launcher" ]; then
+        run_configure i386_CC="${cc_launcher}i686-w64-mingw32-gcc" x86_64_CC="${cc_launcher}x86_64-w64-mingw32-gcc"
+    else
+        run_configure
+    fi
     echo "$stamp" > "$build/.prospero-stamp"
 fi
 
@@ -468,6 +510,7 @@ done
 # they need build side by side.
 rm -rf "$work/pe"
 pe_cflags="$cflags -Wa,--debug-prefix-map=$work=/build/prospero-wine"
+[ -z "$cc_launcher" ] || pe_cflags="$pe_cflags -Wa,--debug-prefix-map=..=/build/prospero-wine"
 [ -z "$media_root" ] || pe_cflags="$pe_cflags -Wa,--debug-prefix-map=$media_root=/build/media"
 pe_targets=
 for arch in i386 x86_64; do
