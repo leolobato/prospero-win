@@ -72,6 +72,32 @@ static void slow_end(uint64_t start, const char *what, size_t bytes)
 /* CPU read-write, unless the kernel wants the GPU bits too. */
 static int map_protection = CPU_READ_WRITE;
 
+static int largest_free_block(size_t pool, size_t *bytes);
+
+/* A refused direct-memory call, for the title's log: the step, the kernel's
+ * status and the largest free block of the pool then, which tells a full
+ * pool from a refused protection. The first 32, then every 1000th: a game
+ * whose heap spills keeps failing allocations on purpose. Written with
+ * write(): the heap calls allocate() with its lock held, and stdio may
+ * allocate. */
+static void log_refusal(const char *step, uintptr_t address, size_t bytes, unsigned protection, int status)
+{
+    static uint32_t refusals;
+    const uint32_t count = __atomic_add_fetch(&refusals, 1, __ATOMIC_RELAXED);
+    const int saved_errno = errno;
+    size_t free_bytes = 0;
+    char line[192];
+    int length;
+
+    if (count > 32 && count % 1000) return;
+    if (largest_free_block(sceKernelGetDirectMemorySize(), &free_bytes)) free_bytes = 0;
+    length = snprintf(line, sizeof(line), "wine-ps5: direct memory %s refused: address %#llx, %zu bytes, "
+                      "protection %#x, status %#x, largest free block %zu MiB (refusal %u)\n", step,
+                      (unsigned long long)address, bytes, protection, (unsigned)status, free_bytes >> 20, count);
+    if (length > 0) (void)!write(2, line, (size_t)length < sizeof(line) ? (size_t)length : sizeof(line) - 1);
+    errno = saved_errno;
+}
+
 static int reserve(void *context, uintptr_t address, size_t bytes)
 {
     void *at = (void *)address;
@@ -88,24 +114,27 @@ static int allocate(void *context, size_t bytes, int64_t *offset)
     uint64_t t0 = slow_start();
     int rc;
     (void)context;
-    rc = sceKernelAllocateMainDirectMemory(bytes, PAGE, MEMORY_TYPE, offset) != 0;
+    rc = sceKernelAllocateMainDirectMemory(bytes, PAGE, MEMORY_TYPE, offset);
     slow_end(t0, "allocate", bytes);
-    return rc;
+    if (rc) log_refusal("allocate", 0, bytes, 0, rc);
+    return rc != 0;
 }
 static int map(void *context, uintptr_t address, size_t bytes, int64_t offset)
 {
     void *at = (void *)address;
     uint64_t t0 = slow_start();
-    int rc;
+    int rc, protection = map_protection;
     (void)context;
-    rc = sceKernelMapDirectMemory(&at, bytes, map_protection, KERNEL_FIXED, offset, PAGE);
+    rc = sceKernelMapDirectMemory(&at, bytes, protection, KERNEL_FIXED, offset, PAGE);
     slow_end(t0, "map", bytes);
-    if (rc && map_protection == CPU_READ_WRITE) {
+    if (rc && protection == CPU_READ_WRITE) {
         /* Refused CPU-only: the GPU bits, and keep them if they work. */
         at = (void *)address;
-        rc = sceKernelMapDirectMemory(&at, bytes, CPU_GPU_READ_WRITE, KERNEL_FIXED, offset, PAGE);
+        protection = CPU_GPU_READ_WRITE;
+        rc = sceKernelMapDirectMemory(&at, bytes, protection, KERNEL_FIXED, offset, PAGE);
         if (!rc) map_protection = CPU_GPU_READ_WRITE;
     }
+    if (rc || at != (void *)address) log_refusal("map", address, bytes, (unsigned)protection, rc ? rc : -1);
     return rc || at != (void *)address;
 }
 static int protect(void *context, uintptr_t address, size_t bytes, unsigned protection)
@@ -113,9 +142,10 @@ static int protect(void *context, uintptr_t address, size_t bytes, unsigned prot
     uint64_t t0 = slow_start();
     int rc;
     (void)context;
-    rc = sceKernelMprotect((const void *)address, bytes, (int)protection) != 0;
+    rc = sceKernelMprotect((const void *)address, bytes, (int)protection);
     slow_end(t0, "protect", bytes);
-    return rc;
+    if (rc) log_refusal("protect", address, bytes, protection, rc);
+    return rc != 0;
 }
 static int unmap(void *context, uintptr_t address, size_t bytes)
 {

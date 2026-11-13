@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Thu, 12 Nov 2026 11:00:00 +0100
+Subject: [PATCH] ntdll: Report the commit limit when the host cannot commit.
+
+Committing reserved pages changes their host protection. When the host
+refuses for lack of memory (mprotect() fails with ENOMEM: RLIMIT_DATA on
+Linux, a full direct-memory pool on a PS5), NtAllocateVirtualMemory
+returned STATUS_ACCESS_DENIED and left the pages marked committed.
+Windows returns STATUS_COMMITMENT_LIMIT and leaves the pages as they
+were: reserved pages stay reserved, and committed ones in the range keep
+their protection. Host pages that only hold reserved pages are mapped
+again, as decommit does, so the host takes back what it gave them.
+
+V8 checks the error of a failed commit: anything but
+ERROR_NOT_ENOUGH_MEMORY or ERROR_COMMITMENT_LIMIT is a fatal "Check
+failed: 1455L == error." (Counter-Strike 2's UI).
+---
+ dlls/ntdll/unix/virtual.c | 62 ++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 61 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index d62fa53..4b57949 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -2959,6 +2959,66 @@ static SIZE_T get_committed_size( struct file_view *view, void *base, size_t max
+ }
+ 
+ 
++/***********************************************************************
++ *           commit_pages
++ *
++ * Commit a range of pages. When the host cannot give them memory (ENOMEM),
++ * Windows reports the commit limit and leaves the pages as they were, so a
++ * reserved range stays reserved and the caller can free memory and retry.
++ */
++static NTSTATUS commit_pages( struct file_view *view, void *base, SIZE_T size, ULONG protect )
++{
++    struct { char *base; SIZE_T size; BYTE vprot; } stack_runs[16], *runs = stack_runs, *grown;
++    SIZE_T done, count = 0, max = ARRAY_SIZE(stack_runs), i;
++    char *start, *end;
++    NTSTATUS status;
++
++    /* the pages' protections as they are, in runs, to put back if the host refuses */
++    for (done = 0; done < size; done += runs[count++].size)
++    {
++        if (count == max)
++        {
++            if (!(grown = malloc( 2 * max * sizeof(*runs) )))
++            {
++                if (runs != stack_runs) free( runs );
++                return STATUS_NO_MEMORY;
++            }
++            memcpy( grown, runs, count * sizeof(*runs) );
++            if (runs != stack_runs) free( runs );
++            runs = grown;
++            max *= 2;
++        }
++        runs[count].base = (char *)base + done;
++        runs[count].size = get_vprot_range_size( runs[count].base, size - done, ~0, &runs[count].vprot );
++    }
++
++    errno = 0;
++    status = set_protection( view, base, size, protect );
++    if (status == STATUS_ACCESS_DENIED && errno == ENOMEM)
++    {
++        WARN( "no memory to commit %p-%p\n", base, (char *)base + size - 1 );
++        for (i = 0; i < count; i++) set_page_vprot( runs[i].base, runs[i].size, runs[i].vprot );
++        /* host pages that only hold pages left reserved give back what the host took for them */
++        for (i = 0; is_view_valloc( view ) && i < count; i++)
++        {
++            if (runs[i].vprot & VPROT_COMMITTED) continue;
++            start = runs[i].base;
++            while (i + 1 < count && !(runs[i + 1].vprot & VPROT_COMMITTED)) i++;
++            end = ROUND_ADDR( runs[i].base + runs[i].size, host_page_mask );
++            start = (char *)ROUND_SIZE( 0, start, host_page_mask );
++            if (start >= end) continue;
++            anon_mmap_fixed( start, end - start, PROT_NONE, 0 );
++            kernel_writewatch_register_range( view, start, end - start );
++        }
++        if (mprotect_range( base, size, 0, 0 ))
++            ERR( "cannot restore the protection of %p-%p\n", base, (char *)base + size - 1 );
++        status = STATUS_COMMITMENT_LIMIT;
++    }
++    if (runs != stack_runs) free( runs );
++    return status;
++}
++
++
+ /***********************************************************************
+  *           decommit_pages
+  *
+@@ -6210,7 +6270,7 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
+         if (!(view = find_view( base, size ))) status = STATUS_NOT_MAPPED_VIEW;
+         else if (view->protect & SEC_FILE) status = STATUS_ALREADY_COMMITTED;
+         else if (view->protect & VPROT_FREE_PLACEHOLDER) status = STATUS_CONFLICTING_ADDRESSES;
+-        else if (!(status = set_protection( view, base, size, protect )) && (view->protect & SEC_RESERVE))
++        else if (!(status = commit_pages( view, base, size, protect )) && (view->protect & SEC_RESERVE))
+         {
+             SERVER_START_REQ( add_mapping_committed_range )
+             {
+-- 
+2.43.0
+
