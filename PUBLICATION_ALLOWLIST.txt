@@ -458,6 +458,8 @@ tests/test_wine_commit_limit.py
 tests/wine_commit_limit.c
 tests/test_wine_file_handles.py
 tests/wine_file_handles.c
+tests/test_wine_written_files.py
+tests/wine_written_files.c
 tests/test_wine_fiber_stacks.py
 tests/wine_fiber_stacks.c
 tests/test_d3d12_control.py
@@ -811,6 +813,7 @@ wine/patches/1012-ntdll-one-syscall-dispatcher-slot-value-for-every-process.patc
 wine/patches/1013-ntdll-ps5-let-the-title-act-once-the-server-is-connected.patch
 wine/patches/1019-server-ps5-watch-many-directories.patch
 wine/patches/1020-ntdll-report-the-commit-limit-when-the-host-cannot-commit.patch
+wine/patches/1021-server-ps5-park-files-opened-for-writing.patch
 wine/ps5/pw_nsiproxy_libc.c
 tests/test_pw_nsiproxy_libc.c
 wine/patches/0985-ntdll-ps5-start-hosted-drivers-without-thread-attach.patch

@@ -1,0 +1,1188 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sat, 14 Nov 2026 12:00:00 +0100
+Subject: [PATCH] server, ntdll: Park files opened for writing, and locked
+ files, on PS5, and lend descriptors only until they are closed.
+
+Patch 0993 parks read-only files to keep a PS5 title under its limit of
+about 249 open files, but not a file opened for writing or a file that
+any handle has locked. A Minecraft mod (Distant Horizons) keeps a SQLite
+database per dimension and opens it once per thread and repository. Each
+connection holds the database and its WAL file open for reading and
+writing, and in WAL mode it keeps a shared lock on the database for as
+long as it is open. While a world loaded, 157 of the title's 239 files
+were held that way (1002's log: write=157 live=0), and the game closed
+with "Too many open files".
+
+- A regular file opened for writing is tracked like a read-only one, and
+  opened again with its access mode but without O_CREAT, O_EXCL or
+  O_TRUNC. One that can no longer be opened for writing by its name (a
+  file created with the read-only attribute, for one) is not parked.
+- Locks no longer keep a descriptor. Every Wine process of a title runs
+  in the title's host process or on its server (patch 1011), and only
+  the server takes host locks. Host record locks belong to a process, so
+  they never exclude anyone there, and closing any descriptor of a file
+  drops all of them. The server now takes none, and its own list of
+  locks, which stays with the fd, decides who may lock what. A handle
+  closed while others hold locks on its file is closed at once instead
+  of being kept until the last lock goes.
+- A descriptor handed to the client uncached shares its file position
+  with the server's. 0993 left one handed out in the last 100 ms live,
+  but only measured from the first time, and a call can take longer: a
+  parked file then saved a stale position, and with files opened for
+  writing the next write would overwrite data. Each such descriptor is
+  now a loan: get_handle_fd returns its number, and ntdll gives it back
+  with the new release_fd_loan request when it closes its copy
+  (server_put_unix_fd, at every place that closed one), or at once when
+  the descriptor didn't arrive. A loan holds a reference to its fd, so a
+  handle closed or reused in the meantime gives back nothing else, and a
+  file with a loan out is never parked. A descriptor
+  wine_server_handle_to_fd hands to its caller is never given back,
+  which keeps that file open, as does a loan of a second process (patch
+  1011) that exits holding it.
+- A handle opened for writing keeps the access it was opened with only
+  while it is live: one parked after its file was made read-only by
+  another handle fails to open it again.
+
+tests/test_wine_written_files.py opens one database 300 times for
+reading and writing with a shared lock through each handle, writes 400
+files through their file pointers in rounds and 40 created read-only,
+maps a file for writing, checks that locks of parked handles still
+conflict, also after another handle of the file is closed, and has
+eight threads append records through their file pointers while two
+others keep opening files. Under a host Wine and a 512-descriptor
+limit, a server with 0993 fails at the 244th connection with
+STATUS_TOO_MANY_OPENED_FILES (write=244); one that parks files opened
+for writing but keeps the lock checks fails there too (live=244); one
+without the write-access check fails to write a read-only file again
+(error 5). With a 100 ms grace in place of the loans and budgets of 4
+files, one run in nine lost records; with the loans, twelve runs passed,
+nine of them with those budgets.
+---
+ dlls/ntdll/unix/cdrom.c        |    6 +-
+ dlls/ntdll/unix/file.c         |   56 +++++++++---------
+ dlls/ntdll/unix/process.c      |    2 -
+ dlls/ntdll/unix/serial.c       |   10 ++-
+ dlls/ntdll/unix/server.c       |   66 +++++++++++++++++++++
+ dlls/ntdll/unix/socket.c       |   42 +++++++------
+ dlls/ntdll/unix/tape.c         |    2 -
+ dlls/ntdll/unix/unix_private.h |    1 
+ dlls/ntdll/unix/virtual.c      |   12 ++--
+ include/wine/server_protocol.h |   19 ++++++
+ server/fd.c                    |  126 +++++++++++++++++++++++++++++++---------
+ server/protocol.def            |    7 ++
+ server/request_handlers.h      |    7 ++
+ server/request_trace.h         |   10 +++
+ 14 files changed, 270 insertions(+), 96 deletions(-)
+
+diff --git a/dlls/ntdll/unix/cdrom.c b/dlls/ntdll/unix/cdrom.c
+index 2ed5b5dc68..d00998746e 100644
+--- a/dlls/ntdll/unix/cdrom.c
++++ b/dlls/ntdll/unix/cdrom.c
+@@ -2911,7 +2911,7 @@ NTSTATUS cdrom_DeviceIoControl( HANDLE device, HANDLE event, PIO_APC_ROUTINE apc
+ 
+     if ((status = CDROM_Open(fd, &dev)))
+     {
+-        if (needs_close) close( fd );
++        if (needs_close) server_put_unix_fd( fd );
+         return status;
+     }
+ 
+@@ -2929,7 +2929,7 @@ NTSTATUS cdrom_DeviceIoControl( HANDLE device, HANDLE event, PIO_APC_ROUTINE apc
+         if ((status = get_parent_device( fd, name, sizeof(name) ))) return status;
+         if (code == IOCTL_STORAGE_EJECT_MEDIA)
+             NtClose( device );
+-        if (needs_close) close( fd );
++        if (needs_close) server_put_unix_fd( fd );
+         TRACE("opening parent %s\n", name );
+         if ((fd = open( name, O_RDONLY )) == -1)
+             return errno_to_status( errno );
+@@ -3243,7 +3243,7 @@ NTSTATUS cdrom_DeviceIoControl( HANDLE device, HANDLE event, PIO_APC_ROUTINE apc
+     default:
+         status = STATUS_NOT_SUPPORTED;
+     }
+-    if (needs_close) close( fd );
++    if (needs_close) server_put_unix_fd( fd );
+     if (!NT_ERROR(status))
+         file_complete_async( device, options, event, apc, apc_user, io, status, sz );
+     return status;
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 933d09d57a..f75a50876f 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -3037,7 +3037,7 @@ NTSTATUS WINAPI NtQueryDirectoryFile( HANDLE handle, HANDLE event, PIO_APC_ROUTI
+ 
+     if (type != FD_TYPE_DIR)
+     {
+-        if (needs_close) close( fd );
++        if (needs_close) server_put_unix_fd( fd );
+         return STATUS_INVALID_PARAMETER;
+     }
+ 
+@@ -3071,7 +3071,7 @@ NTSTATUS WINAPI NtQueryDirectoryFile( HANDLE handle, HANDLE event, PIO_APC_ROUTI
+ 
+     mutex_unlock( &dir_mutex );
+ 
+-    if (needs_close) close( fd );
++    if (needs_close) server_put_unix_fd( fd );
+     if (cwd != -1) close( cwd );
+     TRACE( "=> %x (%ld)\n", status, io->Information );
+     return status;
+@@ -3402,7 +3402,7 @@ static void get_redirect( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *redir )
+         if (!len) return;
+         if (server_get_unix_fd( attr->RootDirectory, 0, &fd, &needs_close, NULL, NULL )) return;
+         fstat( fd, &st );
+-        if (needs_close) close( fd );
++        if (needs_close) server_put_unix_fd( fd );
+         if (!is_same_file( &windir, &st ))
+         {
+             if (!is_same_file( &sysdir, &st )) return;
+@@ -3724,7 +3724,7 @@ done:
+         TRACE( "%s not found in dir %p\n", wine_dbgstr_longlong(file_id), attr->RootDirectory );
+         free( unix_name );
+     }
+-    if (needs_close) close( root_fd );
++    if (needs_close) server_put_unix_fd( root_fd );
+     return status;
+ }
+ 
+@@ -4037,7 +4037,7 @@ static NTSTATUS nt_to_unix_file_name( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *n
+     {
+         if (type != FD_TYPE_DIR)
+         {
+-            if (needs_close) close( root_fd );
++            if (needs_close) server_put_unix_fd( root_fd );
+             status = STATUS_BAD_DEVICE_TYPE;
+         }
+         else
+@@ -4045,7 +4045,7 @@ static NTSTATUS nt_to_unix_file_name( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *n
+             track_root_directory( attr->RootDirectory, root_fd );
+             status = lookup_unix_name( root_fd, attr, nt_name, 0, &unix_name, unix_len,
+                                        1, disposition, open_reparse, FALSE, 0 );
+-            if (needs_close) close( root_fd );
++            if (needs_close) server_put_unix_fd( root_fd );
+         }
+     }
+     else if (status == STATUS_OBJECT_TYPE_MISMATCH) status = STATUS_BAD_DEVICE_TYPE;
+@@ -4782,7 +4782,7 @@ static NTSTATUS unmount_device( HANDLE handle )
+                 usleep( 100000 );
+             }
+         }
+-        if (needs_close) close( unix_fd );
++        if (needs_close) server_put_unix_fd( unix_fd );
+     }
+     return status;
+ }
+@@ -4912,7 +4912,7 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
+                 if (fd_set_dos_attrib( fd, attributes, TRUE ) == -1 && errno != ENOTSUP)
+                     WARN( "Failed to set extended attribute " SAMBA_XATTR_DOS_ATTRIB ". errno %d (%s)",
+                           errno, strerror( errno ) );
+-                if (needs_close) close( fd );
++                if (needs_close) server_put_unix_fd( fd );
+             }
+         }
+     }
+@@ -5373,7 +5373,7 @@ NTSTATUS WINAPI NtQueryInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
+         status = STATUS_NOT_IMPLEMENTED;
+         break;
+     }
+-    if (needs_close) close( fd );
++    if (needs_close) server_put_unix_fd( fd );
+     if (status == STATUS_SUCCESS && !io->Information) io->Information = info_sizes[class];
+     return io->Status = status;
+ }
+@@ -5414,7 +5414,7 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
+                 status = fd_set_file_info( fd, info->FileAttributes,
+                                            unix_name && is_hidden_file( unix_name ));
+ 
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+             free( unix_name );
+         }
+         else status = STATUS_INVALID_PARAMETER_3;
+@@ -5431,7 +5431,7 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
+             if (lseek( fd, info->CurrentByteOffset.QuadPart, SEEK_SET ) == (off_t)-1)
+                 status = errno_to_status( errno );
+ 
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+         }
+         else status = STATUS_INVALID_PARAMETER_3;
+         break;
+@@ -5567,7 +5567,7 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
+                 WARN( "setting valid data length not supported\n" );
+ #endif
+             }
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+         }
+         else status = STATUS_INVALID_PARAMETER_3;
+         break;
+@@ -5809,7 +5809,7 @@ static BOOL async_read_proc( void *user, ULONG_PTR *info, unsigned int *status )
+             break;
+ 
+         result = virtual_locked_read(fd, &fileio->buffer[fileio->already], fileio->count-fileio->already);
+-        if (needs_close) close( fd );
++        if (needs_close) server_put_unix_fd( fd );
+ 
+         if (result < 0)
+         {
+@@ -5861,7 +5861,7 @@ static BOOL async_write_proc( void *user, ULONG_PTR *info, unsigned int *status
+ 
+         result = write( fd, &fileio->buffer[fileio->already], fileio->count - fileio->already );
+ 
+-        if (needs_close) close( fd );
++        if (needs_close) server_put_unix_fd( fd );
+ 
+         if (result < 0)
+         {
+@@ -6297,7 +6297,7 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
+     else if (type == FD_TYPE_SOCKET)
+     {
+         status = sock_read( handle, unix_handle, event, apc, apc_user, io, buffer, length );
+-        if (needs_close) close( unix_handle );
++        if (needs_close) server_put_unix_fd( unix_handle );
+         return status;
+     }
+ 
+@@ -6406,7 +6406,7 @@ done:
+     send_completion = cvalue != 0;
+ 
+ err:
+-    if (needs_close) close( unix_handle );
++    if (needs_close) server_put_unix_fd( unix_handle );
+     if (status == STATUS_SUCCESS || (status == STATUS_END_OF_FILE && (!async_read || type == FD_TYPE_FILE)))
+     {
+         set_sync_iosb( io, status, total, options );
+@@ -6489,7 +6489,7 @@ NTSTATUS WINAPI NtReadFileScatter( HANDLE file, HANDLE event, PIO_APC_ROUTINE ap
+ 
+     send_completion = cvalue != 0;
+ 
+-    if (needs_close) close( unix_handle );
++    if (needs_close) server_put_unix_fd( unix_handle );
+     set_sync_iosb( io, status, total, options );
+     TRACE("= 0x%08x (%u)\n", status, total);
+     if (event) NtSetEvent( event, NULL );
+@@ -6499,7 +6499,7 @@ NTSTATUS WINAPI NtReadFileScatter( HANDLE file, HANDLE event, PIO_APC_ROUTINE ap
+     return STATUS_PENDING;
+ 
+ error:
+-    if (needs_close) close( unix_handle );
++    if (needs_close) server_put_unix_fd( unix_handle );
+     if (event) NtResetEvent( event, NULL );
+     TRACE("= 0x%08x\n", status);
+     return status;
+@@ -6616,7 +6616,7 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
+     else if (type == FD_TYPE_SOCKET)
+     {
+         status = sock_write( handle, unix_handle, event, apc, apc_user, io, buffer, length );
+-        if (needs_close) close( unix_handle );
++        if (needs_close) server_put_unix_fd( unix_handle );
+         return status;
+     }
+ 
+@@ -6707,7 +6707,7 @@ done:
+     send_completion = cvalue != 0;
+ 
+ err:
+-    if (needs_close) close( unix_handle );
++    if (needs_close) server_put_unix_fd( unix_handle );
+ 
+     if (type == FD_TYPE_SERIAL && (status == STATUS_SUCCESS || status == STATUS_PENDING))
+         set_pending_write( handle );
+@@ -6795,7 +6795,7 @@ NTSTATUS WINAPI NtWriteFileGather( HANDLE file, HANDLE event, PIO_APC_ROUTINE ap
+     }
+ 
+  done:
+-    if (needs_close) close( unix_handle );
++    if (needs_close) server_put_unix_fd( unix_handle );
+     if (status == STATUS_SUCCESS)
+     {
+         file_complete_async( file, options, event, apc, apc_user, io, status, total );
+@@ -6917,7 +6917,7 @@ NTSTATUS WINAPI NtFsControlFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
+     status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, &options );
+     if (status && status != STATUS_BAD_DEVICE_TYPE)
+         return status;
+-    if (needs_close) close( fd );
++    if (needs_close) server_put_unix_fd( fd );
+ 
+     ignore_server_ioctl_struct_holes( code, in_buffer, in_size );
+ 
+@@ -6975,7 +6975,7 @@ NTSTATUS WINAPI NtFsControlFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
+             status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL );
+             if (status) break;
+             fstat( fd, &st );
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+             memset( info, 0, sizeof(*info) );
+             memcpy( info->ObjectId, &st.st_dev, sizeof(st.st_dev) );
+             memcpy( info->ObjectId + 8, &st.st_ino, sizeof(st.st_ino) );
+@@ -7067,7 +7067,7 @@ NTSTATUS WINAPI NtFlushBuffersFileEx( HANDLE handle, ULONG flags, void *params,
+         if (wait_handle) ret = wait_async( wait_handle, FALSE );
+     }
+ 
+-    if (needs_close) close( fd );
++    if (needs_close) server_put_unix_fd( fd );
+     return ret;
+ }
+ 
+@@ -7816,7 +7816,7 @@ NTSTATUS WINAPI NtQueryVolumeInformationFile( HANDLE handle, IO_STATUS_BLOCK *io
+         status = STATUS_INVALID_PARAMETER;
+         break;
+     }
+-    if (needs_close) close( fd );
++    if (needs_close) server_put_unix_fd( fd );
+     return io->Status = status;
+ }
+ 
+@@ -7836,12 +7836,12 @@ static NTSTATUS set_volume_label( HANDLE handle, const FILE_FS_LABEL_INFORMATION
+ 
+     if ((status = get_mountmgr_fs_info( handle, fd, drive, sizeof(data) )))
+     {
+-        if (needs_close) close( fd );
++        if (needs_close) server_put_unix_fd( fd );
+         return status;
+     }
+     mount_point = (const char *)data + drive->mount_point_offset;
+ 
+-    if (needs_close) close( fd );
++    if (needs_close) server_put_unix_fd( fd );
+ 
+     if (drive->fs_type != MOUNTMGR_FS_TYPE_NTFS)
+         return STATUS_ACCESS_DENIED;
+@@ -7909,7 +7909,7 @@ NTSTATUS WINAPI NtQueryEaFile( HANDLE handle, IO_STATUS_BLOCK *io, void *buffer,
+     if (buffer && length)
+         memset( buffer, 0, length );
+ 
+-    if (needs_close) close( fd );
++    if (needs_close) server_put_unix_fd( fd );
+     return STATUS_NO_EAS_ON_FILE;
+ }
+ 
+diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
+index 3cac9fa7ef..8db32940ab 100644
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -297,7 +297,7 @@ static unsigned int get_pe_file_info( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *n
+         if (!server_get_unix_fd( *handle, FILE_READ_DATA, &unix_fd, &needs_close, NULL, NULL ))
+         {
+             status = get_non_pe_file_info( unix_fd, info );
+-            if (needs_close) close( unix_fd );
++            if (needs_close) server_put_unix_fd( unix_fd );
+         }
+     }
+ 
+diff --git a/dlls/ntdll/unix/serial.c b/dlls/ntdll/unix/serial.c
+index a20c3cb91a..6d11c06d98 100644
+--- a/dlls/ntdll/unix/serial.c
++++ b/dlls/ntdll/unix/serial.c
+@@ -1110,12 +1110,12 @@ static BOOL async_wait_proc( void *user, ULONG_PTR *info, unsigned int *status )
+             else
+             {
+                 get_wait_mask( commio->io.handle, &dummy, (commio->evtmask & EV_TXEMPTY) ? &commio->pending_write : NULL );
+-                if (needs_close) close( fd );
++                if (needs_close) server_put_unix_fd( fd );
+                 return FALSE;
+             }
+         }
+ 
+-        if (needs_close) close( fd );
++        if (needs_close) server_put_unix_fd( fd );
+     }
+     release_fileio( &commio->io );
+     return TRUE;
+@@ -1264,7 +1264,7 @@ NTSTATUS serial_DeviceIoControl( HANDLE device, HANDLE event, PIO_APC_ROUTINE ap
+         return status;
+     if (type != FD_TYPE_SERIAL)
+     {
+-        if (needs_close) close( fd );
++        if (needs_close) server_put_unix_fd( fd );
+         return STATUS_OBJECT_TYPE_MISMATCH;
+     }
+ 
+@@ -1437,7 +1437,7 @@ NTSTATUS serial_DeviceIoControl( HANDLE device, HANDLE event, PIO_APC_ROUTINE ap
+         if (out_buffer && out_size == sizeof(DWORD))
+         {
+             status = wait_on( device, fd, event, apc, apc_user, io, out_buffer );
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+             return status;
+         }
+         else
+@@ -1453,7 +1453,7 @@ NTSTATUS serial_DeviceIoControl( HANDLE device, HANDLE event, PIO_APC_ROUTINE ap
+         break;
+     }
+ 
+-    if (needs_close) close( fd );
++    if (needs_close) server_put_unix_fd( fd );
+ 
+     if (!NT_ERROR(status))
+         file_complete_async( device, options, event, apc, apc_user, io, status, sz );
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index d156160d8d..75090a3bba 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1612,6 +1612,60 @@ static void track_received_directory( HANDLE handle, int fd )
+ #endif
+ 
+ 
++#if defined(__PROSPERO__) || defined(PS5_PARK_FILES)
++/* A descriptor the server lends (get_handle_fd's loan) shares its file
++ * position with the server's own, so the server won't close its descriptor
++ * to keep to its budget of open files (see server/fd.c) until the copy is
++ * closed and the loan given back. The loans are kept by descriptor; one past
++ * the table is never given back, which only keeps that file open. */
++#define PS5_LENT_FDS 16384
++static LONG ps5_lent_fds[PS5_LENT_FDS];  /* loan of that descriptor, or 0 */
++
++static void ps5_give_back( unsigned int loan )
++{
++    SERVER_START_REQ( release_fd_loan )
++    {
++        req->loan = loan;
++        wine_server_call( req );
++    }
++    SERVER_END_REQ;
++}
++
++static void ps5_take_loan( int fd, unsigned int loan )
++{
++    LONG old;
++
++    if (fd < 0 || fd >= PS5_LENT_FDS) return;
++    /* a copy closed without server_put_unix_fd had this number before */
++    if ((old = InterlockedExchange( &ps5_lent_fds[fd], loan ))) ps5_give_back( old );
++}
++
++/* the caller keeps the descriptor: its loan is never given back */
++static void ps5_keep_loan( int fd )
++{
++    if (fd >= 0 && fd < PS5_LENT_FDS) InterlockedExchange( &ps5_lent_fds[fd], 0 );
++}
++#endif
++
++
++/***********************************************************************
++ *           server_put_unix_fd
++ *
++ * Close a descriptor from server_get_unix_fd that needs closing.
++ */
++void server_put_unix_fd( int fd )
++{
++#if defined(__PROSPERO__) || defined(PS5_PARK_FILES)
++    LONG loan = (fd >= 0 && fd < PS5_LENT_FDS) ? InterlockedExchange( &ps5_lent_fds[fd], 0 ) : 0;
++
++    close( fd );
++    if (loan) ps5_give_back( loan );
++#else
++    close( fd );
++#endif
++}
++
++
+ /***********************************************************************
+  *           server_get_unix_fd
+  *
+@@ -1623,6 +1677,7 @@ int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
+     sigset_t sigset;
+     obj_handle_t fd_handle;
+     int ret, fd = -1;
++    unsigned int loan = 0;
+     unsigned int access = 0;
+ 
+     *unix_fd = -1;
+@@ -1644,6 +1699,7 @@ int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
+                 if (type) *type = reply->type;
+                 if (options) *options = reply->options;
+                 access = reply->access;
++                loan = reply->loan;
+                 if ((fd = wine_server_receive_fd( &fd_handle )) != -1)
+                 {
+                     assert( wine_server_ptr_handle(fd_handle) == handle );
+@@ -1662,6 +1718,11 @@ int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
+             }
+         }
+         SERVER_END_REQ;
++#if defined(__PROSPERO__) || defined(PS5_PARK_FILES)
++        /* a descriptor that didn't arrive is given back at once */
++        if (loan && fd != -1) ps5_take_loan( fd, loan );
++        else if (loan) ps5_give_back( loan );
++#endif
+     }
+     server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
+ 
+@@ -1669,7 +1730,7 @@ done:
+     if (!ret && ((access & wanted_access) != wanted_access))
+     {
+         ret = STATUS_ACCESS_DENIED;
+-        if (*needs_close) close( fd );
++        if (*needs_close) server_put_unix_fd( fd );
+     }
+     if (!ret) *unix_fd = fd;
+     return ret;
+@@ -1724,6 +1785,9 @@ NTSTATUS CDECL wine_server_handle_to_fd( HANDLE handle, unsigned int access, int
+     {
+         if ((*unix_fd = dup(*unix_fd)) == -1) ret = STATUS_TOO_MANY_OPENED_FILES;
+     }
++#if defined(__PROSPERO__) || defined(PS5_PARK_FILES)
++    else if (!ret) ps5_keep_loan( *unix_fd );
++#endif
+     return ret;
+ }
+ 
+diff --git a/dlls/ntdll/unix/socket.c b/dlls/ntdll/unix/socket.c
+index 1c2866f3dc..1d1e2c3e8d 100644
+--- a/dlls/ntdll/unix/socket.c
++++ b/dlls/ntdll/unix/socket.c
+@@ -910,7 +910,7 @@ static BOOL async_recv_proc( void *user, ULONG_PTR *info, unsigned int *status )
+ 
+         *status = try_recv( fd, async, info );
+         TRACE( "got status %#x, %#lx bytes read\n", *status, *info );
+-        if (needs_close) close( fd );
++        if (needs_close) server_put_unix_fd( fd );
+ 
+         if (*status == STATUS_DEVICE_NOT_READY)
+             return FALSE;
+@@ -1167,7 +1167,7 @@ static BOOL async_send_proc( void *user, ULONG_PTR *info, unsigned int *status )
+         *status = try_send( fd, async );
+         TRACE( "got status %#x\n", *status );
+ 
+-        if (needs_close) close( fd );
++        if (needs_close) server_put_unix_fd( fd );
+ 
+         if (*status == STATUS_DEVICE_NOT_READY)
+             return FALSE;
+@@ -1466,15 +1466,15 @@ static BOOL async_transmit_proc( void *user, ULONG_PTR *info, unsigned int *stat
+ 
+         if (async->file && (*status = server_get_unix_fd( async->file, 0, &file_fd, &file_needs_close, NULL, NULL )))
+         {
+-            if (sock_needs_close) close( sock_fd );
++            if (sock_needs_close) server_put_unix_fd( sock_fd );
+             return TRUE;
+         }
+ 
+         *status = try_transmit( sock_fd, file_fd, async );
+         TRACE( "got status %#x\n", *status );
+ 
+-        if (sock_needs_close) close( sock_fd );
+-        if (file_needs_close) close( file_fd );
++        if (sock_needs_close) server_put_unix_fd( sock_fd );
++        if (file_needs_close) server_put_unix_fd( file_fd );
+ 
+         if (*status == STATUS_DEVICE_NOT_READY)
+             return FALSE;
+@@ -1504,7 +1504,7 @@ static NTSTATUS sock_transmit( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc,
+     {
+         if ((status = server_get_unix_fd( ULongToHandle( params->file ), 0, &file_fd, &file_needs_close, &file_type, NULL )))
+             return status;
+-        if (file_needs_close) close( file_fd );
++        if (file_needs_close) server_put_unix_fd( file_fd );
+ 
+         if (file_type != FD_TYPE_FILE)
+         {
+@@ -1589,7 +1589,7 @@ static NTSTATUS do_getsockopt( HANDLE handle, IO_STATUS_BLOCK *io, int level,
+         return status;
+ 
+     ret = getsockopt( fd, level, option, out_buffer, &len );
+-    if (needs_close) close( fd );
++    if (needs_close) server_put_unix_fd( fd );
+     if (ret) return sock_errno_to_status( errno );
+     if (io)
+     {
+@@ -1611,7 +1611,7 @@ static NTSTATUS do_setsockopt( HANDLE handle, IO_STATUS_BLOCK *io, int level,
+         return status;
+ 
+     ret = setsockopt( fd, level, option, optval, optlen );
+-    if (needs_close) close( fd );
++    if (needs_close) server_put_unix_fd( fd );
+     if (ret) return sock_errno_to_status( errno );
+     if (io) io->Status = STATUS_SUCCESS;
+     return STATUS_SUCCESS;
+@@ -1699,7 +1699,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
+ 
+             if ((status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, &options )))
+                 return status;
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+ 
+             SERVER_START_REQ( socket_get_events )
+             {
+@@ -1775,7 +1775,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
+                 FIXME( "MSG_WAITALL is not supported\n" );
+             status = sock_ioctl_recv( handle, event, apc, apc_user, io, fd, params.buffers, params.count, NULL,
+                                       NULL, NULL, NULL, unix_flags, !!(params.recv_flags & AFD_RECV_FORCE_ASYNC) );
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+             return status;
+         }
+ 
+@@ -1804,7 +1804,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
+                                       params->count, u64_to_user_ptr(params->control_ptr),
+                                       u64_to_user_ptr(params->addr_ptr), u64_to_user_ptr(params->addr_len_ptr),
+                                       ws_flags, unix_flags, params->force_async );
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+             return status;
+         }
+ 
+@@ -1831,7 +1831,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
+             status = sock_ioctl_send( handle, event, apc, apc_user, io, fd, u64_to_user_ptr( params->buffers_ptr ),
+                                       params->count, u64_to_user_ptr( params->addr_ptr ), params->addr_len,
+                                       unix_flags, params->force_async );
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+             return status;
+         }
+ 
+@@ -1848,7 +1848,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
+                 break;
+             }
+             status = sock_transmit( handle, event, apc, apc_user, io, fd, params );
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+             return status;
+         }
+ 
+@@ -1861,7 +1861,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
+ 
+             if ((status = server_get_unix_fd( handle, 0, &fd, &needs_close, &type, &options )))
+                 return status;
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+             if (type != FD_TYPE_SOCKET)
+                 return STATUS_INVALID_DEVICE_REQUEST;
+ 
+@@ -1891,7 +1891,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
+                 if (!getsockopt( fd, SOL_SOCKET, SO_ACCEPTCONN, &value, &len ) && value)
+                 {
+                     *(int *)out_buffer = 0;
+-                    if (needs_close) close( fd );
++                    if (needs_close) server_put_unix_fd( fd );
+                     file_complete_async( handle, options, event, apc, apc_user, io, STATUS_SUCCESS, 0 );
+                     return STATUS_SUCCESS;
+                 }
+@@ -1904,7 +1904,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
+                 break;
+             }
+             *(int *)out_buffer = value;
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+             file_complete_async( handle, options, event, apc, apc_user, io, STATUS_SUCCESS, 0 );
+             return STATUS_SUCCESS;
+         }
+@@ -1944,7 +1944,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
+                 /* windows is reversed with respect to unix */
+                 *(int *)out_buffer = !value;
+             }
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+             file_complete_async( handle, options, event, apc, apc_user, io, STATUS_SUCCESS, 0 );
+             return STATUS_SUCCESS;
+         }
+@@ -1959,7 +1959,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
+ 
+             if ((status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, &options )))
+                 return status;
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+ 
+             if (getifaddrs( &ifaddrs ) < 0)
+             {
+@@ -2079,7 +2079,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
+ #endif
+             }
+ 
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+             file_complete_async( handle, options, event, apc, apc_user, io, STATUS_SUCCESS, 0 );
+             return STATUS_SUCCESS;
+         }
+@@ -2621,7 +2621,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
+                 return status;
+ 
+             ret = getsockopt( fd, SOL_IRLMP, IRLMP_ENUMDEVICES, buffer, &len );
+-            if (needs_close) close( fd );
++            if (needs_close) server_put_unix_fd( fd );
+             if (ret) return sock_errno_to_status( errno );
+ 
+             io->Information = offsetof( DEVICELIST, Device[unix_list->len] );
+@@ -2699,7 +2699,7 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
+         }
+     }
+ 
+-    if (needs_close) close( fd );
++    if (needs_close) server_put_unix_fd( fd );
+ 
+     return status;
+ }
+diff --git a/dlls/ntdll/unix/tape.c b/dlls/ntdll/unix/tape.c
+index b9dadff3ab..c2687b88d4 100644
+--- a/dlls/ntdll/unix/tape.c
++++ b/dlls/ntdll/unix/tape.c
+@@ -577,7 +577,7 @@ NTSTATUS tape_DeviceIoControl( HANDLE device, HANDLE event, PIO_APC_ROUTINE apc,
+         break;
+     }
+ 
+-    if (needs_close) close( fd );
++    if (needs_close) server_put_unix_fd( fd );
+ 
+     if (!NT_ERROR(status))
+         file_complete_async( device, options, event, apc, apc_user, io, status, sz );
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 33d624d69d..760f707638 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -273,6 +273,7 @@ extern unsigned int server_queue_process_apc( HANDLE process, const union apc_ca
+                                               union apc_result *result );
+ extern int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
+                                int *needs_close, enum server_fd_type *type, unsigned int *options );
++extern void server_put_unix_fd( int fd );
+ extern int wine_server_receive_fd( obj_handle_t *handle );
+ extern void process_exit_wrapper( int status ) DECLSPEC_NORETURN;
+ extern size_t server_init_process(void);
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index d62fa53329..373fe20a95 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -3997,7 +3997,7 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
+         ((status = server_get_unix_fd( pe_mapping->shared_file, FILE_READ_DATA|FILE_WRITE_DATA,
+                                        &shared_fd, &shared_needs_close, NULL, NULL ))))
+     {
+-        if (needs_close) close( unix_fd );
++        if (needs_close) server_put_unix_fd( unix_fd );
+         return status;
+     }
+ 
+@@ -4052,8 +4052,8 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
+ 
+ done:
+     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+-    if (needs_close) close( unix_fd );
+-    if (shared_needs_close) close( shared_fd );
++    if (needs_close) server_put_unix_fd( unix_fd );
++    if (shared_needs_close) server_put_unix_fd( shared_fd );
+     return status;
+ }
+ 
+@@ -4190,7 +4190,7 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
+ 
+ done:
+     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+-    if (needs_close) close( unix_handle );
++    if (needs_close) server_put_unix_fd( unix_handle );
+     return res;
+ }
+ 
+@@ -5112,7 +5112,7 @@ void virtual_map_user_shared_data(void)
+         ERR( "failed to remap the process USD: %d\n", res );
+         exit(1);
+     }
+-    if (needs_close) close( fd );
++    if (needs_close) server_put_unix_fd( fd );
+     NtClose( section );
+ }
+ 
+@@ -5143,7 +5143,7 @@ void virtual_init_user_shared_data(void)
+         ERR( "failed to remap the process USD: %d\n", res );
+         exit(1);
+     }
+-    if (needs_close) close( fd );
++    if (needs_close) server_put_unix_fd( fd );
+     NtClose( section );
+ 
+     virtual_get_system_info( &info, FALSE );
+diff --git a/include/wine/server_protocol.h b/include/wine/server_protocol.h
+index 6f30cf0687..5e7b400d1c 100644
+--- a/include/wine/server_protocol.h
++++ b/include/wine/server_protocol.h
+@@ -1963,6 +1963,20 @@ struct get_handle_fd_reply
+     int          cacheable;
+     unsigned int access;
+     unsigned int options;
++    unsigned int loan;
++    char __pad_28[4];
++};
++
++
++
++struct release_fd_loan_request
++{
++    struct request_header __header;
++    unsigned int loan;
++};
++struct release_fd_loan_reply
++{
++    struct reply_header __header;
+ };
+ enum server_fd_type
+ {
+@@ -6294,6 +6308,7 @@ enum request
+     REQ_alloc_file_handle,
+     REQ_get_handle_unix_name,
+     REQ_get_handle_fd,
++    REQ_release_fd_loan,
+     REQ_get_directory_cache_entry,
+     REQ_flush,
+     REQ_get_file_info,
+@@ -6609,6 +6624,7 @@ union generic_request
+     struct alloc_file_handle_request alloc_file_handle_request;
+     struct get_handle_unix_name_request get_handle_unix_name_request;
+     struct get_handle_fd_request get_handle_fd_request;
++    struct release_fd_loan_request release_fd_loan_request;
+     struct get_directory_cache_entry_request get_directory_cache_entry_request;
+     struct flush_request flush_request;
+     struct get_file_info_request get_file_info_request;
+@@ -6922,6 +6938,7 @@ union generic_reply
+     struct alloc_file_handle_reply alloc_file_handle_reply;
+     struct get_handle_unix_name_reply get_handle_unix_name_reply;
+     struct get_handle_fd_reply get_handle_fd_reply;
++    struct release_fd_loan_reply release_fd_loan_reply;
+     struct get_directory_cache_entry_reply get_directory_cache_entry_reply;
+     struct flush_reply flush_reply;
+     struct get_file_info_reply get_file_info_reply;
+@@ -7183,6 +7200,6 @@ union generic_reply
+     struct alpc_create_port_reply alpc_create_port_reply;
+ };
+ 
+-#define SERVER_PROTOCOL_VERSION 961
++#define SERVER_PROTOCOL_VERSION 962
+ 
+ #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
+diff --git a/server/fd.c b/server/fd.c
+index d6c6da4da7..ec2148b294 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -178,14 +178,14 @@ struct fd
+     int                  ps5_park_flags; /* open() flags to open it again with */
+ #endif
+ #ifdef PS5_PARK_FILES
+-    unsigned int         ps5_file :1;    /* a read-only regular file, or a directory, that may be parked */
++    unsigned int         ps5_file :1;    /* a regular file, or a directory, that may be parked */
+     unsigned int         ps5_dir :1;     /* that is a directory past the threshold (ps5_track_directory) */
+     unsigned int         ps5_watched :1; /* its change watch lists it by name (set_fd_watched_by_name) */
+     unsigned int         ps5_pinned :1;  /* handed to the client to cache: never parked */
+     unsigned int         ps5_live :1;    /* in ps5_live_files */
+     struct list          ps5_lru_entry;  /* entry in ps5_live_files */
+     off_t                ps5_offset;     /* file position, kept while parked */
+-    unsigned long long   ps5_lent_ms;    /* when its descriptor last went to the client uncached */
++    unsigned int         ps5_loans;      /* descriptors lent to the client uncached, not yet given back */
+ #endif
+ };
+ 
+@@ -1319,10 +1319,21 @@ static int inode_has_pending_close( struct inode *inode, const char *path )
+     return 0;
+ }
+ 
++/* whether closing a descriptor of the inode would drop host locks that
++ * its other handles hold */
++static inline int inode_has_host_locks( struct inode *inode )
++{
++#ifdef PS5_PARK_FILES
++    return 0;  /* the server takes none (see alloc_fd_object) */
++#else
++    return !list_empty( &inode->locks );
++#endif
++}
++
+ /* add fd to the inode list of file descriptors to close */
+ static void inode_add_closed_fd( struct inode *inode, struct closed_fd *fd )
+ {
+-    if (!list_empty( &inode->locks ))
++    if (inode_has_host_locks( inode ))
+     {
+         list_add_head( &inode->closed, &fd->entry );
+     }
+@@ -1871,7 +1882,17 @@ static struct fd *alloc_fd_object(void)
+     fd->nt_name    = NULL;
+     fd->nt_namelen = 0;
+     fd->cacheable  = 0;
++#ifdef PS5_PARK_FILES
++    /* Every Wine process of a title runs in the title's own host process or
++     * on its server (patch 1011), and only the server takes host locks. Host
++     * record locks belong to a process, so they never exclude anyone there,
++     * and closing any descriptor of a file drops all of them. The server's
++     * own list of locks decides who may lock what, so the files a handle has
++     * locked can be parked like any other. */
++    fd->fs_locks   = 0;
++#else
+     fd->fs_locks   = 1;
++#endif
+     fd->poll_index = -1;
+ #ifdef PS5_PARK_DIRECTORIES
+     fd->ps5_parked = 0;
+@@ -1881,7 +1902,7 @@ static struct fd *alloc_fd_object(void)
+ #ifdef PS5_PARK_FILES
+     fd->ps5_file = fd->ps5_dir = fd->ps5_watched = fd->ps5_pinned = fd->ps5_live = 0;
+     fd->ps5_offset = 0;
+-    fd->ps5_lent_ms = 0;
++    fd->ps5_loans = 0;
+ #endif
+     fd->completion = NULL;
+     fd->comp_flags = 0;
+@@ -1936,7 +1957,7 @@ struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *use
+ #ifdef PS5_PARK_FILES
+     fd->ps5_file = fd->ps5_dir = fd->ps5_watched = fd->ps5_pinned = fd->ps5_live = 0;
+     fd->ps5_offset = 0;
+-    fd->ps5_lent_ms = 0;
++    fd->ps5_loans = 0;
+ #endif
+     init_async_queue( &fd->read_q );
+     init_async_queue( &fd->write_q );
+@@ -2082,42 +2103,68 @@ static int ps5_inode_deleting( struct inode *inode )
+ 
+ /* close a live file's descriptor until it is needed again; 0 when it is
+  * not one that can be opened again as it was */
+-/* A descriptor handed to the client uncached is closed by the client after
+- * its call, but the server is not told when. A synchronous handle's read or
+- * seek moves the file position it shares with the server's descriptor, so
+- * parking one the client may still be using would save a stale position.
+- * One handed out within the last PS5_LENT_GRACE_MS is therefore not parked
+- * to keep to the budget, which the live files may then exceed for a moment.
+- * Only when open() fails with EMFILE may it be (ps5_free_files): a call
+- * that takes longer between receiving the descriptor and using it, or one
+- * caught by that, could still lose its position. */
+-#define PS5_LENT_GRACE_MS 100
+-
+-static unsigned long long ps5_now_ms(void)
++/* A descriptor handed to the client uncached is used by the client for one
++ * call and then closed. A synchronous handle's read, write or seek moves the
++ * file position it shares with the server's descriptor, so parking the file
++ * while the client still holds its copy would save a stale position: a
++ * reader would read the wrong bytes and a writer would overwrite data. Each
++ * such descriptor is therefore a loan (get_handle_fd), which the client gives
++ * back when it closes its copy (release_fd_loan), and a file with a loan
++ * out is never parked. A loan the client never gives back, from a descriptor
++ * a caller keeps (wine_server_handle_to_fd), keeps the file live. */
++static inline int ps5_file_writable( struct fd *fd )
+ {
+-    struct timespec ts;
+-
+-    clock_gettime( CLOCK_MONOTONIC, &ts );
+-    return (unsigned long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
++    return !fd->ps5_dir && (fd->ps5_park_flags & O_ACCMODE) != O_RDONLY;
+ }
+ 
+ /* A file bound to a completion port is parked like any other: the port, its
+  * key and flags stay with the fd, and a read through such a handle is done by
+  * the client with a descriptor it asks for, which opens a parked file again.
+  * Only an async queued here needs the descriptor kept, checked below. */
++/* A loan holds a reference to its fd: it is given back by its number, which,
++ * unlike the handle it was lent through, can't be closed or reused for
++ * another file in the meantime. */
++struct ps5_loan
++{
++    struct list   entry;
++    unsigned int  id;
++    struct fd    *fd;
++};
++static struct list ps5_loans_out = LIST_INIT( ps5_loans_out );
++
++/* the number the client gives the loan back with; when there is no memory
++ * for it, the loan is never given back and the file stays live */
++static unsigned int ps5_lend_fd( struct fd *fd )
++{
++    static unsigned int last_id;
++    struct ps5_loan *loan;
++
++    fd->ps5_loans++;
++    if (!(loan = malloc( sizeof(*loan) ))) return 0;
++    if (!++last_id) ++last_id;  /* 0 is no loan */
++    loan->id = last_id;
++    loan->fd = (struct fd *)grab_object( fd );
++    list_add_head( &ps5_loans_out, &loan->entry );
++    return loan->id;
++}
++
+ static int ps5_park_file( struct fd *fd, int force )
+ {
+     struct stat st;
+     off_t offset = 0;
+ 
+-    /* a directory's change watch waits in wait_q, but it is listed by name */
++    /* a directory's change watch waits in wait_q, but it is listed by name;
++     * locks are the server's alone (see alloc_fd_object) and stay with the fd */
+     if (fd->unix_fd == -1 || !fd->closed || fd->closed->unix_fd != fd->unix_fd ||
+-        !list_empty( &fd->inode->locks ) || !list_empty( &fd->locks ) ||
+         async_queued( &fd->read_q ) || async_queued( &fd->write_q ) ||
+         (async_queued( &fd->wait_q ) && !fd->ps5_watched) ||
+         ps5_inode_deleting( fd->inode ))
+         return 0;
+-    if (!force && fd->ps5_lent_ms && ps5_now_ms() - fd->ps5_lent_ms < PS5_LENT_GRACE_MS) return 0;
++    if (fd->ps5_loans) return 0;
++    /* a file opened for writing must be one it can be opened for writing again */
++    if (ps5_file_writable( fd ) &&
++        access( fd->unix_name, (fd->ps5_park_flags & O_ACCMODE) == O_RDWR ? R_OK | W_OK : W_OK ) == -1)
++        return 0;
+     /* every fd has a poll slot; one that is polled keeps its descriptor */
+     if (fd->poll_index != -1 && (pollfd[fd->poll_index].fd != -1 || pollfd[fd->poll_index].events)) return 0;
+     /* a file deleted under its name cannot be opened again */
+@@ -2224,14 +2271,15 @@ static int ps5_free_files( struct fd *keep )
+     return ps5_live_count < count;
+ }
+ 
+-/* a read-only regular file just opened: from now on it can be parked */
++/* a regular file just opened: from now on it can be parked. One opened for
++ * writing is opened again for writing, without creating or truncating it. */
+ static void ps5_track_file( struct fd *fd, int flags )
+ {
+     unsigned int limit = ps5_live_files_limit();
+ 
+     if (!limit || !fd->cacheable || !fd->inode || !fd->closed || !fd->unix_name || fd->closed->disp_flags) return;
+     fd->ps5_file = 1;
+-    fd->ps5_park_flags = O_RDONLY | (flags & ~(O_ACCMODE | O_CREAT | O_EXCL | O_TRUNC));
++    fd->ps5_park_flags = flags & ~(O_CREAT | O_EXCL | O_TRUNC);
+     ps5_add_live_file( fd );
+     ps5_trim_live_files( limit, fd, 0 );
+ }
+@@ -2248,7 +2296,6 @@ static void ps5_set_file_cacheable( struct fd *fd )
+         if (fd->ps5_live) ps5_remove_live_file( fd );
+     }
+     else fd->cacheable = 0;
+-    if (!fd->cacheable) fd->ps5_lent_ms = ps5_now_ms();
+ }
+ 
+ static int ps5_reopen_file( struct fd *fd );
+@@ -2749,7 +2796,7 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
+     {
+         if (ps5_untrack_inode_files( fd->inode ) == -1) goto error;
+     }
+-    else if (S_ISREG( st.st_mode ) && rw_mode == O_RDONLY) ps5_track_file( fd, flags );
++    else if (S_ISREG( st.st_mode )) ps5_track_file( fd, rw_mode | (flags & ~O_ACCMODE) );
+ #endif
+     if (root_fd != -1) fchdir( server_dir_fd ); /* go back to the server dir */
+     return fd;
+@@ -3804,12 +3851,35 @@ DECL_HANDLER(get_handle_fd)
+             reply->type = fd->fd_ops->get_fd_type( fd );
+             reply->options = fd->options;
+             reply->access = get_handle_access( current->process, req->handle );
++#ifdef PS5_PARK_FILES
++            if (!send_client_fd( current->process, unix_fd, req->handle ) && fd->ps5_file && !fd->cacheable)
++                reply->loan = ps5_lend_fd( fd );
++#else
+             send_client_fd( current->process, unix_fd, req->handle );
++#endif
+         }
+         release_object( fd );
+     }
+ }
+ 
++/* the client closed a descriptor it was lent */
++DECL_HANDLER(release_fd_loan)
++{
++#ifdef PS5_PARK_FILES
++    struct ps5_loan *loan;
++
++    LIST_FOR_EACH_ENTRY( loan, &ps5_loans_out, struct ps5_loan, entry )
++    {
++        if (loan->id != req->loan) continue;
++        list_remove( &loan->entry );
++        loan->fd->ps5_loans--;
++        release_object( loan->fd );
++        free( loan );
++        return;
++    }
++#endif
++}
++
+ /* perform a read on a file object */
+ DECL_HANDLER(read)
+ {
+diff --git a/server/protocol.def b/server/protocol.def
+index a9be0a16eb..6cfe8af2d6 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -1681,6 +1681,13 @@ enum event_op { PULSE_EVENT, SET_EVENT, RESET_EVENT };
+     int          cacheable;     /* can fd be cached in the client? */
+     unsigned int access;        /* file access rights */
+     unsigned int options;       /* file open options */
++    unsigned int loan;          /* non-zero: give the descriptor back with release_fd_loan once closed */
++@END
++
++
++/* Give back a descriptor that get_handle_fd lent, once it is closed */
++@REQ(release_fd_loan)
++    unsigned int loan;          /* the loan get_handle_fd returned */
+ @END
+ enum server_fd_type
+ {
+diff --git a/server/request_handlers.h b/server/request_handlers.h
+index e73242d9bd..0efbb5c75c 100644
+--- a/server/request_handlers.h
++++ b/server/request_handlers.h
+@@ -56,6 +56,7 @@ DECL_HANDLER(open_file_object);
+ DECL_HANDLER(alloc_file_handle);
+ DECL_HANDLER(get_handle_unix_name);
+ DECL_HANDLER(get_handle_fd);
++DECL_HANDLER(release_fd_loan);
+ DECL_HANDLER(get_directory_cache_entry);
+ DECL_HANDLER(flush);
+ DECL_HANDLER(get_file_info);
+@@ -368,6 +369,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
+     (req_handler)req_alloc_file_handle,
+     (req_handler)req_get_handle_unix_name,
+     (req_handler)req_get_handle_fd,
++    (req_handler)req_release_fd_loan,
+     (req_handler)req_get_directory_cache_entry,
+     (req_handler)req_flush,
+     (req_handler)req_get_file_info,
+@@ -1002,7 +1004,10 @@ C_ASSERT( offsetof(struct get_handle_fd_reply, type) == 8 );
+ C_ASSERT( offsetof(struct get_handle_fd_reply, cacheable) == 12 );
+ C_ASSERT( offsetof(struct get_handle_fd_reply, access) == 16 );
+ C_ASSERT( offsetof(struct get_handle_fd_reply, options) == 20 );
+-C_ASSERT( sizeof(struct get_handle_fd_reply) == 24 );
++C_ASSERT( offsetof(struct get_handle_fd_reply, loan) == 24 );
++C_ASSERT( sizeof(struct get_handle_fd_reply) == 32 );
++C_ASSERT( offsetof(struct release_fd_loan_request, loan) == 12 );
++C_ASSERT( sizeof(struct release_fd_loan_request) == 16 );
+ C_ASSERT( offsetof(struct get_directory_cache_entry_request, handle) == 12 );
+ C_ASSERT( sizeof(struct get_directory_cache_entry_request) == 16 );
+ C_ASSERT( offsetof(struct get_directory_cache_entry_reply, entry) == 8 );
+diff --git a/server/request_trace.h b/server/request_trace.h
+index 9c7518e7f2..8d1763dd68 100644
+--- a/server/request_trace.h
++++ b/server/request_trace.h
+@@ -689,6 +689,12 @@ static void dump_get_handle_fd_reply( const struct get_handle_fd_reply *req )
+     fprintf( stderr, ", cacheable=%d", req->cacheable );
+     fprintf( stderr, ", access=%08x", req->access );
+     fprintf( stderr, ", options=%08x", req->options );
++    fprintf( stderr, ", loan=%08x", req->loan );
++}
++
++static void dump_release_fd_loan_request( const struct release_fd_loan_request *req )
++{
++    fprintf( stderr, " loan=%08x", req->loan );
+ }
+ 
+ static void dump_get_directory_cache_entry_request( const struct get_directory_cache_entry_request *req )
+@@ -3589,6 +3595,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
+     (dump_func)dump_alloc_file_handle_request,
+     (dump_func)dump_get_handle_unix_name_request,
+     (dump_func)dump_get_handle_fd_request,
++    (dump_func)dump_release_fd_loan_request,
+     (dump_func)dump_get_directory_cache_entry_request,
+     (dump_func)dump_flush_request,
+     (dump_func)dump_get_file_info_request,
+@@ -3901,6 +3908,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
+     (dump_func)dump_alloc_file_handle_reply,
+     (dump_func)dump_get_handle_unix_name_reply,
+     (dump_func)dump_get_handle_fd_reply,
++    NULL,
+     (dump_func)dump_get_directory_cache_entry_reply,
+     (dump_func)dump_flush_reply,
+     (dump_func)dump_get_file_info_reply,
+@@ -4213,6 +4221,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
+     "alloc_file_handle",
+     "get_handle_unix_name",
+     "get_handle_fd",
++    "release_fd_loan",
+     "get_directory_cache_entry",
+     "flush",
+     "get_file_info",
+@@ -4515,6 +4524,7 @@ static const struct
+     { "ERROR_INVALID_WINDOW_HANDLE", 0xc0010000 | ERROR_INVALID_WINDOW_HANDLE },
+     { "ERROR_NO_MORE_USER_HANDLES",  0xc0010000 | ERROR_NO_MORE_USER_HANDLES },
+     { "ERROR_WINDOW_OF_OTHER_THREAD", 0xc0010000 | ERROR_WINDOW_OF_OTHER_THREAD },
++    { "FILE_CLOSED",                 STATUS_FILE_CLOSED },
+     { "FILE_DELETED",                STATUS_FILE_DELETED },
+     { "FILE_INVALID",                STATUS_FILE_INVALID },
+     { "FILE_IS_A_DIRECTORY",         STATUS_FILE_IS_A_DIRECTORY },
