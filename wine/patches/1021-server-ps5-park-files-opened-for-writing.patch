@@ -43,6 +43,12 @@ with "Too many open files".
 - A handle opened for writing keeps the access it was opened with only
   while it is live: one parked after its file was made read-only by
   another handle fails to open it again.
+- release_fd_loan is the last request in protocol.def. A request added
+  in the middle renumbers every request after it, and a module built
+  without this patch (ntoskrnl.exe, conhost.exe) would send the wrong
+  ones: ntoskrnl.exe asked for get_kernel_object_ptr and got another
+  request, and every game that hosts the controller's HID crashed at
+  start.
 
 tests/test_wine_written_files.py opens one database 300 times for
 reading and writing with a shared lock through each handle, writes 400
@@ -59,21 +65,21 @@ without the write-access check fails to write a read-only file again
 files, one run in nine lost records; with the loans, twelve runs passed,
 nine of them with those budgets.
 ---
- dlls/ntdll/unix/cdrom.c        |    6 +-
- dlls/ntdll/unix/file.c         |   56 +++++++++---------
- dlls/ntdll/unix/process.c      |    2 -
- dlls/ntdll/unix/serial.c       |   10 ++-
- dlls/ntdll/unix/server.c       |   66 +++++++++++++++++++++
- dlls/ntdll/unix/socket.c       |   42 +++++++------
- dlls/ntdll/unix/tape.c         |    2 -
- dlls/ntdll/unix/unix_private.h |    1 
- dlls/ntdll/unix/virtual.c      |   12 ++--
- include/wine/server_protocol.h |   19 ++++++
- server/fd.c                    |  126 +++++++++++++++++++++++++++++++---------
- server/protocol.def            |    7 ++
- server/request_handlers.h      |    7 ++
- server/request_trace.h         |   10 +++
- 14 files changed, 270 insertions(+), 96 deletions(-)
+ dlls/ntdll/unix/cdrom.c        |   6 +-
+ dlls/ntdll/unix/file.c         |  56 +++++++--------
+ dlls/ntdll/unix/process.c      |   2 +-
+ dlls/ntdll/unix/serial.c       |  10 +--
+ dlls/ntdll/unix/server.c       |  66 ++++++++++++++++-
+ dlls/ntdll/unix/socket.c       |  42 +++++------
+ dlls/ntdll/unix/tape.c         |   2 +-
+ dlls/ntdll/unix/unix_private.h |   1 +
+ dlls/ntdll/unix/virtual.c      |  12 ++--
+ include/wine/server_protocol.h |  20 +++++-
+ server/fd.c                    | 126 +++++++++++++++++++++++++--------
+ server/protocol.def            |   8 +++
+ server/request_handlers.h      |   7 +-
+ server/request_trace.h         |  10 +++
+ 14 files changed, 272 insertions(+), 96 deletions(-)
 
 diff --git a/dlls/ntdll/unix/cdrom.c b/dlls/ntdll/unix/cdrom.c
 index 2ed5b5dc68..d00998746e 100644
@@ -741,10 +747,10 @@ index 33d624d69d..760f707638 100644
  extern void process_exit_wrapper( int status ) DECLSPEC_NORETURN;
  extern size_t server_init_process(void);
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index d62fa53329..373fe20a95 100644
+index 4b57949ab2..5c6e1013f3 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -3997,7 +3997,7 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
+@@ -4057,7 +4057,7 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
          ((status = server_get_unix_fd( pe_mapping->shared_file, FILE_READ_DATA|FILE_WRITE_DATA,
                                         &shared_fd, &shared_needs_close, NULL, NULL ))))
      {
@@ -753,7 +759,7 @@ index d62fa53329..373fe20a95 100644
          return status;
      }
  
-@@ -4052,8 +4052,8 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
+@@ -4112,8 +4112,8 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
  
  done:
      server_leave_uninterrupted_section( &virtual_mutex, &sigset );
@@ -764,7 +770,7 @@ index d62fa53329..373fe20a95 100644
      return status;
  }
  
-@@ -4190,7 +4190,7 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
+@@ -4250,7 +4250,7 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
  
  done:
      server_leave_uninterrupted_section( &virtual_mutex, &sigset );
@@ -773,7 +779,7 @@ index d62fa53329..373fe20a95 100644
      return res;
  }
  
-@@ -5112,7 +5112,7 @@ void virtual_map_user_shared_data(void)
+@@ -5172,7 +5172,7 @@ void virtual_map_user_shared_data(void)
          ERR( "failed to remap the process USD: %d\n", res );
          exit(1);
      }
@@ -782,7 +788,7 @@ index d62fa53329..373fe20a95 100644
      NtClose( section );
  }
  
-@@ -5143,7 +5143,7 @@ void virtual_init_user_shared_data(void)
+@@ -5203,7 +5203,7 @@ void virtual_init_user_shared_data(void)
          ERR( "failed to remap the process USD: %d\n", res );
          exit(1);
      }
@@ -792,19 +798,24 @@ index d62fa53329..373fe20a95 100644
  
      virtual_get_system_info( &info, FALSE );
 diff --git a/include/wine/server_protocol.h b/include/wine/server_protocol.h
-index 6f30cf0687..5e7b400d1c 100644
+index 6f30cf0687..c54b367e99 100644
 --- a/include/wine/server_protocol.h
 +++ b/include/wine/server_protocol.h
-@@ -1963,6 +1963,20 @@ struct get_handle_fd_reply
+@@ -1963,6 +1963,8 @@ struct get_handle_fd_reply
      int          cacheable;
      unsigned int access;
      unsigned int options;
 +    unsigned int loan;
 +    char __pad_28[4];
-+};
-+
-+
-+
+ };
+ enum server_fd_type
+ {
+@@ -6243,6 +6245,19 @@ struct alpc_create_port_reply
+ };
+ 
+ 
++/* Give back a descriptor that get_handle_fd lent, once it is closed. Kept last: a request added in the
++   middle would renumber the ones after it, and modules built without this patch would send the wrong ones */
 +struct release_fd_loan_request
 +{
 +    struct request_header __header;
@@ -813,39 +824,37 @@ index 6f30cf0687..5e7b400d1c 100644
 +struct release_fd_loan_reply
 +{
 +    struct reply_header __header;
- };
- enum server_fd_type
++};
++
++
+ enum request
  {
-@@ -6294,6 +6308,7 @@ enum request
-     REQ_alloc_file_handle,
-     REQ_get_handle_unix_name,
-     REQ_get_handle_fd,
+     REQ_new_process,
+@@ -6553,6 +6568,7 @@ enum request
+     REQ_d3dkmt_mutex_acquire,
+     REQ_d3dkmt_mutex_release,
+     REQ_alpc_create_port,
 +    REQ_release_fd_loan,
-     REQ_get_directory_cache_entry,
-     REQ_flush,
-     REQ_get_file_info,
-@@ -6609,6 +6624,7 @@ union generic_request
-     struct alloc_file_handle_request alloc_file_handle_request;
-     struct get_handle_unix_name_request get_handle_unix_name_request;
-     struct get_handle_fd_request get_handle_fd_request;
+     REQ_NB_REQUESTS
+ };
+ 
+@@ -6868,6 +6884,7 @@ union generic_request
+     struct d3dkmt_mutex_acquire_request d3dkmt_mutex_acquire_request;
+     struct d3dkmt_mutex_release_request d3dkmt_mutex_release_request;
+     struct alpc_create_port_request alpc_create_port_request;
 +    struct release_fd_loan_request release_fd_loan_request;
-     struct get_directory_cache_entry_request get_directory_cache_entry_request;
-     struct flush_request flush_request;
-     struct get_file_info_request get_file_info_request;
-@@ -6922,6 +6938,7 @@ union generic_reply
-     struct alloc_file_handle_reply alloc_file_handle_reply;
-     struct get_handle_unix_name_reply get_handle_unix_name_reply;
-     struct get_handle_fd_reply get_handle_fd_reply;
-+    struct release_fd_loan_reply release_fd_loan_reply;
-     struct get_directory_cache_entry_reply get_directory_cache_entry_reply;
-     struct flush_reply flush_reply;
-     struct get_file_info_reply get_file_info_reply;
-@@ -7183,6 +7200,6 @@ union generic_reply
+ };
+ union generic_reply
+ {
+@@ -7181,8 +7198,9 @@ union generic_reply
+     struct d3dkmt_mutex_acquire_reply d3dkmt_mutex_acquire_reply;
+     struct d3dkmt_mutex_release_reply d3dkmt_mutex_release_reply;
      struct alpc_create_port_reply alpc_create_port_reply;
++    struct release_fd_loan_reply release_fd_loan_reply;
  };
  
 -#define SERVER_PROTOCOL_VERSION 961
-+#define SERVER_PROTOCOL_VERSION 962
++#define SERVER_PROTOCOL_VERSION 963
  
  #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
 diff --git a/server/fd.c b/server/fd.c
@@ -1088,96 +1097,112 @@ index d6c6da4da7..ec2148b294 100644
  DECL_HANDLER(read)
  {
 diff --git a/server/protocol.def b/server/protocol.def
-index a9be0a16eb..6cfe8af2d6 100644
+index a9be0a16eb..cc9c95ef91 100644
 --- a/server/protocol.def
 +++ b/server/protocol.def
-@@ -1681,6 +1681,13 @@ enum event_op { PULSE_EVENT, SET_EVENT, RESET_EVENT };
+@@ -1681,6 +1681,7 @@ enum event_op { PULSE_EVENT, SET_EVENT, RESET_EVENT };
      int          cacheable;     /* can fd be cached in the client? */
      unsigned int access;        /* file access rights */
      unsigned int options;       /* file open options */
 +    unsigned int loan;          /* non-zero: give the descriptor back with release_fd_loan once closed */
-+@END
-+
-+
-+/* Give back a descriptor that get_handle_fd lent, once it is closed */
-+@REQ(release_fd_loan)
-+    unsigned int loan;          /* the loan get_handle_fd returned */
  @END
  enum server_fd_type
  {
+@@ -4338,3 +4339,10 @@ enum inproc_sync_type
+ @REPLY
+     obj_handle_t        handle;         /* handle to the ALPC port */
+ @END
++
++
++/* Give back a descriptor that get_handle_fd lent, once it is closed. Kept last: a request added in the
++   middle would renumber the ones after it, and modules built without this patch would send the wrong ones */
++@REQ(release_fd_loan)
++    unsigned int loan;          /* the loan get_handle_fd returned */
++@END
 diff --git a/server/request_handlers.h b/server/request_handlers.h
-index e73242d9bd..0efbb5c75c 100644
+index e73242d9bd..8d95c2f777 100644
 --- a/server/request_handlers.h
 +++ b/server/request_handlers.h
-@@ -56,6 +56,7 @@ DECL_HANDLER(open_file_object);
- DECL_HANDLER(alloc_file_handle);
- DECL_HANDLER(get_handle_unix_name);
- DECL_HANDLER(get_handle_fd);
+@@ -315,6 +315,7 @@ DECL_HANDLER(d3dkmt_object_open_name);
+ DECL_HANDLER(d3dkmt_mutex_acquire);
+ DECL_HANDLER(d3dkmt_mutex_release);
+ DECL_HANDLER(alpc_create_port);
 +DECL_HANDLER(release_fd_loan);
- DECL_HANDLER(get_directory_cache_entry);
- DECL_HANDLER(flush);
- DECL_HANDLER(get_file_info);
-@@ -368,6 +369,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
-     (req_handler)req_alloc_file_handle,
-     (req_handler)req_get_handle_unix_name,
-     (req_handler)req_get_handle_fd,
+ 
+ typedef void (*req_handler)( const void *req, void *reply );
+ static const req_handler req_handlers[REQ_NB_REQUESTS] =
+@@ -627,6 +628,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
+     (req_handler)req_d3dkmt_mutex_acquire,
+     (req_handler)req_d3dkmt_mutex_release,
+     (req_handler)req_alpc_create_port,
 +    (req_handler)req_release_fd_loan,
-     (req_handler)req_get_directory_cache_entry,
-     (req_handler)req_flush,
-     (req_handler)req_get_file_info,
-@@ -1002,7 +1004,10 @@ C_ASSERT( offsetof(struct get_handle_fd_reply, type) == 8 );
+ };
+ 
+ C_ASSERT( sizeof(abstime_t) == 8 );
+@@ -1002,7 +1004,8 @@ C_ASSERT( offsetof(struct get_handle_fd_reply, type) == 8 );
  C_ASSERT( offsetof(struct get_handle_fd_reply, cacheable) == 12 );
  C_ASSERT( offsetof(struct get_handle_fd_reply, access) == 16 );
  C_ASSERT( offsetof(struct get_handle_fd_reply, options) == 20 );
 -C_ASSERT( sizeof(struct get_handle_fd_reply) == 24 );
 +C_ASSERT( offsetof(struct get_handle_fd_reply, loan) == 24 );
 +C_ASSERT( sizeof(struct get_handle_fd_reply) == 32 );
-+C_ASSERT( offsetof(struct release_fd_loan_request, loan) == 12 );
-+C_ASSERT( sizeof(struct release_fd_loan_request) == 16 );
  C_ASSERT( offsetof(struct get_directory_cache_entry_request, handle) == 12 );
  C_ASSERT( sizeof(struct get_directory_cache_entry_request) == 16 );
  C_ASSERT( offsetof(struct get_directory_cache_entry_reply, entry) == 8 );
+@@ -2392,3 +2395,5 @@ C_ASSERT( offsetof(struct alpc_create_port_request, max_msg_len) == 16 );
+ C_ASSERT( sizeof(struct alpc_create_port_request) == 24 );
+ C_ASSERT( offsetof(struct alpc_create_port_reply, handle) == 8 );
+ C_ASSERT( sizeof(struct alpc_create_port_reply) == 16 );
++C_ASSERT( offsetof(struct release_fd_loan_request, loan) == 12 );
++C_ASSERT( sizeof(struct release_fd_loan_request) == 16 );
 diff --git a/server/request_trace.h b/server/request_trace.h
-index 9c7518e7f2..8d1763dd68 100644
+index 9c7518e7f2..10d4fddd90 100644
 --- a/server/request_trace.h
 +++ b/server/request_trace.h
-@@ -689,6 +689,12 @@ static void dump_get_handle_fd_reply( const struct get_handle_fd_reply *req )
+@@ -689,6 +689,7 @@ static void dump_get_handle_fd_reply( const struct get_handle_fd_reply *req )
      fprintf( stderr, ", cacheable=%d", req->cacheable );
      fprintf( stderr, ", access=%08x", req->access );
      fprintf( stderr, ", options=%08x", req->options );
 +    fprintf( stderr, ", loan=%08x", req->loan );
-+}
-+
-+static void dump_release_fd_loan_request( const struct release_fd_loan_request *req )
-+{
-+    fprintf( stderr, " loan=%08x", req->loan );
  }
  
  static void dump_get_directory_cache_entry_request( const struct get_directory_cache_entry_request *req )
-@@ -3589,6 +3595,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
-     (dump_func)dump_alloc_file_handle_request,
-     (dump_func)dump_get_handle_unix_name_request,
-     (dump_func)dump_get_handle_fd_request,
+@@ -3536,6 +3537,11 @@ static void dump_alpc_create_port_reply( const struct alpc_create_port_reply *re
+     fprintf( stderr, " handle=%04x", req->handle );
+ }
+ 
++static void dump_release_fd_loan_request( const struct release_fd_loan_request *req )
++{
++    fprintf( stderr, " loan=%08x", req->loan );
++}
++
+ typedef void (*dump_func)( const void *req );
+ 
+ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
+@@ -3848,6 +3854,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
+     (dump_func)dump_d3dkmt_mutex_acquire_request,
+     (dump_func)dump_d3dkmt_mutex_release_request,
+     (dump_func)dump_alpc_create_port_request,
 +    (dump_func)dump_release_fd_loan_request,
-     (dump_func)dump_get_directory_cache_entry_request,
-     (dump_func)dump_flush_request,
-     (dump_func)dump_get_file_info_request,
-@@ -3901,6 +3908,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
-     (dump_func)dump_alloc_file_handle_reply,
-     (dump_func)dump_get_handle_unix_name_reply,
-     (dump_func)dump_get_handle_fd_reply,
+ };
+ 
+ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
+@@ -4160,6 +4167,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
+     (dump_func)dump_d3dkmt_mutex_acquire_reply,
+     NULL,
+     (dump_func)dump_alpc_create_port_reply,
 +    NULL,
-     (dump_func)dump_get_directory_cache_entry_reply,
-     (dump_func)dump_flush_reply,
-     (dump_func)dump_get_file_info_reply,
-@@ -4213,6 +4221,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
-     "alloc_file_handle",
-     "get_handle_unix_name",
-     "get_handle_fd",
+ };
+ 
+ static const char * const req_names[REQ_NB_REQUESTS] =
+@@ -4472,6 +4480,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
+     "d3dkmt_mutex_acquire",
+     "d3dkmt_mutex_release",
+     "alpc_create_port",
 +    "release_fd_loan",
-     "get_directory_cache_entry",
-     "flush",
-     "get_file_info",
+ };
+ 
+ static const struct
 @@ -4515,6 +4524,7 @@ static const struct
      { "ERROR_INVALID_WINDOW_HANDLE", 0xc0010000 | ERROR_INVALID_WINDOW_HANDLE },
      { "ERROR_NO_MORE_USER_HANDLES",  0xc0010000 | ERROR_NO_MORE_USER_HANDLES },

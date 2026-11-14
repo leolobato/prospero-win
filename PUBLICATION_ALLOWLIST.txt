@@ -460,6 +460,7 @@ tests/test_wine_file_handles.py
 tests/wine_file_handles.c
 tests/test_wine_written_files.py
 tests/wine_written_files.c
+tests/test_wine_request_order.py
 tests/test_wine_fiber_stacks.py
 tests/wine_fiber_stacks.c
 tests/test_d3d12_control.py
