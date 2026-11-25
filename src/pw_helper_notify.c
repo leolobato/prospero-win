@@ -51,10 +51,15 @@ void pw_helper_failure_text(const char *name, const char *reason, char *out, siz
     append(out, size, name);
     append(out, size, " didn't start");
     if (clean[0]) {
+        size_t n = strlen(clean);
+
+        while (n && (clean[n - 1] == ' ' || clean[n - 1] == '.')) clean[--n] = 0;
         append(out, size, ": ");
         append(out, size, clean);
     }
-    append(out, size, ". The game runs without it; close the game and try again.");
+    append(out, size, ".");
+    /* A reason of more than one sentence carries its own advice. */
+    if (!strstr(clean, ". ")) append(out, size, " Close the game and try again.");
 }
 
 int pw_helper_ready_failed(const char *text, size_t length, char *reason, size_t size)

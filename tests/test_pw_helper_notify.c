@@ -24,9 +24,16 @@ int main(void)
 
     /* Why it didn't start, for the player. */
     pw_helper_failure_text("Steam", "sign-in timed out", out, sizeof(out));
-    assert(!strcmp(out, "Steam didn't start: sign-in timed out. The game runs without it; close the game and try again."));
+    assert(!strcmp(out, "Steam didn't start: sign-in timed out. Close the game and try again."));
     pw_helper_failure_text("Steam", "", out, sizeof(out));
-    assert(!strcmp(out, "Steam didn't start. The game runs without it; close the game and try again."));
+    assert(!strcmp(out, "Steam didn't start. Close the game and try again."));
+    /* A reason that says what to do replaces the advice, with or without its period. */
+    pw_helper_failure_text("Launcher", "No sign-in. Sign in first", out, sizeof(out));
+    assert(!strcmp(out, "Launcher didn't start: No sign-in. Sign in first."));
+    pw_helper_failure_text("Launcher", "No sign-in. Sign in first.", out, sizeof(out));
+    assert(!strcmp(out, "Launcher didn't start: No sign-in. Sign in first."));
+    pw_helper_failure_text("Steam", "sign-in timed out.", out, sizeof(out));
+    assert(!strcmp(out, "Steam didn't start: sign-in timed out. Close the game and try again."));
     pw_helper_failure_text("Steam", "a\tb", out, sizeof(out));
     assert(strstr(out, ": a b."));
 

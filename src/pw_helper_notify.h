@@ -17,8 +17,9 @@ enum { PW_HELPER_NOTIFY_NAME = 64, PW_HELPER_NOTIFY_TEXT = 256 };
  * "The helper" when the program has no usable name. */
 void pw_helper_display_name(const char *program, char *out, size_t size);
 
-/* "<name> didn't start: <reason>. The game runs without it; close the game
- * and try again." Control characters in reason show as spaces. */
+/* "<name> didn't start: <reason>. Close the game and try again." A reason of
+ * more than one sentence ("No sign-in. Sign in first") ends the text instead
+ * of the advice. Control characters in reason show as spaces. */
 void pw_helper_failure_text(const char *name, const char *reason, char *out, size_t size);
 
 /* A ready file's first line: 1 and its reason when it is "failed <reason>",
