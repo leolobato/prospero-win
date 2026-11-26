@@ -848,3 +848,4 @@ wine/patches/1041-sechost-deliver-hosted-drivers-device-events-in-the-process.pa
 tests/test_wine_device_events.py
 wine/patches/1042-amd-ags-x64-add-a-built-in-amd-gpu-services-library.patch
 tests/test_wine_amd_ags.py
+wine/patches/1043-ntdll-ps5-place-a-reservation-above-the-host-limit-anywhere.patch

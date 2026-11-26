@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Tue, 24 Nov 2026 20:00:00 +0100
+Subject: [PATCH] ntdll: Place a PS5 reservation above the host limit
+ anywhere, on request.
+
+A reservation at an address above the host's address space can never be
+mapped on the console: map_view refuses it (STATUS_CONFLICTING_ADDRESSES),
+while the program is told the Windows 128 TiB range is its own. Early
+mimalloc (Death Stranding Director's Cut bundles one) reserves its 256 MiB
+regions and 4 MiB segments at a hint between 4 and 30 TiB and returns
+whatever VirtualAlloc gives, with no retry without the hint, so every such
+allocation fails, malloc returns NULL and the game stops at start.
+
+With PW_PS5_HIGH_HINT_ANYWHERE=1 (a profile's [debug] env), a MEM_RESERVE
+at an address beyond the host limit, other than a placeholder reservation
+or replacement, is placed anywhere, as if no address had been given, and
+the address it got is returned. It keeps the alignment of the address
+asked for, up to 64 MiB: mimalloc wants 4 MiB aligned regions and, given
+an unaligned one, retries through VirtualAlloc2 with both an address and
+an alignment requirement, which is refused. Windows would return the
+address asked for or fail, so this stays off unless a game asks for it.
+The first one is reported on stderr (wine-ps5: reservation at ... placed
+anywhere).
+---
+  dlls/ntdll/unix/virtual.c | 49 +++++++++++++++++++++++++++++++++++++++++++++++
+  1 file changed, 49 insertions(+)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index eac3a73..c0b6990 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -6204,6 +6204,25 @@ static void ps5_log_wow_views( ULONG_PTR limit_high, SIZE_T size )
+  *
+  * NtAllocateVirtualMemory[Ex] implementation.
+  */
++#ifdef __PROSPERO__
++/* PW_PS5_HIGH_HINT_ANYWHERE=1: a reservation asked for at an address above the
++ * host's address space, which the console can never map, is placed anywhere
++ * instead of failing. Windows would give that address or fail, so this is for
++ * programs that pass an address only as a hint and use whatever comes back:
++ * early mimalloc picks hints between 4 and 30 TiB and has no fallback. */
++static BOOL high_hint_anywhere(void)
++{
++    static int enabled = -1;
++
++    if (enabled == -1)
++    {
++        const char *env = getenv( "PW_PS5_HIGH_HINT_ANYWHERE" );
++        enabled = env && env[0] == '1' && !env[1];
++    }
++    return enabled;
++}
++#endif
++
+ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG type, ULONG protect,
+                                          ULONG_PTR limit_low, ULONG_PTR limit_high,
+                                          ULONG_PTR align, ULONG attributes )
+@@ -6244,6 +6263,36 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
+         size = ROUND_SIZE( 0, size, page_mask );
+     }
+ 
++#ifdef __PROSPERO__
++    if (base && host_addr_space_limit && !is_dos_memory && (type & MEM_RESERVE) &&
++        !(type & (MEM_REPLACE_PLACEHOLDER | MEM_RESERVE_PLACEHOLDER)) &&
++        is_beyond_limit( base, size, host_addr_space_limit ) && high_hint_anywhere())
++    {
++        static BOOL logged;
++
++        if (!logged)
++        {
++            logged = TRUE;
++            fprintf( stderr, "wine-ps5: reservation at %p (size %lx) is above the host limit %p; "
++                     "placed anywhere (PW_PS5_HIGH_HINT_ANYWHERE)\n", base, (unsigned long)size,
++                     host_addr_space_limit );
++        }
++        TRACE( "reservation at %p size %lx above the host limit, placed anywhere\n", base, size );
++        /* Keep the hint's alignment (up to 64 MiB): mimalloc asks for 4 MiB
++         * aligned regions and, given an unaligned one, retries through an
++         * address with alignment requirements, which is refused. */
++        if (!align)
++        {
++            ULONG_PTR hint_align = (ULONG_PTR)base & (~(ULONG_PTR)base + 1);
++
++            if (hint_align > (ULONG_PTR)64 << 20) hint_align = (ULONG_PTR)64 << 20;
++            if (hint_align > granularity_mask + 1) align = hint_align;
++        }
++        size = ROUND_SIZE( 0, *size_ptr, page_mask );
++        base = NULL;
++    }
++#endif
++
+     /* Compute the alloc type flags */
+ 
+     if (!(type & (MEM_COMMIT | MEM_RESERVE | MEM_RESET))
+-- 
+2.47.0
