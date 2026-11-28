@@ -174,6 +174,9 @@ typedef struct Run {
     /* With protecting: pages protected, write faults, pages sent back to
      * the checks, and engine resets the faults caused. */
     uint64_t protects, faults, demotions, resets;
+    /* Engine resets asked for with PW_ERR_LIMIT, and the longest lookup. */
+    uint64_t limit_resets;
+    uint32_t max_probe;
 } Run;
 
 /* Run the guest from low + CODE until it returns to SENTINEL, with no memory
@@ -223,7 +226,17 @@ static Run run(unsigned config)
             pw_x86_engine_fp_sync(&engine, &r.state);
             r.status = PW_OK;
         }
+        /* As wowprospero's run(): a full table, or too many retired blocks,
+         * starts the cache over and the step runs again. */
+        if (r.status == PW_ERR_LIMIT) {
+            if (engine.cache.max_probe > r.max_probe) r.max_probe = engine.cache.max_probe;
+            pw_x86_engine_fp_sync(&engine, &r.state);
+            assert(pw_x86_engine_reset(&engine, ++generation) == PW_OK);
+            r.limit_resets++;
+            r.status = PW_OK;
+        }
     }
+    if (engine.cache.max_probe > r.max_probe) r.max_probe = engine.cache.max_probe;
     current = NULL;
     current_state = NULL;
     if (protecting) {
@@ -578,6 +591,50 @@ static void test_reaching_writable(void)
     }
 }
 
+/* Code that writes new code over itself every time round (Fallout's movie
+ * player): each version is new, so none comes back, and each retires the one
+ * before at the same address. Retired blocks keep their slots, so the
+ * address's probe chain would grow with every rewrite; the engine starts the
+ * cache over before it gets long. */
+static void test_rewritten_every_time(void)
+{
+    enum { ROUNDS = 600 };
+    const uint32_t f = low + WRITABLE;
+
+    for (unsigned config = 0; config < CONFIGS; config++) {
+        static const uint8_t f1[] = { 0xb8, 0, 0, 0, 0, 0xc3 };    /* mov eax, imm; ret */
+        uint8_t main[64];
+        size_t n = 0, loop;
+
+        trusting = 0;
+        protecting = 0;
+        reset_code();
+        place(WRITABLE, f1, sizeof(f1));
+        main[n++] = 0x31; main[n++] = 0xc9;                                    /* xor ecx, ecx */
+        main[n++] = 0x31; main[n++] = 0xdb;                                    /* xor ebx, ebx */
+        loop = n;
+        main[n++] = 0x89; main[n++] = 0x0d; put32(main + n, f + 1); n += 4;   /* mov [f+1], ecx */
+        main[n++] = 0xe8; put32(main + n, f - (low + CODE + n + 4)); n += 4;   /* call f */
+        main[n++] = 0x01; main[n++] = 0xc3;                                    /* add ebx, eax */
+        main[n++] = 0x41;                                                      /* inc ecx */
+        main[n++] = 0x81; main[n++] = 0xf9; put32(main + n, ROUNDS); n += 4;  /* cmp ecx, ROUNDS */
+        main[n++] = 0x0f; main[n++] = 0x85;
+        put32(main + n, (uint32_t)(loop - (n + 4))); n += 4;                   /* jne loop */
+        main[n++] = 0xc3;                                                      /* ret */
+        place(CODE, main, n);
+        Run r = run(config);
+        if (r.status != PW_OK || r.state.eip != SENTINEL || r.max_probe > 64)
+            fprintf(stderr, "%s: status %d eip +%x ebx %u stale %llu retired %llu limit resets %llu max probe %u\n",
+                    names[config], r.status, r.state.eip - low, r.state.gpr[3], (unsigned long long)r.stale,
+                    (unsigned long long)r.retired, (unsigned long long)r.limit_resets, r.max_probe);
+        assert(r.status == PW_OK && r.state.eip == SENTINEL);
+        assert(r.state.gpr[3] == ROUNDS * (ROUNDS - 1) / 2);
+        assert(r.stale >= ROUNDS - 1);
+        assert(r.max_probe <= 64);
+        assert(r.limit_resets >= 2);
+    }
+}
+
 int main(void)
 {
     /* Aligned to the host page write protection uses. */
@@ -607,8 +664,9 @@ int main(void)
     test_written_once();
     test_data_next_to_code();
     test_reaching_writable();
+    test_rewritten_every_time();
     printf("x86 self-modifying code passed: rewritten functions, Mod Loader's hook toggle, "
            "blocks reaching writable code, read-only code unchecked, write-protected code "
-           "(written once, toggled, next to data)\n");
+           "(written once, toggled, next to data), code rewritten every time round\n");
     return 0;
 }

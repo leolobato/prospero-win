@@ -6,7 +6,11 @@
 
 enum { PW_X86_ENGINE_MAX_SOURCE=15*32, PW_X86_ENGINE_MAX_CODE=16384,
        PW_X86_ENGINE_INDIRECT_SLOTS=8192, PW_X86_ENGINE_FAULT_GRANULE=256,
-       PW_X86_ENGINE_CALL_STACK_GUARD=0x10000 };
+       PW_X86_ENGINE_CALL_STACK_GUARD=0x10000,
+       /* Retired blocks one guest PC may hold before the cache starts over:
+        * each keeps its slot, so code rewritten every time round would make
+        * that PC's probe chain as long as the number of rewrites. */
+       PW_X86_ENGINE_RETIRED_PER_PC=16 };
 
 /* Return one immutable executable source span beginning at guest_pc. The span
  * remains alive and unchanged for the engine generation. */
@@ -56,6 +60,11 @@ typedef struct PwX86Engine {
     /* TSC ticks spent translating and publishing (x86 hosts; 0 elsewhere). */
     uint64_t compile_cycles;
     uint32_t retired_blocks;
+    /* A PC reached PW_X86_ENGINE_RETIRED_PER_PC retired blocks: the next
+     * translation returns PW_ERR_LIMIT, so the caller resets the cache as for
+     * a full table; and how often that happened (survives resets). */
+    unsigned flush_wanted;
+    uint64_t retired_flushes;
     uint64_t dispatches,retired_instructions,compiles;
     PwX86ExecutionClock execution_clock;
     void *execution_clock_opaque;

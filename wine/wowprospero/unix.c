@@ -1286,7 +1286,7 @@ static void cache_report( struct pw_thread *thread, uint64_t wall, unsigned fina
              "generation=%u capacity=%u occupied=%llu arena_used=%zu arena_bytes=%zu "
              "hits=%llu misses=%llu probes=%llu max_probe=%u publishes=%llu resets=%llu "
              "stale=%llu retired=%llu revived=%llu smc_protects=%llu smc_faults=%llu smc_flushes=%llu "
-             "smc_demotions=%llu jump_tables=%llu\n",
+             "smc_demotions=%llu jump_tables=%llu retired_flushes=%llu\n",
              (unsigned)(uintptr_t)NtCurrentTeb()->ClientId.UniqueThread,
              (unsigned long long)thread->cache_report_id, (unsigned long long)wall, final,
              cache->generation, cache->capacity,
@@ -1299,7 +1299,8 @@ static void cache_report( struct pw_thread *thread, uint64_t wall, unsigned fina
              (unsigned long long)smc.protects, (unsigned long long)__atomic_load_n( &smc.faults, __ATOMIC_RELAXED ),
              (unsigned long long)__atomic_load_n( &smc.flushes, __ATOMIC_RELAXED ),
              (unsigned long long)__atomic_load_n( &smc.demotions, __ATOMIC_RELAXED ),
-             (unsigned long long)thread->engine.jump_table_blocks );
+             (unsigned long long)thread->engine.jump_table_blocks,
+             (unsigned long long)thread->engine.retired_flushes );
     /* The host pages whose translations check their source on every entry
      * (smc_pages.h CHECKED), once per report from the first thread only:
      * hot code there pays for the check. */
