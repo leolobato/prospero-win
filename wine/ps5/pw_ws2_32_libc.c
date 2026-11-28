@@ -242,17 +242,80 @@ static int pw_is_local_name(const char *name)
     return !strcasecmp(name, "localhost") || !strcasecmp(name, pw_hostname);
 }
 
+/* An IPv4 address as the IPv4-mapped IPv6 address ::ffff:a.b.c.d. */
+static void pw_map_v4(struct pw_ws2_address *address)
+{
+    unsigned char v4[4];
+
+    memcpy(v4, address->bytes, sizeof(v4));
+    memset(address->bytes, 0, sizeof(address->bytes));
+    address->bytes[10] = address->bytes[11] = 0xff;
+    memcpy(address->bytes + 12, v4, sizeof(v4));
+    address->family = AF_INET6;
+}
+
+/* NODE asked of the backend for one FAMILY, through the negative cache. */
+static int pw_resolve_family(const char *node, int family, struct pw_ws2_address addresses[2], int *count)
+{
+    int error;
+
+    *count = 0;
+    if (pw_negative_known(node, family))
+        return EAI_NONAME;
+    if ((error = pw_ws2_32_resolve(node, family, addresses, count)) || !*count) {
+        *count = 0;
+        if (!error || error == EAI_NONAME)
+            pw_negative_remember(node, family);
+        return error ? error : EAI_NONAME;
+    }
+    return 0;
+}
+
+/* AF_INET6 with AI_V4MAPPED, as a program with a dual-stack IPv6 socket asks
+ * (PlayFab Party: AF_INET6, AI_V4MAPPED | AI_ALL): the IPv6 answer as
+ * before, and when there is none, or with AI_ALL, the IPv4 one as
+ * ::ffff:a.b.c.d, IPv4 first as everywhere here. A host with only an A
+ * record was not found. Each family is its own question, cached on its own. */
+static int pw_resolve_mapped(const char *node, int flags, struct pw_ws2_address addresses[2], int *count)
+{
+    struct pw_ws2_address v6[2], v4[2];
+    int found6 = 0, found4 = 0, error6, error4;
+
+    memset(v6, 0, sizeof(v6));
+    memset(v4, 0, sizeof(v4));
+    error6 = pw_resolve_family(node, AF_INET6, v6, &found6);
+    *count = 0;
+    if (found6 && !(flags & AI_ALL)) {
+        memcpy(addresses, v6, sizeof(v6));
+        *count = found6;
+        return 0;
+    }
+    error4 = pw_resolve_family(node, AF_INET, v4, &found4);
+    for (int i = 0; i < found4 && *count < 2; i++) {
+        addresses[*count] = v4[i];
+        pw_map_v4(&addresses[(*count)++]);
+    }
+    for (int i = 0; i < found6 && *count < 2; i++)
+        addresses[(*count)++] = v6[i];
+    if (*count)
+        return 0;
+    return error4 && error4 != EAI_NONAME ? error4 : error6 ? error6 : EAI_NONAME;
+}
+
 /* The addresses NODE stands for in FAMILY, IPv4 first: that is what a
  * title's sockets use. */
 static int pw_lookup(const char *node, int family, int flags, struct pw_ws2_address addresses[2], int *count)
 {
     int wildcard = !node && (flags & AI_PASSIVE);
+    int mapped = family == AF_INET6 && (flags & AI_V4MAPPED);
 
     memset(addresses, 0, 2 * sizeof(*addresses));
     *count = 1;
     if (node) {
-        if (family != AF_INET6 && inet_pton(AF_INET, node, addresses[0].bytes) == 1) {
+        if ((family != AF_INET6 || mapped) && inet_pton(AF_INET, node, addresses[0].bytes) == 1) {
             addresses[0].family = AF_INET;
+            if (mapped)
+                pw_map_v4(&addresses[0]);
             return 0;
         }
         if (family != AF_INET && inet_pton(AF_INET6, node, addresses[0].bytes) == 1) {
@@ -262,21 +325,21 @@ static int pw_lookup(const char *node, int family, int flags, struct pw_ws2_addr
         if (flags & AI_NUMERICHOST)
             return EAI_NONAME;
         if (!pw_is_local_name(node)) {
-            int error;
             /* Only a dotted name is asked of the resolver (see the top). */
             if (!*node || !strchr(node, '.') || !pw_ws2_32_resolve)
                 return EAI_NONAME;
-            if (pw_negative_known(node, family))
-                return EAI_NONAME;
-            if ((error = pw_ws2_32_resolve(node, family, addresses, count)) || !*count) {
-                if (!error || error == EAI_NONAME)
-                    pw_negative_remember(node, family);
-                return error ? error : EAI_NONAME;
-            }
-            return 0;
+            if (mapped)
+                return pw_resolve_mapped(node, flags, addresses, count);
+            return pw_resolve_family(node, family, addresses, count);
         }
     }
     *count = 0;
+    /* A local name's loopback, with AI_ALL also as IPv4-mapped. */
+    if (node && mapped && (flags & AI_ALL)) {
+        addresses[*count].bytes[0] = 127;
+        addresses[*count].bytes[3] = 1;
+        pw_map_v4(&addresses[(*count)++]);
+    }
     if (family != AF_INET6) {
         addresses[*count].family = AF_INET;
         if (!wildcard) {

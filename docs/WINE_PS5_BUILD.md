@@ -1288,7 +1288,11 @@ The runtime is staged beside the title:
   does, 5 s and two retries per attempt, so a lookup ends within 15 s per
   address family; the AAAA question is only asked when IPv6 was asked for
   or there was no A, and one address per family is returned, so a program
-  does not fail over between a host's several A records). `gethostname`
+  does not fail over between a host's several A records). IPv6 with
+  `AI_V4MAPPED`, as a dual-stack IPv6 socket asks (PlayFab Party), asks
+  for the AAAA and then the A, and returns the IPv4 answer as
+  `::ffff:a.b.c.d`; without `AI_ALL` only when there is no AAAA, with it
+  first, before the IPv6 one. `gethostname`
   reports the stable name `PS5`, which resolves to loopback before any
   resolver is reached: a game's probe of its own host name (GTA IV, tens
   of thousands of times a minute) stays local and instant. Any other name

@@ -51,15 +51,26 @@ static struct addrinfo hints_of(int family, int socktype, int protocol, int flag
 }
 
 /* A resolver backend as the console's: example.com has one address per
- * family; anything else is unknown. Counts its calls, so the names the
- * stub answers itself are seen to stay away from it. */
+ * family, v4only.example only an IPv4 one; anything else is unknown.
+ * Counts its calls, and keeps the family last asked, so the names the stub
+ * answers itself are seen to stay away from it. */
 static int backend_calls;
+static int backend_family = -1;
 static long long fake_now = 1000;
 static long long fake_clock(void) { return fake_now; }
 static int fake_resolve(const char *name, int family, struct pw_ws2_address answers[2], int *found)
 {
     backend_calls++;
+    backend_family = family;
     *found = 0;
+    if (!strcmp(name, "v4only.example")) {
+        if (family == AF_INET6)
+            return EAI_NONAME;
+        answers[0].family = AF_INET;
+        memcpy(answers[0].bytes, "\x5d\xb8\xd8\x22", 4);     /* 93.184.216.34 */
+        *found = 1;
+        return 0;
+    }
     if (strcmp(name, "example.com"))
         return EAI_NONAME;
     if (family != AF_INET6) {
@@ -125,6 +136,81 @@ static void test_resolver_backend(void)
     assert(!getaddrinfo("ps5", NULL, NULL, &info) && !strcmp(text(info), "127.0.0.1")); freeaddrinfo(info);
     assert(gethostbyname("Ps5") && !memcmp(gethostbyname("Ps5")->h_addr_list[0], "\x7f\0\0\x01", 4));
     assert(backend_calls == 5);
+    pw_ws2_32_resolve = NULL;
+}
+
+/* AF_INET6 with AI_V4MAPPED, the way a dual-stack IPv6 socket's owner asks
+ * (PlayFab Party: AF_INET6, AI_V4MAPPED | AI_ALL, UDP): a host with only an
+ * IPv4 address answers ::ffff:a.b.c.d, as on Windows, instead of not found.
+ * Each family is its own question to the backend, as on the console, whose
+ * resolver asks for an AAAA only when there is no A. */
+static void test_v4mapped(void)
+{
+    struct addrinfo hints = hints_of(AF_INET6, SOCK_DGRAM, 0, 0), *info;
+
+    pw_ws2_32_resolve = fake_resolve;
+    pw_ws2_32_now = fake_clock;
+    fake_now = 9000;
+    backend_calls = 0;
+    /* Without AI_V4MAPPED an IPv4-only host is not found for AF_INET6, and
+     * that is remembered for AF_INET6. */
+    assert(getaddrinfo("v4only.example", NULL, &hints, &info) == EAI_NONAME && !info);
+    assert(backend_calls == 1 && backend_family == AF_INET6);
+    /* With it the IPv4 address comes back mapped: the AAAA miss is the
+     * cached one, so only the A question reaches the backend. */
+    hints = hints_of(AF_INET6, SOCK_DGRAM, IPPROTO_UDP, AI_V4MAPPED | AI_ALL);
+    assert(!getaddrinfo("v4only.example", NULL, &hints, &info));
+    assert(count(info) == 1 && info->ai_family == AF_INET6 && !strcmp(text(info), "::ffff:93.184.216.34"));
+    assert(info->ai_addrlen == sizeof(struct sockaddr_in6) && info->ai_socktype == SOCK_DGRAM && port(info) == 0);
+    freeaddrinfo(info);
+    assert(backend_calls == 2 && backend_family == AF_INET);
+    /* AI_V4MAPPED alone gives the same when there is no IPv6 address. */
+    hints = hints_of(AF_INET6, SOCK_STREAM, 0, AI_V4MAPPED);
+    assert(!getaddrinfo("v4only.example", "443", &hints, &info));
+    assert(count(info) == 1 && !strcmp(text(info), "::ffff:93.184.216.34") && port(info) == 443);
+    freeaddrinfo(info);
+    /* A dual-stack host: its IPv6 address alone without AI_ALL, asked only
+     * for the AAAA, as before AI_V4MAPPED counted; both with AI_ALL, IPv4
+     * first. */
+    backend_calls = 0;
+    assert(!getaddrinfo("example.com", NULL, &hints, &info));
+    assert(count(info) == 1 && !strcmp(text(info), "2606:2800::46"));
+    freeaddrinfo(info);
+    assert(backend_calls == 1 && backend_family == AF_INET6);
+    hints.ai_flags = AI_V4MAPPED | AI_ALL;
+    assert(!getaddrinfo("example.com", NULL, &hints, &info));
+    assert(count(info) == 2 && !strcmp(text(info), "::ffff:93.184.216.34"));
+    assert(!strcmp(text(info->ai_next), "2606:2800::46"));
+    freeaddrinfo(info);
+    assert(backend_calls == 3);
+    /* A numeric IPv4 address is mapped too, without the backend. */
+    backend_calls = 0;
+    assert(!getaddrinfo("44.55.66.77", "80", &hints, &info));
+    assert(count(info) == 1 && info->ai_family == AF_INET6 && !strcmp(text(info), "::ffff:44.55.66.77"));
+    freeaddrinfo(info);
+    hints.ai_flags = AI_V4MAPPED | AI_NUMERICHOST;
+    assert(!getaddrinfo("44.55.66.77", NULL, &hints, &info) && !strcmp(text(info), "::ffff:44.55.66.77"));
+    freeaddrinfo(info);
+    /* A local name is ::1, with AI_ALL also ::ffff:127.0.0.1 first. */
+    hints.ai_flags = AI_V4MAPPED;
+    assert(!getaddrinfo("localhost", NULL, &hints, &info));
+    assert(count(info) == 1 && !strcmp(text(info), "::1"));
+    freeaddrinfo(info);
+    hints.ai_flags = AI_V4MAPPED | AI_ALL;
+    assert(!getaddrinfo("PS5", NULL, &hints, &info));
+    assert(count(info) == 2 && !strcmp(text(info), "::ffff:127.0.0.1") && !strcmp(text(info->ai_next), "::1"));
+    freeaddrinfo(info);
+    assert(backend_calls == 0);
+    /* AI_V4MAPPED with any other family changes nothing. */
+    hints = hints_of(AF_INET, SOCK_DGRAM, 0, AI_V4MAPPED);
+    assert(!getaddrinfo("v4only.example", NULL, &hints, &info));
+    assert(count(info) == 1 && info->ai_family == AF_INET && !strcmp(text(info), "93.184.216.34"));
+    freeaddrinfo(info);
+    /* An unknown name is asked once per family, then remembered. */
+    hints = hints_of(AF_INET6, SOCK_DGRAM, 0, AI_V4MAPPED | AI_ALL);
+    backend_calls = 0;
+    assert(getaddrinfo("gone.example", NULL, &hints, &info) == EAI_NONAME && !info && backend_calls == 2);
+    assert(getaddrinfo("gone.example", NULL, &hints, &info) == EAI_NONAME && !info && backend_calls == 2);
     pw_ws2_32_resolve = NULL;
 }
 
@@ -420,6 +506,7 @@ int main(void)
     test_hostent();
     test_resolver_backend();
     test_negative_cache();
+    test_v4mapped();
     puts("pw_ws2_32_libc: ok");
     return 0;
 }
