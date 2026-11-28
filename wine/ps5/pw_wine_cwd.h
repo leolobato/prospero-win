@@ -142,11 +142,17 @@ void pw_cwd_listings_enable(int enable);
 typedef int (*pw_cwd_visit)(const char *name, void *context);
 /* Visit the names of the directory fstatat(dirfd, path) names, from memory
  * when nothing has changed since they were read. The visitor's nonzero
- * result, 0 after every name, or -1 with errno. After every name, *flags has
+ * result, 0 after every name, or -1 with errno. The directory's virtual links
+ * are visited after its own names. After every name, *flags has
  * PW_CWD_NO_REPARSE_NAMES when no name in the directory, virtual links
  * included, ends in "?". */
 int pw_cwd_scan_directory(int dirfd, const char *path, pw_cwd_visit visit, void *context,
                           unsigned int *flags);
+/* Visit the names of directory's (folded) virtual links, as written in its
+ * table, until the visitor returns nonzero: a lookup in another letter case
+ * finds a link as it finds a file. Its result, 0 after every name, or -1
+ * with errno ENOMEM. The visitor runs with no lock held. */
+int pw_cwd_links_visit(const char *directory, pw_cwd_visit visit, void *context);
 
 /* The listing store pw_cwd_scan_directory() uses; dir is the directory's
  * stat and changes the count read before it. 1 when a kept listing was
